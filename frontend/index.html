@@ -27,9 +27,27 @@
                 <p class="description">
                     Upload your lead data file (CSV or Excel .xlsx).
                     Columns are detected automatically.
-                    The system will generate 8 personalized cold emails per lead
-                    using AI and return an enriched CSV.
+                    Select a template below, then upload your file.
                 </p>
+
+                <!-- Template Selector -->
+                <div class="template-selector">
+                    <label for="template-select">Template</label>
+                    <select id="template-select">
+                        <option value="cold_email" selected>Cold Email Sequences</option>
+                    </select>
+                    <p id="template-description" class="template-desc">
+                        Generate 8 personalized cold emails per lead for Microsoft licensing outreach.
+                    </p>
+                </div>
+
+                <!-- Custom Prompt (shown only when "custom" is selected) -->
+                <div id="custom-prompt-section" class="custom-prompt-section" hidden>
+                    <label for="custom-prompt">Custom System Prompt</label>
+                    <textarea id="custom-prompt" rows="8" maxlength="10000"
+                        placeholder="Paste your custom system prompt here. The model will receive all lead data as context."></textarea>
+                    <p class="char-count"><span id="char-count">0</span> / 10,000</p>
+                </div>
 
                 <div class="upload-area" id="drop-zone">
                     <div class="upload-icon">&#128196;</div>
@@ -45,7 +63,7 @@
                 </div>
 
                 <button id="upload-btn" class="btn btn-primary" disabled>
-                    Generate Email Sequences
+                    Generate Sequences
                 </button>
 
                 <div id="upload-error" class="error" hidden></div>

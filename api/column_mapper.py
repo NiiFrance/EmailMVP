@@ -9,6 +9,7 @@ logger = logging.getLogger("emailmvp")
 # The five required fields and keyword patterns for fuzzy matching.
 # Keys are the internal field names used throughout the app.
 # Values are lists of lowercase substrings / patterns to match against headers.
+# This is the DEFAULT set used when no template-specific fields are provided.
 REQUIRED_FIELDS = {
     "first_name": ["first name", "firstname", "first_name", "fname", "given name", "givenname", "prenom"],
     "last_name": ["last name", "lastname", "last_name", "lname", "surname", "family name", "familyname", "nom"],
@@ -21,6 +22,7 @@ REQUIRED_FIELDS = {
 # Prevents e.g. "organization_domain_1" from matching the organization field.
 _DISQUALIFY = {
     "organization": ["domain", "url", "id", "start", "end", "description", "location", "website", "position", "industry", "title"],
+    "organisation_name": ["domain", "url", "id", "start", "end", "description", "location", "website", "position", "industry", "title"],
 }
 
 
@@ -40,16 +42,22 @@ def _is_disqualified(field: str, normalized_header: str) -> bool:
     return False
 
 
-def fuzzy_match_columns(headers: list[str]) -> dict[str, int | None]:
+def fuzzy_match_columns(headers: list[str], required_fields: dict | None = None) -> dict[str, int | None]:
     """Match spreadsheet headers to required fields using keyword patterns.
+
+    Args:
+        headers: List of column header strings from the spreadsheet.
+        required_fields: Optional dict mapping field names to keyword lists.
+                         Defaults to REQUIRED_FIELDS if not provided.
 
     Returns a dict mapping each required field name to its column index, or None
     if no confident match was found.
     """
-    matched: dict[str, int | None] = {field: None for field in REQUIRED_FIELDS}
+    fields = required_fields or REQUIRED_FIELDS
+    matched: dict[str, int | None] = {field: None for field in fields}
     used_indices: set[int] = set()
 
-    for field, keywords in REQUIRED_FIELDS.items():
+    for field, keywords in fields.items():
         for idx, header in enumerate(headers):
             if idx in used_indices:
                 continue
@@ -132,6 +140,7 @@ def resolve_columns(
     headers: list[str],
     client=None,
     deployment: str = "",
+    required_fields: dict | None = None,
 ) -> dict[str, int]:
     """Resolve all required fields to column indices.
 
@@ -139,10 +148,18 @@ def resolve_columns(
     2. For any unresolved fields, try LLM if a client is provided.
     3. Raise ValueError if any required field is still unresolved.
 
+    Args:
+        headers: List of column header strings.
+        client: Optional AzureOpenAI client for LLM fallback.
+        deployment: Model deployment name.
+        required_fields: Optional dict mapping field names to keyword lists.
+                         Defaults to REQUIRED_FIELDS if not provided.
+
     Returns:
         A dict mapping each required field name to its 0-based column index.
     """
-    matched = fuzzy_match_columns(headers)
+    fields = required_fields or REQUIRED_FIELDS
+    matched = fuzzy_match_columns(headers, fields)
 
     unresolved = [f for f, idx in matched.items() if idx is None]
 
@@ -158,7 +175,7 @@ def resolve_columns(
         raise ValueError(
             f"Could not detect required columns: {', '.join(still_missing)}. "
             f"Please ensure your file has columns for: "
-            f"{', '.join(REQUIRED_FIELDS.keys())}"
+            f"{', '.join(fields.keys())}"
         )
 
     # At this point every value is an int (not None)

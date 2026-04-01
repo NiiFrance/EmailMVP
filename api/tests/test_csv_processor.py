@@ -348,6 +348,47 @@ class TestConstants:
     def test_output_headers_count(self):
         assert len(OUTPUT_HEADERS) == 16
 
+
+# ---------------------------------------------------------------------------
+# assemble_enriched_csv — dynamic output headers / flatten
+# ---------------------------------------------------------------------------
+
+class TestAssembleEnrichedCSVDynamic:
+    def test_custom_output_headers(self):
+        """Custom output headers should appear in the output CSV."""
+        csv_bytes = b"Name,Email\nAlice,alice@example.com\n"
+        results = [{"row_index": 0, "parsed": [{"greeting": "Hello", "tone": "warm"}]}]
+        custom_headers = ["greeting", "tone"]
+        flat_fn = lambda parsed: {k: v for item in parsed for k, v in item.items()}
+
+        enriched = assemble_enriched_csv(csv_bytes, results,
+                                          output_headers=custom_headers,
+                                          flatten_result=flat_fn)
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert "greeting" in df.columns
+        assert "tone" in df.columns
+        assert df["greeting"].iloc[0] == "Hello"
+        assert df["tone"].iloc[0] == "warm"
+
+    def test_error_fills_all_custom_columns(self):
+        """Errors should fill all dynamic output columns."""
+        csv_bytes = b"Name\nBob\n"
+        results = [{"row_index": 0, "error": "Timeout"}]
+        custom_headers = ["col_a", "col_b", "col_c"]
+
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=custom_headers)
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert "[ERROR: Timeout]" in df["col_a"].iloc[0]
+        assert "[ERROR: Timeout]" in df["col_c"].iloc[0]
+
+    def test_legacy_email_format_still_works(self):
+        """When no output_headers/flatten_result are passed, legacy email format works."""
+        csv_bytes = _build_csv_bytes([_make_lead_row()])
+        results = _make_email_results(1)
+        enriched = assemble_enriched_csv(csv_bytes, results)
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert df["Subject_Touch1"].iloc[0] == "Subject T1 R0"
+
     def test_output_headers_pattern(self):
         assert OUTPUT_HEADERS[0] == "Subject_Touch1"
         assert OUTPUT_HEADERS[1] == "Body_Touch1"

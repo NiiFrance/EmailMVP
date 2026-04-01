@@ -20,6 +20,12 @@
     const uploadBtn     = document.getElementById("upload-btn");
     const uploadError   = document.getElementById("upload-error");
 
+    const templateSelect   = document.getElementById("template-select");
+    const templateDesc     = document.getElementById("template-description");
+    const customPromptSec  = document.getElementById("custom-prompt-section");
+    const customPromptArea = document.getElementById("custom-prompt");
+    const charCount        = document.getElementById("char-count");
+
     const progressFill    = document.getElementById("progress-fill");
     const progressStatus  = document.getElementById("progress-status");
     const progressPercent = document.getElementById("progress-percent");
@@ -45,6 +51,58 @@
     let pollTimer    = null;
     let startTime    = null;
     let elapsedTimer = null;
+    let templateData = [];  // cached template list from API
+
+    // ── Load Templates ──
+    async function loadTemplates() {
+        try {
+            const resp = await fetch("/api/templates");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            templateData = data.templates || [];
+
+            // Clear existing options and rebuild
+            templateSelect.innerHTML = "";
+            templateData.forEach((t) => {
+                const opt = document.createElement("option");
+                opt.value = t.id;
+                opt.textContent = t.name;
+                templateSelect.appendChild(opt);
+            });
+
+            // Add the "Custom Prompt" option
+            const customOpt = document.createElement("option");
+            customOpt.value = "custom";
+            customOpt.textContent = "Custom Prompt";
+            templateSelect.appendChild(customOpt);
+
+            // Set initial description
+            updateTemplateDescription();
+        } catch (err) {
+            // Fallback: keep the static cold_email option
+        }
+    }
+
+    function updateTemplateDescription() {
+        const selected = templateSelect.value;
+        if (selected === "custom") {
+            templateDesc.textContent = "Provide your own system prompt. The model receives all lead data as context.";
+            customPromptSec.hidden = false;
+        } else {
+            const tmpl = templateData.find((t) => t.id === selected);
+            templateDesc.textContent = tmpl ? tmpl.description : "";
+            customPromptSec.hidden = true;
+        }
+    }
+
+    templateSelect.addEventListener("change", updateTemplateDescription);
+
+    customPromptArea.addEventListener("input", () => {
+        charCount.textContent = customPromptArea.value.length;
+    });
+
+    // Load templates on page load
+    loadTemplates();
 
     // ── Helpers ──
     function showSection(section) {
@@ -132,6 +190,10 @@
 
         const formData = new FormData();
         formData.append("file", selectedFile);
+        formData.append("prompt_id", templateSelect.value);
+        if (templateSelect.value === "custom") {
+            formData.append("custom_prompt", customPromptArea.value);
+        }
 
         try {
             const resp = await fetch("/api/upload", {
@@ -155,6 +217,8 @@
             showSection(progressSection);
             jobIdDisplay.textContent = currentJobId;
             totalLeadsDisp.textContent = totalLeads;
+            const templateName = data.templateName || "Cold Email Sequences";
+            progressStatus.textContent = `Starting ${templateName}...`;
             startTime = Date.now();
             startTimeDisp.textContent = new Date(startTime).toLocaleTimeString();
             progressFill.style.width = "0%";
@@ -311,6 +375,8 @@
         startTime = null;
         clearFile();
         uploadBtn.classList.remove("loading");
+        customPromptArea.value = "";
+        charCount.textContent = "0";
         showSection(uploadSection);
     }
 

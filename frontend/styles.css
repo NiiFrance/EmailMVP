@@ -338,3 +338,80 @@ body {
     border-radius: 4px;
     font-size: 0.8125rem;
 }
+
+/* === Template Selector === */
+.template-selector {
+    margin-bottom: 1.25rem;
+}
+
+.template-selector label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.375rem;
+    font-size: 0.9375rem;
+    color: #1a1a2e;
+}
+
+.template-selector select {
+    width: 100%;
+    padding: 0.625rem 0.75rem;
+    border: 1px solid #c8d1dc;
+    border-radius: 8px;
+    font-size: 0.9375rem;
+    font-family: inherit;
+    background: #fff;
+    color: #1a1a2e;
+    appearance: auto;
+    cursor: pointer;
+}
+
+.template-selector select:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.15);
+}
+
+.template-desc {
+    color: #666;
+    font-size: 0.8125rem;
+    margin-top: 0.375rem;
+}
+
+/* === Custom Prompt Textarea === */
+.custom-prompt-section {
+    margin-bottom: 1.25rem;
+}
+
+.custom-prompt-section label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.375rem;
+    font-size: 0.9375rem;
+    color: #1a1a2e;
+}
+
+.custom-prompt-section textarea {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #c8d1dc;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 120px;
+    color: #1a1a2e;
+}
+
+.custom-prompt-section textarea:focus {
+    outline: none;
+    border-color: #0078d4;
+    box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.15);
+}
+
+.char-count {
+    text-align: right;
+    font-size: 0.75rem;
+    color: #999;
+    margin-top: 0.25rem;
+}

@@ -11,7 +11,7 @@ TOTAL_OUTPUT_COLS = NUM_TOUCHES * COLS_PER_TOUCH  # 16
 # Legacy constant kept for backwards compatibility with old tests/code
 OUTPUT_START_COL_INDEX = 74
 
-# Column header names for the 16 output columns
+# Column header names for the 16 output columns (cold email default)
 OUTPUT_HEADERS = []
 for i in range(1, NUM_TOUCHES + 1):
     OUTPUT_HEADERS.append(f"Subject_Touch{i}")
@@ -109,48 +109,68 @@ def extract_all_leads(df: pd.DataFrame, column_map: dict | None = None) -> list[
 def assemble_enriched_csv(
     original_csv_bytes: bytes,
     results: list[dict],
+    output_headers: list[str] | None = None,
+    flatten_result=None,
 ) -> bytes:
-    """Merge generated email data back into the original CSV.
+    """Merge generated data back into the original CSV.
 
     Output columns are appended at the end of the existing columns.
 
     Args:
         original_csv_bytes: The raw bytes of the uploaded CSV.
-        results: List of dicts, each with 'row_index' and 'emails' (list of 8 {subject, body} dicts).
-                 A result may also have 'error' instead of 'emails' for failed rows.
+        results: List of dicts, each with 'row_index' and either 'parsed' (pre-parsed data)
+                 or 'emails' (legacy cold email list) or 'error' for failed rows.
+        output_headers: List of column header names for output. Defaults to OUTPUT_HEADERS.
+        flatten_result: Callable that converts parsed data to {header: value} dict.
+                        If None, uses legacy cold email flattening.
 
     Returns:
         Enriched CSV as bytes.
     """
     df = parse_csv(original_csv_bytes)
 
+    # Determine output columns — use provided or fall back to cold email default
+    out_headers = output_headers or OUTPUT_HEADERS
+    total_out_cols = len(out_headers)
+
     # Determine where to start writing — append after the last existing column
     output_start = len(df.columns)
 
     # Add output columns
-    for header in OUTPUT_HEADERS:
+    for header in out_headers:
         df[header] = ""
 
-    # Fill in the generated emails
+    # Fill in the generated data
     for result in results:
         row_idx = result.get("row_index")
         if row_idx is None or row_idx >= len(df):
             continue
 
-        emails = result.get("emails")
         error = result.get("error")
 
         if error:
-            for i in range(TOTAL_OUTPUT_COLS):
+            for i in range(total_out_cols):
                 df.iloc[row_idx, output_start + i] = f"[ERROR: {error}]"
-        elif emails and len(emails) == NUM_TOUCHES:
-            for touch_idx, email in enumerate(emails):
-                subject_col = output_start + (touch_idx * 2)
-                body_col = output_start + (touch_idx * 2) + 1
-                df.iloc[row_idx, subject_col] = email.get("subject", "")
-                df.iloc[row_idx, body_col] = email.get("body", "")
+        elif flatten_result and "parsed" in result:
+            # New-style: template provides flatten function and pre-parsed data
+            flat = flatten_result(result["parsed"])
+            for col_name, value in flat.items():
+                if col_name in df.columns:
+                    df.at[row_idx, col_name] = value
+        elif "emails" in result:
+            # Legacy cold email format
+            emails = result["emails"]
+            if emails and len(emails) == NUM_TOUCHES:
+                for touch_idx, email in enumerate(emails):
+                    subject_col = output_start + (touch_idx * 2)
+                    body_col = output_start + (touch_idx * 2) + 1
+                    df.iloc[row_idx, subject_col] = email.get("subject", "")
+                    df.iloc[row_idx, body_col] = email.get("body", "")
+            else:
+                for i in range(total_out_cols):
+                    df.iloc[row_idx, output_start + i] = "[ERROR: Invalid response format]"
         else:
-            for i in range(TOTAL_OUTPUT_COLS):
+            for i in range(total_out_cols):
                 df.iloc[row_idx, output_start + i] = "[ERROR: Invalid response format]"
 
     buf = io.BytesIO()
