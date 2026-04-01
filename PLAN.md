@@ -1,22 +1,23 @@
-# EmailMVP — Design Plan & Implementation History
+# EmailMVP - Design Plan & Implementation History
 
-> This document captures the original plan, design decisions, and implementation journey for the EmailMVP cold email generation platform built for Reliance Infosystems.
+> This document captures the design decisions and implementation history for the EmailMVP branch that now supports multiple outreach templates, custom system prompts, and dynamic CSV enrichment.
 
 ---
 
 ## 1. Problem Statement
 
-Reliance Infosystems is a Microsoft Solutions Partner that helps organizations manage, renew, upgrade, and optimize their Microsoft licensing. Their sales team needs to send personalized cold email sequences to leads whose Microsoft licenses are up for renewal.
+Reliance Infosystems is a Microsoft Solutions Partner that helps organizations manage, renew, upgrade, and optimize Microsoft-centric business processes. The original MVP focused on Microsoft licensing renewal outreach. This branch expands the app into a reusable outreach-generation pipeline that can support multiple sales motions from the same spreadsheet upload flow.
 
 **The manual process:**
-- Sales reps receive a CSV export of leads (from LinkedIn Helper / Microsoft partner data)
-- Each lead has demographic data, license info, and engagement objectives
-- Sales reps manually write 8-touch email sequences per lead
-- This is time-consuming and inconsistent across the team
+- Sales reps receive lead exports from different sources with inconsistent column names
+- Each motion requires a different messaging strategy, output schema, and validation rules
+- Reps manually rewrite sequences for each campaign type
+- The process is slow, inconsistent, and hard to reuse across new campaigns
 
 **The solution:**
-- Upload a CSV → AI generates 8 personalized cold emails per lead → Download enriched CSV
-- Fully automated, consistent tone, personalized to each lead's context
+- Upload a CSV or Excel file
+- Choose a built-in template or provide a custom system prompt
+- Let the backend detect required columns, run the selected generation workflow, and return an enriched CSV with template-specific output columns
 
 ---
 
@@ -24,21 +25,25 @@ Reliance Infosystems is a Microsoft Solutions Partner that helps organizations m
 
 ### Functional
 - Upload CSV or Excel (.xlsx) files containing lead data
-- Automatically detect required columns via fuzzy matching + LLM fallback
-- Generate 8 cold emails per lead (Subject + Body for each touch)
-- Append 16 output columns at the end of the original data
+- List available prompt templates to the frontend via an API
+- Automatically detect required columns via fuzzy matching + LLM fallback for built-in templates
+- Generate template-specific outputs per lead:
+  - 8 cold emails for Microsoft licensing outreach
+  - 5 e-invoice outreach scripts for finance modernization
+  - arbitrary JSON-shaped custom output for user-supplied prompts
+- Append generated columns at the end of the original dataset
 - Return enriched CSV for download
 - Show real-time processing progress (processed X of Y leads)
-- Handle files with any number of leads (tested up to 2,038)
+- Handle files with any number of leads (tested up to 2,038 on the cold-email workflow)
 
 ### Non-Functional
 - Process leads concurrently for speed (100 concurrent per batch)
 - Handle API rate limits gracefully (auto-retry on 429, 5000 TPM capacity)
 - UTF-8 compatible output that opens correctly in Excel
-- No specific license types or seat counts in email copy (privacy concern)
-- ASCII-only characters to prevent encoding issues
+- Preserve backward compatibility for the cold-email template
+- Keep custom prompts bounded with explicit JSON-output and length constraints
 - Deployed on Azure with proper security (Managed Identity, Key Vault, RBAC)
-- Accept arbitrary column ordering (no rigid CSV layout required)
+- Accept arbitrary column ordering for built-in templates
 
 ---
 
@@ -64,7 +69,7 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 | Component | Technology | Rationale |
 |---|---|---|
 | Frontend | Azure Static Web App (vanilla HTML/CSS/JS) | No build step, fast to deploy, free tier available |
-| Backend | Azure Functions (Python 3.11, Durable) | Serverless, native orchestration, Python for AI SDK |
+| Backend | Azure Functions (Python 3.11, Durable) | Serverless orchestration plus template-aware upload, processing, and CSV assembly |
 | AI Model | Azure OpenAI GPT 5.3 | Best available model with quota in subscription |
 | Storage | Azure Blob Storage | Simple object storage for CSV files |
 | Secrets | Azure Key Vault | Industry standard for secret management |
@@ -77,34 +82,21 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 ## 4. Data Flow
 
 ```
-1. User uploads CSV or Excel (.xlsx) via browser
-2. Static Web App forwards POST /api/upload to Function App
-3. upload_csv function:
-   - Parses the file (CSV or Excel via openpyxl)
-   - Runs smart column detection (fuzzy match → LLM fallback → reject if unresolved)
-   - Converts Excel to CSV if needed
-   - Stores CSV in Blob Storage (csv-input container)
-   - Passes job_id + column_map to orchestrator
-   - Returns job ID to frontend
-4. Frontend polls GET /api/status/{jobId} every 5 seconds
-5. orchestrate_emails orchestrator:
-   a. Calls extract_leads_activity with column_map → parses CSV into lead dictionaries
-   b. Batches leads into groups of 100
-   c. For each batch: fans out process_lead_activity calls
-   d. Updates custom_status with processedLeads/totalLeads after each batch
-   e. 2-second delay between batches (rate limit protection)
-   f. Collects all results
-   g. Calls assemble_csv_activity → merges results into enriched CSV
-   h. Uploads enriched CSV to Blob Storage (csv-output container)
-6. Frontend shows real-time progress bar ("Processed X of Y leads")
-7. User clicks Download → GET /api/download/{jobId} → returns enriched CSV
+1. Frontend loads available templates from GET /api/templates.
+2. User uploads CSV or Excel (.xlsx) data and selects a template.
+3. Static Web App forwards POST /api/upload with prompt_id and optional custom_prompt.
+4. upload_csv parses the file, resolves the template, runs template-specific column detection, normalizes Excel to CSV, stores the input blob, and starts the orchestration with job_id, column_map, and template_config.
+5. Frontend polls GET /api/status/{jobId} every 5 seconds.
+6. orchestrate_emails calls extract_leads_activity, batches leads in groups of 100, fans out process_lead_activity calls with template_config, updates progress, and then calls assemble_csv_activity.
+7. assemble_csv_activity flattens parsed template output into template-specific CSV columns and uploads the final CSV to Blob Storage.
+8. Frontend shows progress, then the download summary, and finally downloads the enriched CSV from GET /api/download/{jobId}.
 ```
 
 ---
 
-## 5. Email Generation Strategy
+## 5. Template Strategy
 
-### 8-Touch Sequence
+### Built-in Template: `cold_email`
 
 | Touch | Purpose | Strategy |
 |---|---|---|
@@ -117,7 +109,7 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 | 7. Risk Reversal | Remove objections | No-obligation audit, seamless migration, SLAs |
 | 8. Danger/Close | Create urgency | Renewal deadlines, compliance risk, soft CTA |
 
-### Prompt Engineering Constraints
+Constraints:
 - Max 7-word subject lines
 - 200-260 word bodies
 - Plain ASCII only (no em dashes, curly quotes)
@@ -126,6 +118,25 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 - Address recipient by first name
 - At least 3 paragraphs per body
 - Output: pure JSON array, no markdown fences
+
+### Built-in Template: `e_invoice`
+
+This template targets African digital-finance modernization and generates 5 outreach scripts per lead. It adds:
+
+- persona selection (`CFO_FINANCE`, `CTO_IT`, `CEO_MD`, `PROCUREMENT_OPS`, `GENERAL_BUSINESS`)
+- channel strategy (`email_first` or `linkedin_first`)
+- 5 touch records with touch type, channel, subject, body, CTA, and delay days
+- validation rules for bad leads via `do_not_generate`
+
+### Runtime Template: `custom`
+
+Custom prompts let the user provide the system prompt at upload time. The backend:
+
+- passes all lead columns as prompt context
+- requires valid JSON output
+- accepts either a JSON object or JSON array
+- discovers output headers dynamically from the first successful parsed result
+- enforces a 10,000 character maximum prompt length
 
 ---
 
@@ -176,6 +187,16 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 - Updated README.md with current architecture (GPT 5.3, not Claude)
 - Created this PLAN.md for future reference
 
+### Phase 8: Multi-Template Support
+- Refactored `prompt_templates.py` into a template registry
+- Added built-in `cold_email` and `e_invoice` templates plus runtime `custom` templates
+- Added `GET /api/templates` for frontend template discovery
+- Updated `function_app.py` to pass `template_config` through upload, orchestration, lead processing, and CSV assembly
+- Updated `column_mapper.py` to accept template-specific required fields
+- Updated `csv_processor.py` to assemble dynamic output columns beyond the original 16 cold-email columns
+- Updated the frontend to support template selection and custom prompt input
+- Expanded backend validation coverage to 125 passing tests
+
 ---
 
 ## 7. GPT 5.3 Known Constraints
@@ -216,6 +237,8 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 
 The batch 15→100 upgrade achieved a **4.6x speedup** for 2,038 leads.
 
+These benchmark numbers come from the cold-email template. Other templates may vary depending on prompt length and output size.
+
 ---
 
 ## 9. Security Model
@@ -232,6 +255,21 @@ The batch 15→100 upgrade achieved a **4.6x speedup** for 2,038 leads.
 ---
 
 ## 10. Change Log
+
+### April 1, 2026 - Multi-Template Branch
+
+**New capabilities:**
+- Added a prompt registry with multiple system prompts
+- Added a templates API consumed by the frontend
+- Added `e_invoice` as a second built-in workflow
+- Added `custom` prompts with JSON parsing and dynamic output flattening
+- Added template-specific required fields at upload time
+- Added dynamic output columns for non-email workflows
+
+**Documentation impact:**
+- The feature branch no longer represents only the production cold-email app
+- README and PLAN now describe the branch as a template-driven outreach generator
+- Production should be treated as a narrower deployment until this branch is promoted
 
 ### March 29, 2026 — Excel Support & Smart Column Detection
 
@@ -304,8 +342,9 @@ These were discussed but intentionally deferred for the MVP:
 | `func` CLI ENOENT | Use `az functionapp deployment source config-zip` instead |
 | 429 rate limit | SDK auto-retries; 2s delay between batches helps |
 | Managed Identity auth failure | Set `managed_identity_client_id` explicitly |
+| Static Web App preview backend link issues | Prefer a separate staging Static Web App and Function App for isolated testing |
 
 ---
 
 *Document created: March 25, 2026*
-*Last updated: March 29, 2026*
+*Last updated: April 1, 2026*
