@@ -1,0 +1,18 @@
+{
+  "sku": {
+    "name": "GlobalStandard",
+    "capacity": 10
+  },
+  "properties": {
+    "model": {
+      "format": "Anthropic",
+      "name": "claude-sonnet-4-6",
+      "version": "1"
+    }
+  },
+  "ModelProviderData": {
+    "industry": "Technology",
+    "organizationName": "Reliance Infosystems",
+    "countryCode": "NG"
+  }
+}

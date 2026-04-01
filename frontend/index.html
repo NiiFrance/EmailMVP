@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Campaign Generator — Reliance Infosystems</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">R</div>
+                <div>
+                    <h1>Reliance Infosystems</h1>
+                    <p class="tagline">Cold Email Campaign Generator</p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main>
+            <!-- Step 1: Upload -->
+            <section id="upload-section" class="card">
+                <h2>Upload Lead File</h2>
+                <p class="description">
+                    Upload your lead data file (CSV or Excel .xlsx).
+                    Columns are detected automatically.
+                    The system will generate 8 personalized cold emails per lead
+                    using AI and return an enriched CSV.
+                </p>
+
+                <div class="upload-area" id="drop-zone">
+                    <div class="upload-icon">&#128196;</div>
+                    <p>Drag &amp; drop your CSV or Excel file here</p>
+                    <p class="upload-or">or</p>
+                    <label for="file-input" class="btn btn-secondary">Browse Files</label>
+                    <input type="file" id="file-input" accept=".csv,.xlsx" hidden>
+                </div>
+
+                <div id="file-info" class="file-info" hidden>
+                    <span id="file-name"></span>
+                    <button id="clear-file" class="btn-clear" title="Remove file">&times;</button>
+                </div>
+
+                <button id="upload-btn" class="btn btn-primary" disabled>
+                    Generate Email Sequences
+                </button>
+
+                <div id="upload-error" class="error" hidden></div>
+            </section>
+
+            <!-- Step 2: Progress -->
+            <section id="progress-section" class="card" hidden>
+                <h2>Generating Emails</h2>
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="progress-text">
+                        <span id="progress-status">Starting...</span>
+                        <span id="progress-percent">0%</span>
+                    </div>
+                </div>
+                <div class="progress-details">
+                    <p><strong>Job ID:</strong> <code id="job-id-display"></code></p>
+                    <p><strong>Total Leads:</strong> <span id="total-leads-display">—</span></p>
+                    <p><strong>Started:</strong> <span id="start-time-display">—</span></p>
+                    <p><strong>Elapsed:</strong> <span id="elapsed-display">—</span></p>
+                </div>
+            </section>
+
+            <!-- Step 3: Download -->
+            <section id="download-section" class="card" hidden>
+                <h2>Emails Generated Successfully</h2>
+                <div class="success-icon">&#10003;</div>
+                <p class="success-message">
+                    All <span id="completed-leads">0</span> leads have been processed.
+                    Your enriched CSV is ready for download.
+                </p>
+                <div class="job-summary">
+                    <p><strong>Total Leads:</strong> <span id="summary-leads">—</span></p>
+                    <p><strong>Elapsed Time:</strong> <span id="summary-elapsed">—</span></p>
+                    <p><strong>Job ID:</strong> <code id="summary-job-id"></code></p>
+                </div>
+                <button id="download-btn" class="btn btn-primary">
+                    Download Enriched CSV
+                </button>
+                <button id="new-job-btn" class="btn btn-secondary">
+                    Process Another File
+                </button>
+            </section>
+
+            <!-- Error State -->
+            <section id="error-section" class="card" hidden>
+                <h2>Processing Error</h2>
+                <div class="error-icon">&#9888;</div>
+                <p id="error-message" class="error-detail"></p>
+                <button id="retry-btn" class="btn btn-secondary">
+                    Try Again
+                </button>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Reliance Infosystems</p>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+azure-functions
+azure-functions-durable
+openai
+pandas
+openpyxl
+azure-storage-blob
+azure-identity
