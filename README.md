@@ -1,29 +1,30 @@
-# Reliance Infosystems - Template-Driven Outreach Generator
+# Reliance Infosystems — Email Campaign Generator
 
-This branch turns EmailMVP into a template-driven lead enrichment app. Users can upload CSV or Excel (.xlsx) files, choose a generation template, and receive an enriched CSV with template-specific output columns appended to the original data.
+A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 10 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
 
-The current production URL still represents the cold-email-only deployment:
+## Live Environments
 
-- Production URL: https://blue-mud-0ae74790f.4.azurestaticapps.net
-
-This feature branch is ahead of production. It adds built-in multi-template support, custom system prompts, dynamic CSV output schemas, and a new templates API used by the frontend.
-
-## What This Branch Adds
-
-- Multiple system prompts via a template registry in `api/prompt_templates.py`
-- Built-in `cold_email` and `e_invoice` generation modes
-- User-supplied `custom` prompt mode with dynamic JSON flattening
-- `GET /api/templates` so the frontend can populate the template selector
-- Template-specific required-field detection during upload
-- Dynamic output columns based on the selected template
+| Environment | URL |
+|---|---|
+| **Staging** | https://calm-smoke-02e96b50f.6.azurestaticapps.net |
+| **Production** | https://blue-mud-0ae74790f.4.azurestaticapps.net |
 
 ## Available Templates
 
-| Template ID | Purpose | Required Fields | Output Shape |
+All templates share a unified output format: JSON array of `{"subject": ..., "body": ...}` objects, flattened into `Subject_Touch1`, `Body_Touch1`, etc. columns in the output CSV.
+
+| Group | Template | Emails/Lead | Required Fields |
 |---|---|---|---|
-| `cold_email` | Generate 8 Microsoft licensing cold emails per lead | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` | 16 columns: `Subject_Touch1` to `Body_Touch8` |
-| `e_invoice` | Generate 5 outreach scripts for e-invoicing and finance modernization | `first_name`, `last_name`, `organisation_name`, `email_address` | Persona/channel metadata plus 5 touch blocks |
-| `custom` | Run an arbitrary system prompt against all lead columns | None enforced | Columns discovered dynamically from the first valid JSON response |
+| **Renewals** | CSP Renewal — With License | 4 | `first_name`, `organization` |
+| **Renewals** | CSP Renewal — Without License | 4 | `first_name`, `organization`, `email_address` |
+| **Renewals** | Price Change Early Renewal | 4 | `first_name`, `organization` |
+| **Migrations** | EA to CSP Migration | 4 | `first_name`, `organization` |
+| **Migrations** | E7 Upsell — AI Governance | 5 | `first_name`, `organization`, `email_address` |
+| **Demand Gen** | CloudAscent — Solution Focus | 4 | `first_name`, `organization` |
+| **Demand Gen** | Marketplace Offers | 4 | `first_name`, `organization` |
+| **Demand Gen** | Cold Email — Original | 8 | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
+| **Compliance** | NRS E-Invoice — Nigeria | 4 | `first_name`, `organization` |
+| **Inbound** | Help & Assistance — Leads | 2 | `first_name` |
 
 ## Architecture
 
@@ -32,82 +33,68 @@ This feature branch is ahead of production. It adds built-in multi-template supp
 ```
 [Azure Static Web App]  -> vanilla HTML/CSS/JS
         |
-        +-> GET  /api/templates
-        +-> POST /api/upload
-        +-> GET  /api/status/{jobId}
-        +-> GET  /api/download/{jobId}
+        +-> GET  /api/templates        (list 10 campaign templates)
+        +-> POST /api/upload           (CSV/Excel + template selection)
+        +-> GET  /api/status/{jobId}   (real-time progress)
+        +-> GET  /api/download/{jobId} (enriched CSV)
         |
         v
-[Azure Functions App]   -> Python 3.11, Durable Functions, Premium EP1
+[Azure Functions App]   -> Python 3.11, Durable Functions, EP1
    |
-   +-> upload_csv
-   |     - accepts .csv and .xlsx
-   |     - resolves template from prompt_id/custom_prompt
-   |     - runs template-specific column detection when required
-   |     - stores normalized CSV in Blob Storage
-   |
-   +-> orchestrate_emails
-   |     - extracts leads
-   |     - fans out GPT requests in batches of 100
-   |     - updates real-time progress
-   |     - assembles template-specific output columns
-   |
-   +-> process_lead_activity
-   |     - builds the selected system/user prompt pair
-   |     - calls Azure OpenAI GPT 5.3
-   |     - parses template-specific JSON
-   |
-   +-> assemble_csv_activity
-         - flattens parsed output into CSV columns
+   +-> upload_csv               parse file, detect columns, start orchestration
+   +-> orchestrate_emails       fan-out/fan-in across leads in batches of 100
+   +-> extract_leads_activity   extract lead rows from stored CSV
+   +-> process_lead_activity    build prompt pair, call GPT 5.3, parse JSON
+   +-> assemble_csv_activity    flatten emails into CSV columns, upload output
 
 [Azure Blob Storage]    <- csv-input / csv-output containers
-[Azure OpenAI]          <- deployment: gpt-53-chat
+[Azure OpenAI]          <- deployment: gpt-53-chat (GPT 5.3)
 ```
 
 ## API Surface
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/templates` | `GET` | Returns built-in templates for the frontend selector |
-| `/api/upload` | `POST` | Accepts file upload plus `prompt_id` and optional `custom_prompt` |
-| `/api/status/{jobId}` | `GET` | Returns Durable Function job status and progress |
-| `/api/download/{jobId}` | `GET` | Returns the enriched CSV output |
+| `/api/templates` | `GET` | Returns all 10 templates with group, description, email count |
+| `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
+| `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
+| `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
 
 ### Upload Form Fields
 
-- `file`: CSV or Excel file
-- `prompt_id`: one of `cold_email`, `e_invoice`, or `custom`
-- `custom_prompt`: required only when `prompt_id=custom`
+- `file`: CSV or Excel (.xlsx) file
+- `prompt_id`: one of the 10 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
 
 ## Column Detection
 
-For built-in templates, required columns are detected automatically using a two-stage resolver:
+Required columns are detected automatically using a two-stage resolver:
 
-1. Fuzzy matching against template-specific keyword sets
-2. Azure OpenAI fallback for unresolved fields
-3. Upload rejection if required fields still cannot be resolved
+1. **Fuzzy matching** against template-specific keyword sets (e.g. "company", "firm", "employer" all resolve to `organization`)
+2. **Azure OpenAI fallback** for any unresolved fields
+3. Upload rejection with a clear error if fields still cannot be resolved
 
-All non-primary columns are preserved as context and passed into the prompt builder for personalization.
+Invalid email addresses (containing patterns like `noemail`, `unknown`, `test@test`) are automatically disqualified during mapping.
 
-Custom prompts skip required-field detection entirely and receive all lead columns as context.
+All non-required columns are preserved as context and passed to the model for personalization.
 
 ## Output Behavior
 
-- Output columns are always appended to the end of the uploaded dataset
-- Cold email output is fixed-width: 16 appended columns
-- E-invoice output includes persona metadata plus 5 touch blocks
-- Custom output is flattened dynamically from the first valid JSON object or array the model returns
-- Error rows are preserved in the CSV with `[ERROR: ...]` markers in the generated columns
+- Output columns are appended to the end of the uploaded dataset
+- Column count varies by template: 4 columns (2-email template) to 16 columns (8-email template)
+- Each email produces `Subject_TouchN` + `Body_TouchN` column pair
+- Error rows are preserved with `[ERROR: ...]` markers in the generated columns
+- Output CSV uses UTF-8 BOM encoding for Excel compatibility
 
-## Frontend Behavior
+## Frontend
 
-The frontend now includes:
+The frontend groups templates by campaign category in an `<optgroup>` dropdown:
 
-- Template selector loaded from `/api/templates`
-- Custom prompt textarea with 10,000 character limit
+- Template selector loaded dynamically from `/api/templates`
+- Grouped dropdown: Renewals, Migrations, Demand Generation, Compliance, Inbound
+- Dynamic button text showing email count for selected template
 - CSV and Excel upload support
-- Real-time progress with pulse animation before the first batch completes
-- Job summary retained on the download screen
+- Real-time progress bar with pulse animation during initial batch
+- Job summary (leads, elapsed time, job ID) on the download screen
 
 ## Project Structure
 
@@ -115,27 +102,34 @@ The frontend now includes:
 EmailMVP/
 |- api/
 |  |- function_app.py          # HTTP triggers, orchestrator, activities
-|  |- prompt_templates.py      # Template registry, parsers, output flatteners
+|  |- prompt_templates.py      # 10-template registry with shared helpers
 |  |- csv_processor.py         # CSV/Excel parsing and dynamic CSV assembly
 |  |- column_mapper.py         # Fuzzy matching + LLM fallback for required fields
 |  |- host.json                # Durable Functions configuration
 |  |- requirements.txt         # Python dependencies
-|  |- local.settings.json      # Local development settings
+|  |- prompts/                 # System prompt text files (one per template)
+|  |  |- cold_email.txt
+|  |  |- csp_renewal_with_license.txt
+|  |  |- csp_renewal_without_license.txt
+|  |  |- e7_upsell.txt
+|  |  |- ea_to_csp.txt
+|  |  |- leads.txt
+|  |  |- marketplace.txt
+|  |  |- price_change.txt
+|  |  |- nrs_einvoice.txt
+|  |  \- cloud_ascent.txt
 |  \- tests/
 |     |- test_column_mapper.py
 |     |- test_csv_processor.py
 |     |- test_function_app.py
 |     \- test_prompt_templates.py
 |- frontend/
-|  |- index.html               # Upload UI with template selector
+|  |- index.html               # Upload UI with grouped template selector
 |  |- app.js                   # Upload, polling, download, template loading
 |  |- styles.css               # UI styling and progress animation
 |  \- staticwebapp.config.json
 |- infra/
 |  \- main.bicep
-|- architecture_diagram.py
-|- emailmvp_architecture.png
-|- PLAN.md
 \- README.md
 ```
 
@@ -143,10 +137,10 @@ EmailMVP/
 
 | Layer | Technology |
 |---|---|
-| AI model | Azure OpenAI GPT 5.3 (`gpt-53-chat`) |
-| Backend | Azure Functions, Durable Functions, Python 3.11 |
+| AI Model | Azure OpenAI GPT 5.3 (`gpt-53-chat`) |
+| Backend | Azure Functions v4, Durable Functions, Python 3.11 |
 | Frontend | Azure Static Web Apps, vanilla HTML/CSS/JS |
-| File parsing | pandas + openpyxl |
+| File Parsing | pandas + openpyxl |
 | Storage | Azure Blob Storage |
 | Identity | Managed Identity + RBAC |
 | Secrets | Azure Key Vault |
@@ -206,48 +200,62 @@ Open `http://localhost:4280` in your browser.
 
 ## Running Tests
 
-Run the full backend suite from `api/`:
-
 ```powershell
+cd api
 python -m pytest tests -q
 ```
 
-Current branch status: `125 passed`
+Current status: **151 passed**
 
-## Deployment Notes
+## Deployment
 
-### Backend ZIP deploy
+### Backend — Function App (ZIP deploy with remote build)
 
 ```powershell
-Compress-Archive -Path api\* -DestinationPath deploy.zip -Force
+# Create zip from api/ excluding dev files
+cd api
+$items = Get-ChildItem -Path . -Exclude tests,__pycache__,.pytest_cache,.venv,.funcignore,local.settings.json
+Compress-Archive -Path ($items | ForEach-Object { $_.FullName }) -DestinationPath ..\deploy.zip -Force
+
+# Deploy with Oryx build (required for pip install)
 az functionapp deployment source config-zip `
-  --resource-group <resource-group> `
-  --name <function-app-name> `
-  --src deploy.zip `
+  --resource-group rg-emailmvp-stg-eastus2 `
+  --name azfnemailmvpstg6476 `
+  --src ..\deploy.zip `
   --build-remote true
 ```
 
-`--build-remote true` is required so Azure installs dependencies from `requirements.txt`.
+**Important:** `SCM_DO_BUILD_DURING_DEPLOYMENT` must be `true` in app settings, otherwise `requirements.txt` dependencies won't be installed.
 
-### Recommended pre-production topology
+### Frontend — Static Web App
 
-Because this branch is ahead of production, test it in a separate environment rather than against the live app:
+```powershell
+npx @azure/static-web-apps-cli deploy ./frontend `
+  --deployment-token <token> `
+  --env production
+```
 
-- separate Static Web App
-- separate Function App
-- separate Storage account
-- separate Application Insights resource
+### Staging Environment
 
-That isolates template changes, custom prompts, and generated test data from the production cold-email workflow.
+| Resource | Name |
+|---|---|
+| Resource Group | `rg-emailmvp-stg-eastus2` |
+| Function App | `azfnemailmvpstg6476` |
+| Static Web App | `azswa-emailmvp-stg-6476` |
+| Storage Account | `azstemailmvpstg6476` |
+| App Insights | `appi-emailmvp-stg` |
+
+The SWA has the Function App linked as a backend, so `/api/*` routes are proxied automatically.
 
 ## Key Design Decisions
 
-- Template registry instead of a single hard-coded system prompt
-- Built-in templates keep strict schemas and required-field detection
-- Custom prompts trade schema rigidity for flexibility by requiring JSON output and flattening it dynamically
-- Excel uploads are normalized to CSV immediately so the downstream pipeline stays consistent
-- Durable fan-out/fan-in remains the concurrency model, with batch size controlled by `BATCH_SIZE`
-- Output assembly is template-aware and appends columns instead of relying on a fixed Excel position
+- **10-template registry** with prompts loaded from individual `.txt` files for easy editing
+- **Unified output schema** — all templates produce `[{"subject": ..., "body": ...}]`, eliminating per-template parsers and flatteners
+- **Shared generic helpers** — factory functions for parsing, headers, and flattening parameterized by email count
+- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Compliance, Inbound)
+- **No custom prompt mode** — removed in favor of purpose-built templates vetted by the marketing team
+- **Excel normalization** — `.xlsx` uploads are converted to CSV at upload time so the downstream pipeline stays consistent
+- **Durable fan-out/fan-in** — batch size 100, 2-second inter-batch delay, 2-hour timeout on EP1
 - The cold-email template remains backward compatible through `SYSTEM_PROMPT` and `build_user_prompt` aliases
 
 See `PLAN.md` for the implementation history and the design changes that took the app from a single-purpose cold-email generator to a multi-template branch.

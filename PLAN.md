@@ -1,23 +1,23 @@
-# EmailMVP - Design Plan & Implementation History
+# EmailMVP — Design Plan & Implementation History
 
-> This document captures the design decisions and implementation history for the EmailMVP branch that now supports multiple outreach templates, custom system prompts, and dynamic CSV enrichment.
+> Design decisions, architecture, and implementation history for the EmailMVP email campaign generator. The app supports 10 built-in campaign templates covering renewals, migrations, demand generation, compliance, and inbound motions.
 
 ---
 
 ## 1. Problem Statement
 
-Reliance Infosystems is a Microsoft Solutions Partner that helps organizations manage, renew, upgrade, and optimize Microsoft-centric business processes. The original MVP focused on Microsoft licensing renewal outreach. This branch expands the app into a reusable outreach-generation pipeline that can support multiple sales motions from the same spreadsheet upload flow.
+Reliance Infosystems is a Microsoft Solutions Partner that helps organizations manage, renew, upgrade, and optimize Microsoft-centric business processes. The marketing team runs multiple outreach campaigns — CSP renewals, EA migrations, marketplace promotions, compliance messaging, and more — each requiring different email sequences, tone, and personalization strategies.
 
 **The manual process:**
 - Sales reps receive lead exports from different sources with inconsistent column names
-- Each motion requires a different messaging strategy, output schema, and validation rules
+- Each campaign requires a different messaging strategy and email count
 - Reps manually rewrite sequences for each campaign type
 - The process is slow, inconsistent, and hard to reuse across new campaigns
 
 **The solution:**
 - Upload a CSV or Excel file
-- Choose a built-in template or provide a custom system prompt
-- Let the backend detect required columns, run the selected generation workflow, and return an enriched CSV with template-specific output columns
+- Choose one of 10 purpose-built campaign templates
+- Let the backend detect required columns, generate personalized email sequences per lead, and return an enriched CSV with email columns appended
 
 ---
 
@@ -25,25 +25,21 @@ Reliance Infosystems is a Microsoft Solutions Partner that helps organizations m
 
 ### Functional
 - Upload CSV or Excel (.xlsx) files containing lead data
-- List available prompt templates to the frontend via an API
-- Automatically detect required columns via fuzzy matching + LLM fallback for built-in templates
-- Generate template-specific outputs per lead:
-  - 8 cold emails for Microsoft licensing outreach
-  - 5 e-invoice outreach scripts for finance modernization
-  - arbitrary JSON-shaped custom output for user-supplied prompts
+- List 10 available campaign templates to the frontend via an API
+- Automatically detect required columns via fuzzy matching + LLM fallback
+- Generate 2–8 personalized emails per lead depending on the template
+- All templates share a unified output format: `[{"subject": ..., "body": ...}]`
 - Append generated columns at the end of the original dataset
 - Return enriched CSV for download
 - Show real-time processing progress (processed X of Y leads)
-- Handle files with any number of leads (tested up to 2,038 on the cold-email workflow)
+- Handle files with any number of leads (tested up to 2,038)
 
 ### Non-Functional
 - Process leads concurrently for speed (100 concurrent per batch)
 - Handle API rate limits gracefully (auto-retry on 429, 5000 TPM capacity)
-- UTF-8 compatible output that opens correctly in Excel
-- Preserve backward compatibility for the cold-email template
-- Keep custom prompts bounded with explicit JSON-output and length constraints
+- UTF-8 BOM output that opens correctly in Excel
 - Deployed on Azure with proper security (Managed Identity, Key Vault, RBAC)
-- Accept arbitrary column ordering for built-in templates
+- Accept arbitrary column ordering — fuzzy column mapper resolves field names
 
 ---
 
@@ -69,7 +65,7 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 | Component | Technology | Rationale |
 |---|---|---|
 | Frontend | Azure Static Web App (vanilla HTML/CSS/JS) | No build step, fast to deploy, free tier available |
-| Backend | Azure Functions (Python 3.11, Durable) | Serverless orchestration plus template-aware upload, processing, and CSV assembly |
+| Backend | Azure Functions v4 (Python 3.11, Durable) | Serverless orchestration with template-aware pipeline |
 | AI Model | Azure OpenAI GPT 5.3 | Best available model with quota in subscription |
 | Storage | Azure Blob Storage | Simple object storage for CSV files |
 | Secrets | Azure Key Vault | Industry standard for secret management |
@@ -82,21 +78,40 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 ## 4. Data Flow
 
 ```
-1. Frontend loads available templates from GET /api/templates.
-2. User uploads CSV or Excel (.xlsx) data and selects a template.
-3. Static Web App forwards POST /api/upload with prompt_id and optional custom_prompt.
-4. upload_csv parses the file, resolves the template, runs template-specific column detection, normalizes Excel to CSV, stores the input blob, and starts the orchestration with job_id, column_map, and template_config.
+1. Frontend loads 10 campaign templates from GET /api/templates.
+2. User uploads CSV or Excel (.xlsx) data and selects a template from the grouped dropdown.
+3. Static Web App forwards POST /api/upload with prompt_id.
+4. upload_csv parses the file, resolves the template, runs column detection against the
+   template's required_fields, normalizes Excel to CSV, stores the input blob, and starts
+   the orchestration with job_id, column_map, and template_config.
 5. Frontend polls GET /api/status/{jobId} every 5 seconds.
-6. orchestrate_emails calls extract_leads_activity, batches leads in groups of 100, fans out process_lead_activity calls with template_config, updates progress, and then calls assemble_csv_activity.
-7. assemble_csv_activity flattens parsed template output into template-specific CSV columns and uploads the final CSV to Blob Storage.
-8. Frontend shows progress, then the download summary, and finally downloads the enriched CSV from GET /api/download/{jobId}.
+6. orchestrate_emails calls extract_leads_activity, batches leads in groups of 100, fans out
+   process_lead_activity calls with template_config, updates progress, then calls
+   assemble_csv_activity.
+7. process_lead_activity builds the system/user prompt pair using the template's prompt
+   builder, calls GPT 5.3, and parses the JSON response into email dicts.
+8. assemble_csv_activity flattens parsed emails into Subject_TouchN / Body_TouchN columns
+   and uploads the final CSV to Blob Storage.
+9. Frontend shows progress, then download summary, and downloads the enriched CSV.
 ```
 
 ---
 
 ## 5. Template Strategy
 
-### Built-in Template: `cold_email`
+### Unified Output Format
+
+All 10 templates produce the same JSON output: an array of `{"subject": ..., "body": ...}` objects. This means:
+- One shared parser (parameterized by expected email count)
+- One shared flattener (emails → `Subject_TouchN`, `Body_TouchN` columns)
+- One shared output header generator
+- No per-template parsing or flattening logic
+
+### Prompt Organization
+
+System prompts are stored as individual `.txt` files in `api/prompts/`. Each file contains the full system prompt for one campaign. The registry in `prompt_templates.py` loads them at import time and wires up the appropriate email count, required fields, and user prompt builder.
+
+### Template: `cold_email` (Original)
 
 | Touch | Purpose | Strategy |
 |---|---|---|
@@ -109,34 +124,32 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 | 7. Risk Reversal | Remove objections | No-obligation audit, seamless migration, SLAs |
 | 8. Danger/Close | Create urgency | Renewal deadlines, compliance risk, soft CTA |
 
-Constraints:
+Constraints: max 7-word subjects, 200–260 word bodies, plain ASCII only, no URLs/signatures, address by first name, at least 3 paragraphs per body, no specific license types or seat counts.
+
+### All Templates — Shared Constraints
+
+- Output must be a pure JSON array of `{"subject": ..., "body": ...}` objects
+- No markdown fences in output
 - Max 7-word subject lines
-- 200-260 word bodies
 - Plain ASCII only (no em dashes, curly quotes)
 - No URLs, links, or signature blocks
-- No specific license types or seat counts (privacy)
-- Address recipient by first name
-- At least 3 paragraphs per body
-- Output: pure JSON array, no markdown fences
 
-### Built-in Template: `e_invoice`
+### Template Registry Summary
 
-This template targets African digital-finance modernization and generates 5 outreach scripts per lead. It adds:
+| ID | Group | Emails | User Prompt | Required Fields |
+|---|---|---|---|---|
+| `csp_renewal_with_license` | Renewals | 4 | Generic | `first_name`, `organization` |
+| `csp_renewal_without_license` | Renewals | 4 | Generic | `first_name`, `organization`, `email_address` |
+| `price_change` | Renewals | 4 | Generic | `first_name`, `organization` |
+| `ea_to_csp` | Migrations | 4 | Generic | `first_name`, `organization` |
+| `e7_upsell` | Migrations | 5 | Generic | `first_name`, `organization`, `email_address` |
+| `cloud_ascent` | Demand Gen | 4 | Generic | `first_name`, `organization` |
+| `marketplace` | Demand Gen | 4 | Generic | `first_name`, `organization` |
+| `cold_email` | Demand Gen | 8 | Custom (5 fields) | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
+| `nrs_einvoice` | Compliance | 4 | Generic | `first_name`, `organization` |
+| `leads` | Inbound | 2 | Generic | `first_name` |
 
-- persona selection (`CFO_FINANCE`, `CTO_IT`, `CEO_MD`, `PROCUREMENT_OPS`, `GENERAL_BUSINESS`)
-- channel strategy (`email_first` or `linkedin_first`)
-- 5 touch records with touch type, channel, subject, body, CTA, and delay days
-- validation rules for bad leads via `do_not_generate`
-
-### Runtime Template: `custom`
-
-Custom prompts let the user provide the system prompt at upload time. The backend:
-
-- passes all lead columns as prompt context
-- requires valid JSON output
-- accepts either a JSON object or JSON array
-- discovers output headers dynamically from the first successful parsed result
-- enforces a 10,000 character maximum prompt length
+The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_email` template uses a custom builder that formats the 5 primary fields explicitly plus remaining columns as context.
 
 ---
 
@@ -187,15 +200,45 @@ Custom prompts let the user provide the system prompt at upload time. The backen
 - Updated README.md with current architecture (GPT 5.3, not Claude)
 - Created this PLAN.md for future reference
 
-### Phase 8: Multi-Template Support
+### Phase 8: Multi-Template Support (3 templates)
 - Refactored `prompt_templates.py` into a template registry
 - Added built-in `cold_email` and `e_invoice` templates plus runtime `custom` templates
 - Added `GET /api/templates` for frontend template discovery
-- Updated `function_app.py` to pass `template_config` through upload, orchestration, lead processing, and CSV assembly
+- Updated `function_app.py` to pass `template_config` through the pipeline
 - Updated `column_mapper.py` to accept template-specific required fields
-- Updated `csv_processor.py` to assemble dynamic output columns beyond the original 16 cold-email columns
-- Updated the frontend to support template selection and custom prompt input
-- Expanded backend validation coverage to 125 passing tests
+- Updated `csv_processor.py` for dynamic output columns
+- Updated the frontend for template selection and custom prompt input
+- Expanded test coverage to 125 passing tests
+
+### Phase 9: 10-Template Registry (current)
+- Marketing team provided 9 Word doc prompts for real campaign motions
+- Key discovery: ALL templates share the same `[{"subject": ..., "body": ...}]` output format
+- Rewrote `prompt_templates.py` — replaced per-template parsers/flatteners with shared factory functions
+- Created 10 `.txt` prompt files in `api/prompts/` (one per template)
+- Removed `e_invoice` complex schema (persona/channel metadata) — replaced with simpler 4-email version
+- Removed `custom` prompt mode entirely — all templates are now purpose-built
+- Removed custom prompt textarea from the frontend
+- Added grouped `<optgroup>` dropdown organized by campaign category
+- Added email_address disqualification patterns to `column_mapper.py`
+- Simplified `csv_processor.py` (removed static constants, legacy branches)
+- Simplified `function_app.py` (removed custom prompt handling)
+- Rewrote all test files — **151 tests passing**
+- Committed as `dae6f55` on `feature/multi-prompt-templates`
+
+### Phase 10: Staging Deployment
+- Created isolated staging environment: `rg-emailmvp-stg-eastus2`
+  - Function App: `azfnemailmvpstg6476` (EP1)
+  - SWA: `azswa-emailmvp-stg-6476` (linked backend)
+  - Storage: `azstemailmvpstg6476`
+  - App Insights: `appi-emailmvp-stg`
+- Deployment debugging:
+  - EasyAuth was enabled blocking all requests (401) — disabled
+  - `SCM_DO_BUILD_DURING_DEPLOYMENT` was `false` — Oryx never ran `pip install`
+  - Container restart loop caused by stale `ContainerTimeout` — fixed with stop/start
+- Successfully deployed backend with `--build-remote true`
+- Deployed frontend via SWA CLI
+- All 10 templates verified working through the SWA proxy
+- Pushed to GitHub: `feature/multi-prompt-templates` branch
 
 ---
 
@@ -256,20 +299,26 @@ These benchmark numbers come from the cold-email template. Other templates may v
 
 ## 10. Change Log
 
-### April 1, 2026 - Multi-Template Branch
+### April 4, 2026 — 10-Template Registry & Staging Deployment
 
 **New capabilities:**
-- Added a prompt registry with multiple system prompts
-- Added a templates API consumed by the frontend
-- Added `e_invoice` as a second built-in workflow
-- Added `custom` prompts with JSON parsing and dynamic output flattening
-- Added template-specific required fields at upload time
-- Added dynamic output columns for non-email workflows
+- 10 purpose-built campaign templates replacing the old 3-template system (cold_email, e_invoice, custom)
+- All templates share unified `[{"subject", "body"}]` output format
+- System prompts stored as individual `.txt` files in `api/prompts/`
+- Shared factory functions for parsing, headers, and flattening (parameterized by email count)
+- Grouped `<optgroup>` dropdown in the frontend (Renewals, Migrations, Demand Gen, Compliance, Inbound)
+- Email address disqualification patterns in column mapper
 
-**Documentation impact:**
-- The feature branch no longer represents only the production cold-email app
-- README and PLAN now describe the branch as a template-driven outreach generator
-- Production should be treated as a narrower deployment until this branch is promoted
+**Removed:**
+- `e_invoice` complex schema (persona/channel metadata)
+- `custom` prompt mode and textarea
+- Per-template parsers and output flatteners
+
+**Deployment:**
+- Full staging environment deployed and verified
+- Backend: `azfnemailmvpstg6476` in `rg-emailmvp-stg-eastus2`
+- Frontend: `azswa-emailmvp-stg-6476` → https://calm-smoke-02e96b50f.6.azurestaticapps.net
+- 151 tests passing
 
 ### March 29, 2026 — Excel Support & Smart Column Detection
 
@@ -336,15 +385,17 @@ These were discussed but intentionally deferred for the MVP:
 | `AnthropicFoundry` import error | Switched to `from openai import AzureOpenAI` |
 | `max_tokens` error on GPT 5.3 | Use `max_completion_tokens` instead |
 | `temperature` error on GPT 5.3 | Remove `temperature` param entirely |
-| Missing dependencies after deploy | Add `--build-remote true` to ZIP deploy |
+| Missing dependencies after deploy | Set `SCM_DO_BUILD_DURING_DEPLOYMENT=true` and use `--build-remote true` |
 | Garbled characters (curly quotes) | Use `utf-8-sig` encoding + ASCII-only prompt |
 | Claude 0 quota | No fix — switched to GPT 5.3 |
 | `func` CLI ENOENT | Use `az functionapp deployment source config-zip` instead |
 | 429 rate limit | SDK auto-retries; 2s delay between batches helps |
 | Managed Identity auth failure | Set `managed_identity_client_id` explicitly |
-| Static Web App preview backend link issues | Prefer a separate staging Static Web App and Function App for isolated testing |
+| Container restart loop (stale timeout) | `az functionapp stop` then `az functionapp start` |
+| EasyAuth blocking anonymous requests | `az webapp auth update --enabled false` |
+| 409 conflict on zip deploy | Clear `WEBSITE_RUN_FROM_PACKAGE`, set `SCM_DO_BUILD_DURING_DEPLOYMENT=true` |
 
 ---
 
 *Document created: March 25, 2026*
-*Last updated: April 1, 2026*
+*Last updated: April 4, 2026*
