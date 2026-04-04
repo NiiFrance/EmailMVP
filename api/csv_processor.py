@@ -1,21 +1,12 @@
 """CSV / Excel parsing and assembly utilities for the Email MVP."""
 
 import io
+import re
 import pandas as pd
 
 
-NUM_TOUCHES = 8
-COLS_PER_TOUCH = 2  # Subject + Body
-TOTAL_OUTPUT_COLS = NUM_TOUCHES * COLS_PER_TOUCH  # 16
-
 # Legacy constant kept for backwards compatibility with old tests/code
 OUTPUT_START_COL_INDEX = 74
-
-# Column header names for the 16 output columns (cold email default)
-OUTPUT_HEADERS = []
-for i in range(1, NUM_TOUCHES + 1):
-    OUTPUT_HEADERS.append(f"Subject_Touch{i}")
-    OUTPUT_HEADERS.append(f"Body_Touch{i}")
 
 
 def _excel_col_letter(index: int) -> str:
@@ -91,8 +82,8 @@ def extract_lead_data(df: pd.DataFrame, row_index: int, column_map: dict | None 
         if col_idx in primary_indices:
             continue
         header = headers[col_idx]
-        # Skip output columns if they already exist
-        if header in OUTPUT_HEADERS:
+        # Skip output columns from previously enriched CSVs
+        if re.match(r'^(Subject|Body)_Touch\d+$', header):
             continue
         value = str(row.iloc[col_idx])
         if value.strip():
@@ -118,19 +109,17 @@ def assemble_enriched_csv(
 
     Args:
         original_csv_bytes: The raw bytes of the uploaded CSV.
-        results: List of dicts, each with 'row_index' and either 'parsed' (pre-parsed data)
-                 or 'emails' (legacy cold email list) or 'error' for failed rows.
-        output_headers: List of column header names for output. Defaults to OUTPUT_HEADERS.
+        results: List of dicts, each with 'row_index' and 'parsed' (pre-parsed data)
+                 or 'error' for failed rows.
+        output_headers: List of column header names for output.
         flatten_result: Callable that converts parsed data to {header: value} dict.
-                        If None, uses legacy cold email flattening.
 
     Returns:
         Enriched CSV as bytes.
     """
     df = parse_csv(original_csv_bytes)
 
-    # Determine output columns — use provided or fall back to cold email default
-    out_headers = output_headers or OUTPUT_HEADERS
+    out_headers = output_headers or []
     total_out_cols = len(out_headers)
 
     # Determine where to start writing — append after the last existing column
@@ -152,23 +141,10 @@ def assemble_enriched_csv(
             for i in range(total_out_cols):
                 df.iloc[row_idx, output_start + i] = f"[ERROR: {error}]"
         elif flatten_result and "parsed" in result:
-            # New-style: template provides flatten function and pre-parsed data
             flat = flatten_result(result["parsed"])
             for col_name, value in flat.items():
                 if col_name in df.columns:
                     df.at[row_idx, col_name] = value
-        elif "emails" in result:
-            # Legacy cold email format
-            emails = result["emails"]
-            if emails and len(emails) == NUM_TOUCHES:
-                for touch_idx, email in enumerate(emails):
-                    subject_col = output_start + (touch_idx * 2)
-                    body_col = output_start + (touch_idx * 2) + 1
-                    df.iloc[row_idx, subject_col] = email.get("subject", "")
-                    df.iloc[row_idx, body_col] = email.get("body", "")
-            else:
-                for i in range(total_out_cols):
-                    df.iloc[row_idx, output_start + i] = "[ERROR: Invalid response format]"
         else:
             for i in range(total_out_cols):
                 df.iloc[row_idx, output_start + i] = "[ERROR: Invalid response format]"

@@ -23,6 +23,7 @@ REQUIRED_FIELDS = {
 _DISQUALIFY = {
     "organization": ["domain", "url", "id", "start", "end", "description", "location", "website", "position", "industry", "title"],
     "organisation_name": ["domain", "url", "id", "start", "end", "description", "location", "website", "position", "industry", "title"],
+    "email_address": ["campaign", "id", "status", "type", "template", "sent", "open", "click", "bounce", "opt"],
 }
 
 

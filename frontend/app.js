@@ -22,9 +22,6 @@
 
     const templateSelect   = document.getElementById("template-select");
     const templateDesc     = document.getElementById("template-description");
-    const customPromptSec  = document.getElementById("custom-prompt-section");
-    const customPromptArea = document.getElementById("custom-prompt");
-    const charCount        = document.getElementById("char-count");
 
     const progressFill    = document.getElementById("progress-fill");
     const progressStatus  = document.getElementById("progress-status");
@@ -61,20 +58,30 @@
             const data = await resp.json();
             templateData = data.templates || [];
 
-            // Clear existing options and rebuild
-            templateSelect.innerHTML = "";
+            // Group templates by their group field, preserving order
+            const groupOrder = [];
+            const groups = {};
             templateData.forEach((t) => {
-                const opt = document.createElement("option");
-                opt.value = t.id;
-                opt.textContent = t.name;
-                templateSelect.appendChild(opt);
+                if (!groups[t.group]) {
+                    groups[t.group] = [];
+                    groupOrder.push(t.group);
+                }
+                groups[t.group].push(t);
             });
 
-            // Add the "Custom Prompt" option
-            const customOpt = document.createElement("option");
-            customOpt.value = "custom";
-            customOpt.textContent = "Custom Prompt";
-            templateSelect.appendChild(customOpt);
+            // Build <optgroup> structure
+            templateSelect.innerHTML = "";
+            groupOrder.forEach((groupName) => {
+                const optgroup = document.createElement("optgroup");
+                optgroup.label = groupName;
+                groups[groupName].forEach((t) => {
+                    const opt = document.createElement("option");
+                    opt.value = t.id;
+                    opt.textContent = `${t.name} (${t.num_emails} emails)`;
+                    optgroup.appendChild(opt);
+                });
+                templateSelect.appendChild(optgroup);
+            });
 
             // Set initial description
             updateTemplateDescription();
@@ -85,21 +92,16 @@
 
     function updateTemplateDescription() {
         const selected = templateSelect.value;
-        if (selected === "custom") {
-            templateDesc.textContent = "Provide your own system prompt. The model receives all lead data as context.";
-            customPromptSec.hidden = false;
-        } else {
-            const tmpl = templateData.find((t) => t.id === selected);
-            templateDesc.textContent = tmpl ? tmpl.description : "";
-            customPromptSec.hidden = true;
+        const tmpl = templateData.find((t) => t.id === selected);
+        templateDesc.textContent = tmpl ? tmpl.description : "";
+
+        // Update button text with email count
+        if (tmpl) {
+            uploadBtn.textContent = `Generate ${tmpl.num_emails} Emails per Lead`;
         }
     }
 
     templateSelect.addEventListener("change", updateTemplateDescription);
-
-    customPromptArea.addEventListener("input", () => {
-        charCount.textContent = customPromptArea.value.length;
-    });
 
     // Load templates on page load
     loadTemplates();
@@ -191,9 +193,6 @@
         const formData = new FormData();
         formData.append("file", selectedFile);
         formData.append("prompt_id", templateSelect.value);
-        if (templateSelect.value === "custom") {
-            formData.append("custom_prompt", customPromptArea.value);
-        }
 
         try {
             const resp = await fetch("/api/upload", {
@@ -375,8 +374,6 @@
         startTime = null;
         clearFile();
         uploadBtn.classList.remove("loading");
-        customPromptArea.value = "";
-        charCount.textContent = "0";
         showSection(uploadSection);
     }
 

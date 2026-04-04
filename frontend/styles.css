@@ -377,41 +377,15 @@ body {
     margin-top: 0.375rem;
 }
 
-/* === Custom Prompt Textarea === */
-.custom-prompt-section {
-    margin-bottom: 1.25rem;
-}
-
-.custom-prompt-section label {
-    display: block;
+/* === Template Selector optgroup === */
+.template-selector select optgroup {
     font-weight: 600;
-    margin-bottom: 0.375rem;
-    font-size: 0.9375rem;
+    font-style: normal;
+    color: #555;
+}
+
+.template-selector select option {
+    font-weight: 400;
     color: #1a1a2e;
-}
-
-.custom-prompt-section textarea {
-    width: 100%;
-    padding: 0.75rem;
-    border: 1px solid #c8d1dc;
-    border-radius: 8px;
-    font-size: 0.875rem;
-    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-    line-height: 1.5;
-    resize: vertical;
-    min-height: 120px;
-    color: #1a1a2e;
-}
-
-.custom-prompt-section textarea:focus {
-    outline: none;
-    border-color: #0078d4;
-    box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.15);
-}
-
-.char-count {
-    text-align: right;
-    font-size: 0.75rem;
-    color: #999;
-    margin-top: 0.25rem;
+    padding: 0.25rem 0;
 }

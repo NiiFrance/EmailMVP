@@ -14,7 +14,7 @@
                 <div class="logo-icon">R</div>
                 <div>
                     <h1>Reliance Infosystems</h1>
-                    <p class="tagline">Cold Email Campaign Generator</p>
+                    <p class="tagline">Email Campaign Generator</p>
                 </div>
             </div>
         </header>
@@ -32,21 +32,13 @@
 
                 <!-- Template Selector -->
                 <div class="template-selector">
-                    <label for="template-select">Template</label>
+                    <label for="template-select">Campaign Template</label>
                     <select id="template-select">
-                        <option value="cold_email" selected>Cold Email Sequences</option>
+                        <option value="cold_email" selected>Cold Email - Original (8 emails)</option>
                     </select>
                     <p id="template-description" class="template-desc">
-                        Generate 8 personalized cold emails per lead for Microsoft licensing outreach.
+                        8-touch cold email sequence for Microsoft licensing outreach. 8 emails per lead.
                     </p>
-                </div>
-
-                <!-- Custom Prompt (shown only when "custom" is selected) -->
-                <div id="custom-prompt-section" class="custom-prompt-section" hidden>
-                    <label for="custom-prompt">Custom System Prompt</label>
-                    <textarea id="custom-prompt" rows="8" maxlength="10000"
-                        placeholder="Paste your custom system prompt here. The model will receive all lead data as context."></textarea>
-                    <p class="char-count"><span id="char-count">0</span> / 10,000</p>
                 </div>
 
                 <div class="upload-area" id="drop-zone">
@@ -63,7 +55,7 @@
                 </div>
 
                 <button id="upload-btn" class="btn btn-primary" disabled>
-                    Generate Sequences
+                    Generate Emails
                 </button>
 
                 <div id="upload-error" class="error" hidden></div>

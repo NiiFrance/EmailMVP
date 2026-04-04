@@ -25,8 +25,6 @@ from prompt_templates import (
     PROMPT_REGISTRY,
     get_template,
     list_templates,
-    build_custom_template,
-    MAX_CUSTOM_PROMPT_LENGTH,
 )
 from csv_processor import (
     parse_csv,
@@ -115,32 +113,15 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
 
         # Resolve prompt template
         prompt_id = req.form.get("prompt_id", "cold_email")
-        custom_prompt = req.form.get("custom_prompt", "")
 
-        if prompt_id == "custom":
-            if not custom_prompt.strip():
-                return func.HttpResponse(
-                    json.dumps({"error": "Custom prompt text is required when using the 'custom' template."}),
-                    status_code=400,
-                    mimetype="application/json",
-                )
-            try:
-                template = build_custom_template(custom_prompt.strip())
-            except ValueError as e:
-                return func.HttpResponse(
-                    json.dumps({"error": str(e)}),
-                    status_code=400,
-                    mimetype="application/json",
-                )
-        else:
-            try:
-                template = get_template(prompt_id)
-            except KeyError:
-                return func.HttpResponse(
-                    json.dumps({"error": f"Unknown template: {prompt_id}. Use GET /api/templates to list available templates."}),
-                    status_code=400,
-                    mimetype="application/json",
-                )
+        try:
+            template = get_template(prompt_id)
+        except KeyError:
+            return func.HttpResponse(
+                json.dumps({"error": f"Unknown template: {prompt_id}. Use GET /api/templates to list available templates."}),
+                status_code=400,
+                mimetype="application/json",
+            )
 
         # Parse the file (CSV or Excel)
         try:
@@ -196,11 +177,7 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
         logger.info("Uploaded %s (%d leads) as %s [template=%s]", filename, total_leads, blob_name, template["id"])
 
         # Store template config for use by activities
-        # For built-in templates, store only the ID. For custom, store the full prompt.
-        if prompt_id == "custom":
-            template_config = {"id": "custom", "custom_prompt": custom_prompt.strip()}
-        else:
-            template_config = {"id": prompt_id}
+        template_config = {"id": prompt_id}
 
         # Start orchestration
         orchestrator_input = {
@@ -312,8 +289,6 @@ def extract_leads_activity(extractInput: dict) -> list:
 def _resolve_template(template_config: dict) -> dict:
     """Resolve a template dict from the config passed through the orchestrator."""
     template_id = template_config.get("id", "cold_email")
-    if template_id == "custom":
-        return build_custom_template(template_config["custom_prompt"])
     return get_template(template_id)
 
 
@@ -362,12 +337,7 @@ def process_lead_activity(leadInput: dict) -> dict:
 
         logger.info("Successfully generated content for lead %d [template=%s]", row_index, template["id"])
 
-        # For backward compatibility with cold_email, also include 'emails' key
-        result = {"row_index": row_index, "parsed": parsed}
-        if template["id"] == "cold_email":
-            result["emails"] = parsed
-
-        return result
+        return {"row_index": row_index, "parsed": parsed}
 
     except json.JSONDecodeError as e:
         logger.error("JSON parse error for lead %d: %s", row_index, str(e))
@@ -395,19 +365,7 @@ def assemble_csv_activity(assembleInput: dict) -> str:
     # Get output headers and flatten function from the template
     output_headers_fn = template.get("output_headers")
     flatten_result_fn = template.get("flatten_result")
-
-    # For custom templates, discover headers from the first successful result
-    if output_headers_fn is None:
-        # Find first successful parsed result to discover columns
-        from prompt_templates import _custom_output_headers_from_parsed
-        for r in results:
-            if "parsed" in r:
-                output_headers = _custom_output_headers_from_parsed(r["parsed"])
-                break
-        else:
-            output_headers = ["Output"]  # Fallback
-    else:
-        output_headers = output_headers_fn()
+    output_headers = output_headers_fn()
 
     csv_bytes = _download_blob(INPUT_CONTAINER, f"{job_id}.csv")
     enriched_bytes = assemble_enriched_csv(
