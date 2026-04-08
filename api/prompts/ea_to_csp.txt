@@ -24,10 +24,10 @@ WHAT YOU ARE WRITING:
 Generate exactly 4 emails as a JSON array. Each object must contain "subject" and "body".
 
 EMAIL PURPOSES:
-1. Email 1: Reframe the model. Introduce the idea that customers in the Microsoft Enterprise Agreement model often need more flexibility, easier billing management, faster provisioning, and stronger partner support than traditional agreement structures usually provide. Start the customer thinking about CSP as a better way to buy and manage Microsoft.
-2. Email 2: Expand the business value. Build the case for CSP more clearly through practical value themes such as billing flexibility, licence agility, simpler lifecycle management, faster access to new services, better support responsiveness, and reduced operational friction.
-3. Email 3: Build trust in the transition. Shift from why CSP is attractive to why Reliance Infosystems is a safe and capable partner to make the move with. Emphasise guided transition, implementation strength, support responsiveness, adoption guidance, and a smooth customer experience.
-4. Email 4: Close with a low-friction next step. Reinforce the strategic and operational value of moving to CSP, keep the tone executive-safe, and invite a practical conversation or options review without pressure.
+- Email 1: Reframe the model. Introduce the idea that customers in the Microsoft Enterprise Agreement model often need more flexibility, easier billing management, faster provisioning, and stronger partner support than traditional agreement structures usually provide. Start the customer thinking about CSP as a better way to buy and manage Microsoft. End with a subtle CTA.
+- Email 2: Expand the business value. Build the case for CSP more clearly through practical value themes such as billing flexibility, licence agility, simpler lifecycle management, faster access to new services, better support responsiveness, and reduced operational friction. End with a subtle CTA.
+- Email 3: Build trust in the transition. Shift from why CSP is attractive to why Reliance Infosystems is a safe and capable partner to make the move with. Emphasise guided transition, implementation strength, support responsiveness, adoption guidance, and a smooth customer experience. End with a subtle CTA.
+- Email 4: Close with a low-friction next step. Reinforce the strategic and operational value of moving to CSP, keep the tone executive-safe, and invite a practical conversation or options review without pressure.
 
 TARGET AUDIENCE:
 The contacts may operate across different job functions, so do not rely on predefined role categories. Instead, interpret the individual's job title and any available context to understand how a transition from an Enterprise Agreement (EA) licensing model to a Cloud Solution Provider (CSP) model would be relevant to them.
@@ -68,15 +68,18 @@ CSP VALUE THEMES YOU MAY USE:
 - Reduced friction compared with long, rigid agreement structures
 - A more practical commercial and operational relationship
 
-Note: The themes suggested above are not exhaustive and are provided only as guidance.
+Note: The themes suggested above are not exhaustive and are provided only as guidance. They are intended to spark creativity and help you explore a broad range of value propositions that can effectively position CSP as a compelling alternative for customers currently on the Enterprise Agreement licensing model.
 
 WRITING CONSTRAINTS:
 - Subject line: maximum 7 words
-- Body length: 140 to 230 words
-- 2-3 paragraphs in each email
-- Do not include a signature block
-- Do not include links or URLs
-- No bullet points inside the email body
+- Body length: 140 to 220 words
+- Every email must start with a greeting (e.g. Hi, {First Name})
+- Paragraph count: 2 to 3 body paragraphs per email. The greeting line (e.g. Hi, Name) goes on its own line and does not count as a paragraph. The closing line (e.g. Kind regards,) goes on its own line and does not count as a paragraph. Count only the body paragraphs between the greeting and closing, separated by blank lines.
+- Tone: calm, executive-friendly, commercially intelligent, plain English
+- Closing: include a short closing such as "Kind regards," or "Warm regards,"
+- No markdown
+- Plain ASCII punctuation only
+- The body must feel human, thoughtful, and natural
 
 OUTPUT FORMAT:
 Return ONLY a valid JSON array with exactly 4 objects in this format:

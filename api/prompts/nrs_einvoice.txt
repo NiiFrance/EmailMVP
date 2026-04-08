@@ -30,10 +30,10 @@ Each object must contain "subject" and "body".
 
 EMAIL PURPOSES:
 Email 1: Awareness and reframing.
-Introduce the NRS e-Invoicing mandate and reframe it as an operational and systems change, not just a tax requirement. Help the recipient recognise that invoicing, validation, and reporting processes are changing in real time.
+Introduce the NRS e-Invoicing mandate and reframe it as an operational and systems change, not just a tax requirement. Help the recipient recognise that invoicing, validation, and reporting processes are changing in real time. While doing this, ensure that you position Reliance Infosystems as an accredited System Integrator and Access Point Provider with the competence, structure, and professionalism required to support compliant onboarding and ongoing operations. End with a good and subtle CTA.
 
 Email 2: Business impact and risk.
-Expand on what e-Invoicing means for day-to-day operations, finance workflows, ERP or accounting systems, and audit readiness. Emphasise the importance of getting integration and process design right early.
+Expand on what e-Invoicing means for day-to-day operations, finance workflows, ERP or accounting systems, and audit readiness. Emphasise the importance of getting integration and process design right early. While doing this, ensure that you position Reliance Infosystems as an accredited System Integrator and Access Point Provider with the competence, structure, and professionalism required to support compliant onboarding and ongoing operations. End with a good and subtle CTA.
 
 Email 3: Trust and capability.
 Shift focus from the regulation itself to execution. Position Reliance Infosystems as an accredited System Integrator and Access Point Provider with the competence, structure, and professionalism required to support compliant onboarding and ongoing operations.
@@ -50,12 +50,12 @@ If the role is unclear, default to a senior business audience and write in a com
 
 MANDATORY PERSONALISATION:
 Use the recipient's first name in each email.
-Use the organisation name naturally where relevant.
+Use the organisation name where relevant.
 
 OPTIONAL PERSONALISATION AND CONTEXT DISCOVERY:
 - Review the full input record to identify additional fields that can improve relevance and credibility.
 - This may include industry, transaction volume indicators, business size signals, system complexity, ERP usage, or operational maturity.
-- Use additional context only when it strengthens the message naturally.
+- Use additional context only when it strengthens the message.
 - Ignore fields that are unclear, weak, overly technical, or risky.
 - Do not mention internal data sources, backend fields, classifications, or anything that could cause the recipient to question how the information was obtained.
 
@@ -81,7 +81,7 @@ These themes are guidance only and not exhaustive.
 
 WHAT YOU MUST NOT DO:
 - Do not threaten penalties or enforcement actions.
-- Do not imply the recipient is already non-compliant.
+- Do not imply that the recipient is already non-compliant.
 - Do not claim guaranteed regulatory outcomes.
 - Do not suggest government endorsement beyond formal accreditation.
 - Do not sound salesy, urgent, or alarmist.
@@ -90,11 +90,13 @@ WHAT YOU MUST NOT DO:
 WRITING CONSTRAINTS:
 - Subject line: maximum 7 words
 - Body length: 140 to 230 words
-- 2-3 paragraphs per email
+- Every email must start with a greeting (e.g. Hi, {First Name})
+- 2-3 body paragraphs per email. The greeting line (e.g. Hi, Name) goes on its own line and does not count as a paragraph. Count only the body paragraphs below the greeting, separated by blank lines.
 - Tone: calm, professional, business-focused
 - No bullet points inside the email body
 - Do not include links or URLs
 - Do not include a signature block
+- Plain ASCII punctuation only. Do not use non-breaking hyphens, em dashes, smart quotes, or other Unicode punctuation.
 
 OUTPUT FORMAT:
 Return ONLY a valid JSON array with exactly 4 objects in this format:
