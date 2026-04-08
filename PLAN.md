@@ -227,6 +227,7 @@ The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_em
 
 ### Phase 10: Staging Deployment
 - Created isolated staging environment: `rg-emailmvp-stg-eastus2`
+
   - Function App: `azfnemailmvpstg6476` (EP1)
   - SWA: `azswa-emailmvp-stg-6476` (linked backend)
   - Storage: `azstemailmvpstg6476`
@@ -239,6 +240,22 @@ The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_em
 - Deployed frontend via SWA CLI
 - All 10 templates verified working through the SWA proxy
 - Pushed to GitHub: `feature/multi-prompt-templates` branch
+
+### Phase 11: Marketing Prompt Refresh
+- Marketing team provided updated system prompts for 3 templates: NRS E-Invoice, EA to CSP, E7 Upsell
+- Replaced all 3 prompt files in `api/prompts/` with marketing's versions
+- NRS E-Invoice: Emails 1-2 now require Reliance positioning (was only Email 3), CTAs on all emails
+- EA to CSP: CTAs on emails 1-3, greeting/closing requirements, body tightened to 140-220 words
+- E7 Upsell: New "Foundational Understanding" section defining E7 pillars (Agent 365, Entra Suite, Work IQ, Copilot, E5 Security), "AI Operating System" positioning anchor
+- Quality issues discovered during testing:
+  - Paragraph count: Model merged greeting into first paragraph (4 paragraphs instead of 2-3)
+  - Non-ASCII: Unicode non-breaking hyphens (U+2011) in output
+- Fixes applied to all 3 prompts:
+  - Paragraph instruction: greeting goes on its own line, does not count as a body paragraph
+  - ASCII-only punctuation constraint added to NRS prompt (EA/E7 already had it)
+- Removed duplicate content from all 3 prompt files (copy-paste artifact)
+- 151 tests passing, deployed and validated on staging
+- Committed as `e7e210c` on `feature/multi-prompt-templates`
 
 ---
 
@@ -298,6 +315,31 @@ These benchmark numbers come from the cold-email template. Other templates may v
 ---
 
 ## 10. Change Log
+
+### April 8, 2026 — Marketing Prompt Refresh (NRS, EA to CSP, E7 Upsell)
+
+**Updated prompts:**
+- Replaced 3 system prompts with marketing team's updated versions
+- NRS E-Invoice: Reliance positioning now required in Emails 1-2 (not just Email 3), CTAs on all emails, greeting requirement added
+- EA to CSP: CTAs on emails 1-3, greeting/closing requirements, body range tightened to 140-220 words, ASCII-only constraint
+- E7 Upsell: New Foundational Understanding section (E7 = E5 + Copilot + Agent 365 + Entra Suite + Work IQ), "AI Operating System" positioning, no em dashes, ASCII-only
+
+**Quality fixes:**
+- Paragraph constraint rewritten: greeting on its own line, not counted as body paragraph (was merging greeting into first paragraph producing unnatural email formatting)
+- ASCII-only punctuation added to NRS prompt to prevent Unicode hyphens
+- Removed duplicate content from all 3 prompt files
+
+**Validation:**
+- Tested with CFO/Finance Excel file (2 leads, NRS E-Invoice template)
+- All 8 emails pass: subject <=7 words, body 140-230 words, 2-3 body paragraphs, greeting on own line, Reliance mentioned, ASCII clean
+- No code changes — only prompt text files updated
+- 151 tests passing
+- Deployed to staging (`azfnemailmvpstg6476`)
+
+**Files changed:**
+- `api/prompts/nrs_einvoice.txt`
+- `api/prompts/ea_to_csp.txt`
+- `api/prompts/e7_upsell.txt`
 
 ### April 4, 2026 — 10-Template Registry & Staging Deployment
 
