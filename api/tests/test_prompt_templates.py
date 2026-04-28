@@ -353,6 +353,23 @@ class TestBuildGenericUserPrompt:
         assert "Industry" not in prompt
         assert "Country" not in prompt
 
+    def test_redacts_email_fields(self):
+        lead = {
+            "row_index": 0,
+            "first_name": "Aseda",
+            "Email ": "asedaboateng@pacificsavingsandloansltdgh.com",
+            "Company": "Pacific Savings and Loans PLC",
+        }
+        prompt = build_user_prompt(lead)
+        assert "Email: [provided]" in prompt
+        assert "asedaboateng@pacificsavingsandloansltdgh.com" not in prompt
+
+    def test_redacts_email_values_in_other_fields(self):
+        lead = {"row_index": 0, "first_name": "Aseda", "Notes": "Contact aseda@example.com"}
+        prompt = build_user_prompt(lead)
+        assert "Notes: Contact [email redacted]" in prompt
+        assert "aseda@example.com" not in prompt
+
     def test_returns_string(self):
         prompt = build_user_prompt({"row_index": 0, "first_name": "X"})
         assert isinstance(prompt, str)

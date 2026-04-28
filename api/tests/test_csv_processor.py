@@ -289,8 +289,22 @@ class TestAssembleEnrichedCSV:
         enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        assert "[ERROR: API timeout]" in df["Subject_Touch1"].iloc[0]
-        assert "[ERROR: API timeout]" in df["Body_Touch8"].iloc[0]
+        assert df["Subject_Touch1"].iloc[0] == "Generation unavailable"
+        assert df["Body_Touch8"].iloc[0] == "Generation unavailable for this lead: API timeout"
+
+    def test_content_filter_error_is_sanitized(self):
+        csv_bytes = _build_csv_bytes([_make_lead_row()])
+        raw_error = "Error code: 400 - {'error': {'code': 'content_filter', 'innererror': {'code': 'ResponsibleAIPolicyViolation'}, 'message': 'https://go.microsoft.com/fwlink/?linkid=2198766'}}"
+        results = [{"row_index": 0, "error": raw_error}]
+        out_headers = _output_headers(4)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
+
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert df["Subject_Touch1"].iloc[0] == "Generation unavailable"
+        body = df["Body_Touch1"].iloc[0]
+        assert "Azure OpenAI blocked this lead" in body
+        assert "ResponsibleAIPolicyViolation" not in body
+        assert "go.microsoft.com" not in body
 
     def test_skips_out_of_range_row_index(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
@@ -376,8 +390,8 @@ class TestAssembleEnrichedCSVDynamic:
 
         enriched = assemble_enriched_csv(csv_bytes, results, output_headers=custom_headers)
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        assert "[ERROR: Timeout]" in df["col_a"].iloc[0]
-        assert "[ERROR: Timeout]" in df["col_c"].iloc[0]
+        assert "Generation unavailable for this lead: Timeout" in df["col_a"].iloc[0]
+        assert "Generation unavailable for this lead: Timeout" in df["col_c"].iloc[0]
 
     def test_legacy_results_with_explicit_headers(self):
         """Results with parsed key work when output_headers and flatten_result are provided."""

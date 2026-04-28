@@ -7,10 +7,12 @@ a common output schema: JSON array of {"subject": ..., "body": ...} objects.
 import json
 import logging
 import pathlib
+import re
 
 logger = logging.getLogger("emailmvp")
 
 _PROMPTS_DIR = pathlib.Path(__file__).parent / "prompts"
+_EMAIL_VALUE_RE = re.compile(r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,22 @@ def _flatten_emails(emails: list[dict]) -> dict[str, str]:
 # User prompt builders
 # ---------------------------------------------------------------------------
 
+def _is_email_field(key: str) -> bool:
+    normalized = str(key).strip().lower().replace("_", " ").replace("-", " ")
+    return normalized in {"email", "e mail", "email address", "mail"} or normalized.endswith(" email")
+
+
+def _prompt_safe_value(key: str, value) -> str:
+    text = str(value).strip()
+    if _is_email_field(key):
+        return "[provided]"
+    return _EMAIL_VALUE_RE.sub("[email redacted]", text)
+
+
+def _append_context_line(context_lines: list[str], key: str, value) -> None:
+    if value and str(value).strip() and str(value).strip().lower() != "nan":
+        context_lines.append(f"{str(key).strip()}: {_prompt_safe_value(key, value)}")
+
 def _build_cold_email_user_prompt(lead_data: dict) -> str:
     """Build a per-lead user prompt for the original cold email template."""
     first_name = lead_data.get("first_name", "")
@@ -111,8 +129,7 @@ def _build_cold_email_user_prompt(lead_data: dict) -> str:
     for key, value in lead_data.items():
         if key in skip_keys:
             continue
-        if value and str(value).strip() and str(value).strip().lower() != "nan":
-            context_lines.append(f"{key}: {value}")
+        _append_context_line(context_lines, key, value)
 
     demographic_block = "\n".join(context_lines) if context_lines else "No additional demographic data available."
 
@@ -140,8 +157,7 @@ def build_user_prompt(lead_data: dict) -> str:
     for key, value in lead_data.items():
         if key == "row_index":
             continue
-        if value and str(value).strip() and str(value).strip().lower() != "nan":
-            context_lines.append(f"{key}: {value}")
+        _append_context_line(context_lines, key, value)
 
     data_block = "\n".join(context_lines) if context_lines else "No data available."
 
