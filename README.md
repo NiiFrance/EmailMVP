@@ -1,13 +1,12 @@
-# Reliance Infosystems — Email Campaign Generator
+# Cloudware — Email Campaign Generator
 
-A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 10 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
+A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 9 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
 
 ## Live Environments
 
 | Environment | URL |
 |---|---|
-| **Staging** | https://calm-smoke-02e96b50f.6.azurestaticapps.net |
-| **Production** | https://blue-mud-0ae74790f.4.azurestaticapps.net |
+| **Cloudware** | https://zealous-mushroom-0ddbf460f.7.azurestaticapps.net |
 
 ## Available Templates
 
@@ -23,7 +22,6 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 | **Demand Gen** | CloudAscent — Solution Focus | 4 | `first_name`, `organization` |
 | **Demand Gen** | Marketplace Offers | 4 | `first_name`, `organization` |
 | **Demand Gen** | Cold Email — Original | 8 | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
-| **Compliance** | NRS E-Invoice — Nigeria | 4 | `first_name`, `organization` |
 | **Inbound** | Help & Assistance — Leads | 2 | `first_name` |
 
 ## Architecture
@@ -33,7 +31,7 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 ```
 [Azure Static Web App]  -> vanilla HTML/CSS/JS
         |
-        +-> GET  /api/templates        (list 10 campaign templates)
+        +-> GET  /api/templates        (list 9 campaign templates)
         +-> POST /api/upload           (CSV/Excel + template selection)
         +-> GET  /api/status/{jobId}   (real-time progress)
         +-> GET  /api/download/{jobId} (enriched CSV)
@@ -55,7 +53,7 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/templates` | `GET` | Returns all 10 templates with group, description, email count |
+| `/api/templates` | `GET` | Returns all 9 templates with group, description, email count |
 | `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
 | `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
 | `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
@@ -63,7 +61,7 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 ### Upload Form Fields
 
 - `file`: CSV or Excel (.xlsx) file
-- `prompt_id`: one of the 10 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
+- `prompt_id`: one of the 9 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
 
 ## Column Detection
 
@@ -90,7 +88,7 @@ All non-required columns are preserved as context and passed to the model for pe
 The frontend groups templates by campaign category in an `<optgroup>` dropdown:
 
 - Template selector loaded dynamically from `/api/templates`
-- Grouped dropdown: Renewals, Migrations, Demand Generation, Compliance, Inbound
+- Grouped dropdown: Renewals, Migrations, Demand Generation, Inbound
 - Dynamic button text showing email count for selected template
 - CSV and Excel upload support
 - Real-time progress bar with pulse animation during initial batch
@@ -102,7 +100,7 @@ The frontend groups templates by campaign category in an `<optgroup>` dropdown:
 EmailMVP/
 |- api/
 |  |- function_app.py          # HTTP triggers, orchestrator, activities
-|  |- prompt_templates.py      # 10-template registry with shared helpers
+|  |- prompt_templates.py      # 9-template registry with shared helpers
 |  |- csv_processor.py         # CSV/Excel parsing and dynamic CSV assembly
 |  |- column_mapper.py         # Fuzzy matching + LLM fallback for required fields
 |  |- host.json                # Durable Functions configuration
@@ -116,7 +114,6 @@ EmailMVP/
 |  |  |- leads.txt
 |  |  |- marketplace.txt
 |  |  |- price_change.txt
-|  |  |- nrs_einvoice.txt
 |  |  \- cloud_ascent.txt
 |  \- tests/
 |     |- test_column_mapper.py
@@ -235,24 +232,24 @@ npx @azure/static-web-apps-cli deploy ./frontend `
   --env production
 ```
 
-### Staging Environment
+### Cloudware Environment
 
 | Resource | Name |
 |---|---|
-| Resource Group | `rg-emailmvp-stg-eastus2` |
-| Function App | `azfnemailmvpstg6476` |
-| Static Web App | `azswa-emailmvp-stg-6476` |
-| Storage Account | `azstemailmvpstg6476` |
-| App Insights | `appi-emailmvp-stg` |
+| Resource Group | `rg-emailmvp-cloudware-eastus2` |
+| Function App | `azfnzcn6oizgufwbo` |
+| Static Web App | `azswazcn6oizgufwbo` |
+| Storage Account | `azstzcn6oizgufwbo` |
+| App Insights | `azaizcn6oizgufwbo` |
 
 The SWA has the Function App linked as a backend, so `/api/*` routes are proxied automatically.
 
 ## Key Design Decisions
 
-- **10-template registry** with prompts loaded from individual `.txt` files for easy editing
+- **9-template registry** with prompts loaded from individual `.txt` files for easy editing
 - **Unified output schema** — all templates produce `[{"subject": ..., "body": ...}]`, eliminating per-template parsers and flatteners
 - **Shared generic helpers** — factory functions for parsing, headers, and flattening parameterized by email count
-- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Compliance, Inbound)
+- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Inbound)
 - **No custom prompt mode** — removed in favor of purpose-built templates vetted by the marketing team
 - **Excel normalization** — `.xlsx` uploads are converted to CSV at upload time so the downstream pipeline stays consistent
 - **Durable fan-out/fan-in** — batch size 100, 2-second inter-batch delay, 2-hour timeout on EP1

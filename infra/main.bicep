@@ -1,6 +1,6 @@
-// EmailMVP Infrastructure — Azure Functions (Premium EP1) + Storage + Key Vault + Static Web App
-// Deploys all resources needed for the Reliance Infosystems cold email generator.
-// Region: East US 2 (required for Azure Foundry Claude models)
+// EmailMVP Infrastructure - Azure Functions (Premium EP1) + Storage + Key Vault + Static Web App
+// Deploys all resources needed for the Cloudware cold email generator.
+// Region: East US 2
 
 targetScope = 'resourceGroup'
 
@@ -13,16 +13,19 @@ param environmentName string
 @description('Primary location for all resources')
 param location string = 'eastus2'
 
-@description('Anthropic Base URL from Azure Foundry deployment')
+@description('Azure OpenAI endpoint, for example https://<resource>.openai.azure.com/')
 @secure()
-param anthropicBaseUrl string
+param azureOpenAiEndpoint string
 
-@description('Anthropic API Key from Azure Foundry deployment')
+@description('Azure OpenAI API key')
 @secure()
-param anthropicApiKey string
+param azureOpenAiApiKey string
 
-@description('Anthropic model deployment name')
-param anthropicModel string = 'claude-opus-4-6'
+@description('Azure OpenAI deployment name')
+param azureOpenAiDeployment string = 'gpt-53-chat'
+
+@description('Number of leads processed concurrently per durable batch')
+param batchSize string = '100'
 
 // -----------------------------------------------------------------------
 // Variables
@@ -187,22 +190,22 @@ resource kvSecretsOfficerRole 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
-// Store Anthropic API key in Key Vault
-resource anthropicApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+// Store Azure OpenAI API key in Key Vault
+resource azureOpenAiApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
-  name: 'AnthropicApiKey'
+  name: 'AzureOpenAIApiKey'
   properties: {
-    value: anthropicApiKey
+    value: azureOpenAiApiKey
   }
   dependsOn: [kvSecretsOfficerRole]
 }
 
-// Store Anthropic base URL in Key Vault
-resource anthropicBaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+// Store Azure OpenAI endpoint in Key Vault
+resource azureOpenAiEndpointSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
-  name: 'AnthropicBaseUrl'
+  name: 'AzureOpenAIEndpoint'
   properties: {
-    value: anthropicBaseUrl
+    value: azureOpenAiEndpoint
   }
   dependsOn: [kvSecretsOfficerRole]
 }
@@ -254,13 +257,13 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
         { name: 'APPINSIGHTS_INSTRUMENTATIONKEY', value: appInsights.properties.InstrumentationKey }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-        { name: 'ANTHROPIC_BASE_URL', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AnthropicBaseUrl)' }
-        { name: 'ANTHROPIC_API_KEY', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AnthropicApiKey)' }
-        { name: 'ANTHROPIC_MODEL', value: anthropicModel }
+        { name: 'AZURE_OPENAI_ENDPOINT', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AzureOpenAIEndpoint)' }
+        { name: 'AZURE_OPENAI_API_KEY', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AzureOpenAIApiKey)' }
+        { name: 'AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }
         { name: 'CSV_INPUT_CONTAINER', value: 'csv-input' }
         { name: 'CSV_OUTPUT_CONTAINER', value: 'csv-output' }
-        { name: 'STORAGE_CONNECTION_STRING', value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccountName};EndpointSuffix=${environment().suffixes.storage};AccountKey=PLACEHOLDER' }
-        { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
+        { name: 'BATCH_SIZE', value: batchSize }
+        { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
       ]
     }
     keyVaultReferenceIdentity: managedIdentity.id

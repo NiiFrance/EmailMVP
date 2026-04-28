@@ -1,4 +1,4 @@
-"""Prompt templates registry - 10 campaign motions for email generation.
+"""Prompt templates registry - 9 campaign motions for email generation.
 
 Each template loads its system prompt from api/prompts/<id>.txt and shares
 a common output schema: JSON array of {"subject": ..., "body": ...} objects.
@@ -315,20 +315,6 @@ PROMPT_REGISTRY = {
         "output_headers": _make_output_headers_fn(8),
         "flatten_result": _flatten_emails,
         "required_fields": FIELDS_COLD_EMAIL,
-    },
-    # --- Compliance ---
-    "nrs_einvoice": {
-        "id": "nrs_einvoice",
-        "name": "NRS E-Invoice - Nigeria",
-        "group": "Compliance",
-        "description": "Help Nigerian businesses navigate the NRS e-Invoicing mandate. 4 emails per lead.",
-        "num_emails": 4,
-        "system_prompt": _load_prompt("nrs_einvoice"),
-        "build_user_prompt": build_user_prompt,
-        "parse_response": _make_parser(4),
-        "output_headers": _make_output_headers_fn(4),
-        "flatten_result": _flatten_emails,
-        "required_fields": FIELDS_NAME_ORG,
     },
     # --- Inbound ---
     "leads": {

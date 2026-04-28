@@ -1,12 +1,12 @@
 # EmailMVP — Design Plan & Implementation History
 
-> Design decisions, architecture, and implementation history for the EmailMVP email campaign generator. The app supports 10 built-in campaign templates covering renewals, migrations, demand generation, compliance, and inbound motions.
+> Design decisions, architecture, and implementation history for the EmailMVP email campaign generator. The app supports 9 built-in campaign templates covering renewals, migrations, demand generation, and inbound motions.
 
 ---
 
 ## 1. Problem Statement
 
-Reliance Infosystems is a Microsoft Solutions Partner that helps organizations manage, renew, upgrade, and optimize Microsoft-centric business processes. The marketing team runs multiple outreach campaigns — CSP renewals, EA migrations, marketplace promotions, compliance messaging, and more — each requiring different email sequences, tone, and personalization strategies.
+Cloudware is a Microsoft Solutions Partner that helps organizations manage, renew, upgrade, and optimize Microsoft-centric business processes. The marketing team runs multiple outreach campaigns — CSP renewals, EA migrations, marketplace promotions, demand generation, and more — each requiring different email sequences, tone, and personalization strategies.
 
 **The manual process:**
 - Sales reps receive lead exports from different sources with inconsistent column names
@@ -16,7 +16,7 @@ Reliance Infosystems is a Microsoft Solutions Partner that helps organizations m
 
 **The solution:**
 - Upload a CSV or Excel file
-- Choose one of 10 purpose-built campaign templates
+- Choose one of 9 purpose-built campaign templates
 - Let the backend detect required columns, generate personalized email sequences per lead, and return an enriched CSV with email columns appended
 
 ---
@@ -25,7 +25,7 @@ Reliance Infosystems is a Microsoft Solutions Partner that helps organizations m
 
 ### Functional
 - Upload CSV or Excel (.xlsx) files containing lead data
-- List 10 available campaign templates to the frontend via an API
+- List 9 available campaign templates to the frontend via an API
 - Automatically detect required columns via fuzzy matching + LLM fallback
 - Generate 2–8 personalized emails per lead depending on the template
 - All templates share a unified output format: `[{"subject": ..., "body": ...}]`
@@ -101,7 +101,7 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 
 ### Unified Output Format
 
-All 10 templates produce the same JSON output: an array of `{"subject": ..., "body": ...}` objects. This means:
+All 9 templates produce the same JSON output: an array of `{"subject": ..., "body": ...}` objects. This means:
 - One shared parser (parameterized by expected email count)
 - One shared flattener (emails → `Subject_TouchN`, `Body_TouchN` columns)
 - One shared output header generator
@@ -115,7 +115,7 @@ System prompts are stored as individual `.txt` files in `api/prompts/`. Each fil
 
 | Touch | Purpose | Strategy |
 |---|---|---|
-| 1. Introduction | First contact | Warm, non-pushy, positions Reliance as licensing advisor |
+| 1. Introduction | First contact | Warm, non-pushy, positions Cloudware as licensing advisor |
 | 2. Diagnostic | Spark reflection | Asks about renewal pain points (compliance, over-licensing) |
 | 3. Benefit | Show value | Cost savings, compliance, streamlined procurement |
 | 4. Social Proof | Build trust | Anonymized success stories from similar orgs |
@@ -146,7 +146,6 @@ Constraints: max 7-word subjects, 200–260 word bodies, plain ASCII only, no UR
 | `cloud_ascent` | Demand Gen | 4 | Generic | `first_name`, `organization` |
 | `marketplace` | Demand Gen | 4 | Generic | `first_name`, `organization` |
 | `cold_email` | Demand Gen | 8 | Custom (5 fields) | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
-| `nrs_einvoice` | Compliance | 4 | Generic | `first_name`, `organization` |
 | `leads` | Inbound | 2 | Generic | `first_name` |
 
 The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_email` template uses a custom builder that formats the 5 primary fields explicitly plus remaining columns as context.
@@ -210,11 +209,11 @@ The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_em
 - Updated the frontend for template selection and custom prompt input
 - Expanded test coverage to 125 passing tests
 
-### Phase 9: 10-Template Registry (current)
+### Phase 9: 9-Template Registry (current)
 - Marketing team provided 9 Word doc prompts for real campaign motions
 - Key discovery: ALL templates share the same `[{"subject": ..., "body": ...}]` output format
 - Rewrote `prompt_templates.py` — replaced per-template parsers/flatteners with shared factory functions
-- Created 10 `.txt` prompt files in `api/prompts/` (one per template)
+- Created 9 `.txt` prompt files in `api/prompts/` (one per template)
 - Removed `e_invoice` complex schema (persona/channel metadata) — replaced with simpler 4-email version
 - Removed `custom` prompt mode entirely — all templates are now purpose-built
 - Removed custom prompt textarea from the frontend
@@ -238,13 +237,12 @@ The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_em
   - Container restart loop caused by stale `ContainerTimeout` — fixed with stop/start
 - Successfully deployed backend with `--build-remote true`
 - Deployed frontend via SWA CLI
-- All 10 templates verified working through the SWA proxy
+- All 9 templates verified working through the SWA proxy
 - Pushed to GitHub: `feature/multi-prompt-templates` branch
 
 ### Phase 11: Marketing Prompt Refresh
-- Marketing team provided updated system prompts for 3 templates: NRS E-Invoice, EA to CSP, E7 Upsell
-- Replaced all 3 prompt files in `api/prompts/` with marketing's versions
-- NRS E-Invoice: Emails 1-2 now require Reliance positioning (was only Email 3), CTAs on all emails
+- Marketing team provided updated system prompts for 2 Cloudware templates: EA to CSP and E7 Upsell
+- Replaced both prompt files in `api/prompts/` with marketing's versions
 - EA to CSP: CTAs on emails 1-3, greeting/closing requirements, body tightened to 140-220 words
 - E7 Upsell: New "Foundational Understanding" section defining E7 pillars (Agent 365, Entra Suite, Work IQ, Copilot, E5 Security), "AI Operating System" positioning anchor
 - Quality issues discovered during testing:
@@ -252,8 +250,8 @@ The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_em
   - Non-ASCII: Unicode non-breaking hyphens (U+2011) in output
 - Fixes applied to all 3 prompts:
   - Paragraph instruction: greeting goes on its own line, does not count as a body paragraph
-  - ASCII-only punctuation constraint added to NRS prompt (EA/E7 already had it)
-- Removed duplicate content from all 3 prompt files (copy-paste artifact)
+  - ASCII-only punctuation constraints retained for both prompts
+  - Removed duplicate content from both prompt files (copy-paste artifact)
 - 151 tests passing, deployed and validated on staging
 - Committed as `e7e210c` on `feature/multi-prompt-templates`
 
@@ -316,39 +314,34 @@ These benchmark numbers come from the cold-email template. Other templates may v
 
 ## 10. Change Log
 
-### April 8, 2026 — Marketing Prompt Refresh (NRS, EA to CSP, E7 Upsell)
+### April 8, 2026 — Marketing Prompt Refresh (EA to CSP, E7 Upsell)
 
 **Updated prompts:**
-- Replaced 3 system prompts with marketing team's updated versions
-- NRS E-Invoice: Reliance positioning now required in Emails 1-2 (not just Email 3), CTAs on all emails, greeting requirement added
+- Replaced 2 system prompts with marketing team's updated versions
 - EA to CSP: CTAs on emails 1-3, greeting/closing requirements, body range tightened to 140-220 words, ASCII-only constraint
 - E7 Upsell: New Foundational Understanding section (E7 = E5 + Copilot + Agent 365 + Entra Suite + Work IQ), "AI Operating System" positioning, no em dashes, ASCII-only
 
 **Quality fixes:**
 - Paragraph constraint rewritten: greeting on its own line, not counted as body paragraph (was merging greeting into first paragraph producing unnatural email formatting)
-- ASCII-only punctuation added to NRS prompt to prevent Unicode hyphens
-- Removed duplicate content from all 3 prompt files
+- Removed duplicate content from both prompt files
 
 **Validation:**
-- Tested with CFO/Finance Excel file (2 leads, NRS E-Invoice template)
-- All 8 emails pass: subject <=7 words, body 140-230 words, 2-3 body paragraphs, greeting on own line, Reliance mentioned, ASCII clean
 - No code changes — only prompt text files updated
 - 151 tests passing
 - Deployed to staging (`azfnemailmvpstg6476`)
 
 **Files changed:**
-- `api/prompts/nrs_einvoice.txt`
 - `api/prompts/ea_to_csp.txt`
 - `api/prompts/e7_upsell.txt`
 
-### April 4, 2026 — 10-Template Registry & Staging Deployment
+### April 4, 2026 — 9-Template Registry & Staging Deployment
 
 **New capabilities:**
-- 10 purpose-built campaign templates replacing the old 3-template system (cold_email, e_invoice, custom)
+- 9 purpose-built campaign templates replacing the old 3-template system (cold_email, e_invoice, custom)
 - All templates share unified `[{"subject", "body"}]` output format
 - System prompts stored as individual `.txt` files in `api/prompts/`
 - Shared factory functions for parsing, headers, and flattening (parameterized by email count)
-- Grouped `<optgroup>` dropdown in the frontend (Renewals, Migrations, Demand Gen, Compliance, Inbound)
+- Grouped `<optgroup>` dropdown in the frontend (Renewals, Migrations, Demand Gen, Inbound)
 - Email address disqualification patterns in column mapper
 
 **Removed:**
@@ -393,7 +386,7 @@ These benchmark numbers come from the cold-email template. Other templates may v
 - **Double-dialog bug fix** — Clicking "Browse Files" opened the file picker twice because the click event bubbled from the `<label>` to the drop-zone's click handler. Fixed by checking `e.target.closest("label")` before calling `fileInput.click()`.
 - **Pulse animation on progress bar** — While `processedLeads == 0` and the job is running, the progress bar shows a shimmer/pulse animation with "Preparing leads..." text so users know the system is working during the first batch.
 - **Job summary on download screen** — The download section now displays total leads, elapsed time, and job ID instead of hiding them when processing completes.
-- **Footer text** — Shortened from "Powered by Azure Foundry & Claude Opus 4.6 — Reliance Infosystems" to just "Reliance Infosystems".
+- **Footer text** — Shortened from "Powered by Azure Foundry & Claude Opus 4.6 — Cloudware" to just "Cloudware".
 
 ### March 27-28, 2026 — Performance Optimization & Progress Bar
 

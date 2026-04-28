@@ -90,7 +90,7 @@ class TestResolveTemplate:
     def test_resolve_all_templates(self):
         for tid in ["cold_email", "csp_renewal_with_license", "csp_renewal_without_license",
                     "e7_upsell", "ea_to_csp", "leads", "marketplace", "price_change",
-                    "nrs_einvoice", "cloud_ascent"]:
+                    "cloud_ascent"]:
             template = fa._resolve_template({"id": tid})
             assert template["id"] == tid
 
