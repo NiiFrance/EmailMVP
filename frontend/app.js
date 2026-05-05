@@ -20,6 +20,9 @@
     const uploadBtn     = document.getElementById("upload-btn");
     const uploadError   = document.getElementById("upload-error");
 
+    const templateSelect   = document.getElementById("template-select");
+    const templateDesc     = document.getElementById("template-description");
+
     const progressFill    = document.getElementById("progress-fill");
     const progressStatus  = document.getElementById("progress-status");
     const progressPercent = document.getElementById("progress-percent");
@@ -45,6 +48,63 @@
     let pollTimer    = null;
     let startTime    = null;
     let elapsedTimer = null;
+    let templateData = [];  // cached template list from API
+
+    // ── Load Templates ──
+    async function loadTemplates() {
+        try {
+            const resp = await fetch("/api/templates");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            templateData = data.templates || [];
+
+            // Group templates by their group field, preserving order
+            const groupOrder = [];
+            const groups = {};
+            templateData.forEach((t) => {
+                if (!groups[t.group]) {
+                    groups[t.group] = [];
+                    groupOrder.push(t.group);
+                }
+                groups[t.group].push(t);
+            });
+
+            // Build <optgroup> structure
+            templateSelect.innerHTML = "";
+            groupOrder.forEach((groupName) => {
+                const optgroup = document.createElement("optgroup");
+                optgroup.label = groupName;
+                groups[groupName].forEach((t) => {
+                    const opt = document.createElement("option");
+                    opt.value = t.id;
+                    opt.textContent = `${t.name} (${t.num_emails} emails)`;
+                    optgroup.appendChild(opt);
+                });
+                templateSelect.appendChild(optgroup);
+            });
+
+            // Set initial description
+            updateTemplateDescription();
+        } catch (err) {
+            // Fallback: keep the static cold_email option
+        }
+    }
+
+    function updateTemplateDescription() {
+        const selected = templateSelect.value;
+        const tmpl = templateData.find((t) => t.id === selected);
+        templateDesc.textContent = tmpl ? tmpl.description : "";
+
+        // Update button text with email count
+        if (tmpl) {
+            uploadBtn.textContent = `Generate ${tmpl.num_emails} Emails per Lead`;
+        }
+    }
+
+    templateSelect.addEventListener("change", updateTemplateDescription);
+
+    // Load templates on page load
+    loadTemplates();
 
     // ── Helpers ──
     function showSection(section) {
@@ -132,6 +192,7 @@
 
         const formData = new FormData();
         formData.append("file", selectedFile);
+        formData.append("prompt_id", templateSelect.value);
 
         try {
             const resp = await fetch("/api/upload", {
@@ -155,6 +216,8 @@
             showSection(progressSection);
             jobIdDisplay.textContent = currentJobId;
             totalLeadsDisp.textContent = totalLeads;
+            const templateName = data.templateName || "Cold Email Sequences";
+            progressStatus.textContent = `Starting ${templateName}...`;
             startTime = Date.now();
             startTimeDisp.textContent = new Date(startTime).toLocaleTimeString();
             progressFill.style.width = "0%";

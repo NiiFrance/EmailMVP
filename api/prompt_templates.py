@@ -1,69 +1,108 @@
-"""Prompt templates for cold email generation using Claude Opus 4.6."""
+"""Prompt templates registry - 10 campaign motions for email generation.
+
+Each template loads its system prompt from api/prompts/<id>.txt and shares
+a common output schema: JSON array of {"subject": ..., "body": ...} objects.
+"""
+
+import json
+import logging
+import pathlib
+
+logger = logging.getLogger("emailmvp")
+
+_PROMPTS_DIR = pathlib.Path(__file__).parent / "prompts"
 
 
-SYSTEM_PROMPT = """You are an expert cold email copywriter for Reliance Infosystems, a Microsoft Solutions Partner.
-Reliance Infosystems helps organizations manage, renew, upgrade, and optimize their Microsoft licensing.
-The recipient does NOT know Reliance Infosystems. These are cold outreach emails.
+# ---------------------------------------------------------------------------
+# Prompt file loader
+# ---------------------------------------------------------------------------
 
-Generate exactly 8 emails as a JSON array. Each email object has "subject" and "body" keys.
-
-Touch sequence purposes:
-1. Introduction — Introduce Reliance as a trusted Microsoft licensing advisor. Open with a warm, non-pushy greeting that acknowledges the recipient's role and organization. Briefly position Reliance as a partner who simplifies Microsoft licensing renewals.
-2. Diagnostic — Ask a diagnostic question about their renewal or licensing pain points. Frame the question around common challenges (compliance gaps, over-licensing, budget pressure) to spark self-reflection.
-3. Benefit — Highlight specific, tangible benefits of working with a Microsoft partner for renewals. Focus on outcomes: cost savings, compliance assurance, streamlined procurement, dedicated support.
-4. Social Proof (anonymized) — Reference anonymized success stories from organizations in a similar industry or of similar size. Use phrases like "a mid-size logistics firm" or "a financial services company" — never reveal real names.
-5. Authority — Position Reliance as a Microsoft-authorized, expert licensing partner. Reference Microsoft competencies, certifications, and deep expertise across Microsoft 365, Azure, Dynamics 365, and security solutions.
-6. Promo Canvas — Reference current or recent Microsoft promotions, incentives, or licensing programs that may be relevant to the contact's renewal. Examples include: Microsoft FastTrack, Azure Hybrid Benefit, Microsoft 365 E5 Security add-on trials, CSP migration incentives, EA-to-MCA transition benefits, Software Assurance training vouchers, or seasonal end-of-quarter/end-of-fiscal-year promotional pricing. Tailor to common enterprise licensing scenarios without referencing specific license details from the lead's data.
-7. Switch Plan / Risk Reversal — Address the perceived risk of switching licensing partners. Offer guarantees like a no-obligation licensing audit, seamless migration support, same-day response SLAs, or a dedicated account manager. Make switching feel easy and low-risk.
-8. Danger / Close the Loop — Create urgency around renewal deadlines, potential compliance risks, or the cost of inaction. Frame this as the final outreach in the sequence. Include a clear, soft call to action (e.g., "Would a brief conversation be worthwhile?").
-
-HARD CONSTRAINTS (every email MUST satisfy ALL):
-- Subject: maximum 7 words
-- Body: exactly 200–260 words (count carefully)
-- Tone: calm, human, advisory, outcomes-driven
-- At least 3 paragraphs in the body
-- Include a closing phrase (e.g., "Warm regards," or "Kind regards,")
-- NO signature block (no names, titles, phone numbers, links)
-- NO links anywhere in the email content
-- NO URLs, no "click here", no hyperlinks
-- Use only plain ASCII characters — no em dashes, curly quotes, or special Unicode characters. Use regular hyphens (-), straight quotes (" and '), and standard punctuation only.
-- Address the recipient by first name in each email
-- NEVER mention specific license types (e.g., "Office 365 E3", "E1", "Microsoft 365 Business Basic", "Intune Suite", "Power BI Pro") or exact seat counts/quantities (e.g., "941 seats", "several hundred licenses"). The recipient must not feel we have detailed knowledge of their environment. Instead, use vague references like "your Microsoft environment", "your Microsoft licensing setup", "your upcoming renewal", or "your organization's Microsoft investment". You may acknowledge they use Microsoft products generally, but never enumerate specific SKUs, product names, or quantities.
-- Personalize based on the recipient's name, organization, role, industry, and engagement objectives — but NOT based on specific license details
-
-OUTPUT FORMAT:
-Return ONLY a valid JSON array with exactly 8 objects:
-[
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."},
-  {"subject": "...", "body": "..."}
-]
-No markdown, no code fences, no explanation. Just the JSON array."""
+def _load_prompt(name: str) -> str:
+    """Load a system prompt from the prompts/ directory."""
+    path = _PROMPTS_DIR / f"{name}.txt"
+    return path.read_text(encoding="utf-8").strip()
 
 
-def build_user_prompt(lead_data: dict) -> str:
-    """Build a per-lead user prompt from CSV row data.
+# ---------------------------------------------------------------------------
+# Shared helpers — all templates produce [{"subject": ..., "body": ...}]
+# ---------------------------------------------------------------------------
 
-    Args:
-        lead_data: Dictionary with column headers as keys and cell values as values.
-                   Must include keys for first name (col K), last name (col L),
-                   organization (col W), renewal license (col A),
-                   engagement objectives (col B), and demographic cols D–BV.
-    """
-    # Extract primary fields — these are the column HEADERS from the CSV,
-    # so we use the actual header names provided at runtime
+def _strip_fences(text: str) -> str:
+    """Remove markdown code fences from model output."""
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        return "\n".join(lines)
+    return text
+
+
+def _parse_emails(response_text: str, expected_count: int) -> list[dict]:
+    """Parse model response into a list of email dicts with subject + body."""
+    text = _strip_fences(response_text.strip())
+
+    # Handle DO NOT GENERATE responses from validation-aware templates
+    if text.upper().startswith("DO NOT GENERATE"):
+        raise ValueError(f"Model declined: {text[:200]}")
+
+    emails = json.loads(text)
+
+    if not isinstance(emails, list) or len(emails) != expected_count:
+        raise ValueError(
+            f"Expected {expected_count} emails, got "
+            f"{len(emails) if isinstance(emails, list) else 'non-list'}"
+        )
+
+    for i, email in enumerate(emails):
+        if "subject" not in email or "body" not in email:
+            raise ValueError(f"Email {i+1} missing 'subject' or 'body' key")
+
+    return emails
+
+
+def _make_parser(expected_count: int):
+    """Factory: return a parser function bound to a specific email count."""
+    def parser(response_text: str) -> list[dict]:
+        return _parse_emails(response_text, expected_count)
+    return parser
+
+
+def _output_headers(num_emails: int) -> list[str]:
+    """Generate output column headers for N emails."""
+    headers = []
+    for i in range(1, num_emails + 1):
+        headers.append(f"Subject_Touch{i}")
+        headers.append(f"Body_Touch{i}")
+    return headers
+
+
+def _make_output_headers_fn(num_emails: int):
+    """Factory: return an output_headers callable bound to a specific count."""
+    def fn() -> list[str]:
+        return _output_headers(num_emails)
+    return fn
+
+
+def _flatten_emails(emails: list[dict]) -> dict[str, str]:
+    """Flatten parsed emails into {column_header: value} dict for CSV assembly."""
+    flat = {}
+    for idx, email in enumerate(emails):
+        flat[f"Subject_Touch{idx+1}"] = email.get("subject", "")
+        flat[f"Body_Touch{idx+1}"] = email.get("body", "")
+    return flat
+
+
+# ---------------------------------------------------------------------------
+# User prompt builders
+# ---------------------------------------------------------------------------
+
+def _build_cold_email_user_prompt(lead_data: dict) -> str:
+    """Build a per-lead user prompt for the original cold email template."""
     first_name = lead_data.get("first_name", "")
     last_name = lead_data.get("last_name", "")
     organization = lead_data.get("organization", "")
     license_renewal = lead_data.get("license_renewal", "")
     engagement_objectives = lead_data.get("engagement_objectives", "")
 
-    # Build demographic/psychographic context from remaining columns
     context_lines = []
     skip_keys = {
         "first_name", "last_name", "organization",
@@ -89,3 +128,246 @@ Additional Demographic & Psychographic Information:
 {demographic_block}
 
 Generate the 8-email touch sequence now."""
+
+
+def build_user_prompt(lead_data: dict) -> str:
+    """Generic user prompt — dumps all lead columns for the model to use.
+
+    Used by all marketing-team templates where the system prompt tells the
+    model which fields are mandatory and how to use optional context.
+    """
+    context_lines = []
+    for key, value in lead_data.items():
+        if key == "row_index":
+            continue
+        if value and str(value).strip() and str(value).strip().lower() != "nan":
+            context_lines.append(f"{key}: {value}")
+
+    data_block = "\n".join(context_lines) if context_lines else "No data available."
+
+    return f"""Process this lead using the instructions provided:
+
+Lead Data:
+{data_block}
+
+Generate the output now."""
+
+
+# ---------------------------------------------------------------------------
+# Required fields — keyword lists for column mapper
+# ---------------------------------------------------------------------------
+
+_KW_FIRST_NAME = [
+    "first name", "firstname", "first_name", "fname",
+    "given name", "givenname", "prenom",
+]
+_KW_LAST_NAME = [
+    "last name", "lastname", "last_name", "lname",
+    "surname", "family name", "familyname", "nom",
+]
+_KW_ORGANIZATION = [
+    "current company", "company name", "company", "employer",
+    "firm", "organization", "organisation", "org",
+]
+_KW_EMAIL = [
+    "email", "e-mail", "email address", "email_address", "mail",
+]
+_KW_LICENSE = [
+    "license", "licence", "renewal", "subscription", "product", "sku",
+]
+_KW_ENGAGEMENT = [
+    "engagement", "objective", "goal", "purpose", "initiative",
+]
+
+# Field sets shared across templates
+FIELDS_COLD_EMAIL = {
+    "first_name": _KW_FIRST_NAME,
+    "last_name": _KW_LAST_NAME,
+    "organization": _KW_ORGANIZATION,
+    "license_renewal": _KW_LICENSE,
+    "engagement_objectives": _KW_ENGAGEMENT,
+}
+
+FIELDS_NAME_ORG = {
+    "first_name": _KW_FIRST_NAME,
+    "organization": _KW_ORGANIZATION,
+}
+
+FIELDS_NAME_EMAIL_ORG = {
+    "first_name": _KW_FIRST_NAME,
+    "organization": _KW_ORGANIZATION,
+    "email_address": _KW_EMAIL,
+}
+
+FIELDS_FIRST_NAME_ONLY = {
+    "first_name": _KW_FIRST_NAME,
+}
+
+
+# ---------------------------------------------------------------------------
+# Template Registry
+# ---------------------------------------------------------------------------
+
+PROMPT_REGISTRY = {
+    # --- Renewals ---
+    "csp_renewal_with_license": {
+        "id": "csp_renewal_with_license",
+        "name": "CSP Renewal - With License",
+        "group": "Renewals",
+        "description": "Hyper-personalised renewal influence messages for customers with known license context. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("csp_renewal_with_license"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_ORG,
+    },
+    "csp_renewal_without_license": {
+        "id": "csp_renewal_without_license",
+        "name": "CSP Renewal - Without License",
+        "group": "Renewals",
+        "description": "Discovery-led renewal influence when exact license mix is unknown. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("csp_renewal_without_license"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_EMAIL_ORG,
+    },
+    "price_change": {
+        "id": "price_change",
+        "name": "Price Change Early Renewal",
+        "group": "Renewals",
+        "description": "Help customers protect current pricing ahead of Microsoft price increases. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("price_change"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_ORG,
+    },
+    # --- Migrations ---
+    "ea_to_csp": {
+        "id": "ea_to_csp",
+        "name": "EA to CSP Migration",
+        "group": "Migrations",
+        "description": "Position CSP as a better licensing path for EA customers. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("ea_to_csp"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_ORG,
+    },
+    "e7_upsell": {
+        "id": "e7_upsell",
+        "name": "E7 Upsell - AI Governance",
+        "group": "Migrations",
+        "description": "Position E7 as the governed AI operating layer for enterprise readiness. 5 emails per lead.",
+        "num_emails": 5,
+        "system_prompt": _load_prompt("e7_upsell"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(5),
+        "output_headers": _make_output_headers_fn(5),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_EMAIL_ORG,
+    },
+    # --- Demand Generation ---
+    "cloud_ascent": {
+        "id": "cloud_ascent",
+        "name": "CloudAscent - Solution Focus",
+        "group": "Demand Generation",
+        "description": "Propensity-led single-solution outreach based on Microsoft signals. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("cloud_ascent"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_ORG,
+    },
+    "marketplace": {
+        "id": "marketplace",
+        "name": "Marketplace Offers",
+        "group": "Demand Generation",
+        "description": "Demand generation for Microsoft Marketplace offers. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("marketplace"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_ORG,
+    },
+    "cold_email": {
+        "id": "cold_email",
+        "name": "Cold Email - Original",
+        "group": "Demand Generation",
+        "description": "8-touch cold email sequence for Microsoft licensing outreach. 8 emails per lead.",
+        "num_emails": 8,
+        "system_prompt": _load_prompt("cold_email"),
+        "build_user_prompt": _build_cold_email_user_prompt,
+        "parse_response": _make_parser(8),
+        "output_headers": _make_output_headers_fn(8),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_COLD_EMAIL,
+    },
+    # --- Compliance ---
+    "nrs_einvoice": {
+        "id": "nrs_einvoice",
+        "name": "NRS E-Invoice - Nigeria",
+        "group": "Compliance",
+        "description": "Help Nigerian businesses navigate the NRS e-Invoicing mandate. 4 emails per lead.",
+        "num_emails": 4,
+        "system_prompt": _load_prompt("nrs_einvoice"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(4),
+        "output_headers": _make_output_headers_fn(4),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_NAME_ORG,
+    },
+    # --- Inbound ---
+    "leads": {
+        "id": "leads",
+        "name": "Help & Assistance - Leads",
+        "group": "Inbound",
+        "description": "Respond to inbound Microsoft help requests with professional outreach. 2 emails per lead.",
+        "num_emails": 2,
+        "system_prompt": _load_prompt("leads"),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(2),
+        "output_headers": _make_output_headers_fn(2),
+        "flatten_result": _flatten_emails,
+        "required_fields": FIELDS_FIRST_NAME_ONLY,
+    },
+}
+
+# Backward-compatible alias
+SYSTEM_PROMPT = _load_prompt("cold_email")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_template(template_id: str) -> dict:
+    """Get a template by ID. Raises KeyError if not found."""
+    return PROMPT_REGISTRY[template_id]
+
+
+def list_templates() -> list[dict]:
+    """Return template metadata for the frontend (id, name, group, description, num_emails)."""
+    return [
+        {
+            "id": t["id"],
+            "name": t["name"],
+            "group": t["group"],
+            "description": t["description"],
+            "num_emails": t["num_emails"],
+        }
+        for t in PROMPT_REGISTRY.values()
+    ]

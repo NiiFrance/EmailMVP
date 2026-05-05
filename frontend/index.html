@@ -14,7 +14,7 @@
                 <div class="logo-icon">R</div>
                 <div>
                     <h1>Reliance Infosystems</h1>
-                    <p class="tagline">Cold Email Campaign Generator</p>
+                    <p class="tagline">Email Campaign Generator</p>
                 </div>
             </div>
         </header>
@@ -27,9 +27,19 @@
                 <p class="description">
                     Upload your lead data file (CSV or Excel .xlsx).
                     Columns are detected automatically.
-                    The system will generate 8 personalized cold emails per lead
-                    using AI and return an enriched CSV.
+                    Select a template below, then upload your file.
                 </p>
+
+                <!-- Template Selector -->
+                <div class="template-selector">
+                    <label for="template-select">Campaign Template</label>
+                    <select id="template-select">
+                        <option value="cold_email" selected>Cold Email - Original (8 emails)</option>
+                    </select>
+                    <p id="template-description" class="template-desc">
+                        8-touch cold email sequence for Microsoft licensing outreach. 8 emails per lead.
+                    </p>
+                </div>
 
                 <div class="upload-area" id="drop-zone">
                     <div class="upload-icon">&#128196;</div>
@@ -45,7 +55,7 @@
                 </div>
 
                 <button id="upload-btn" class="btn btn-primary" disabled>
-                    Generate Email Sequences
+                    Generate Emails
                 </button>
 
                 <div id="upload-error" class="error" hidden></div>

@@ -14,10 +14,9 @@ from csv_processor import (
     extract_all_leads,
     assemble_enriched_csv,
     OUTPUT_START_COL_INDEX,
-    OUTPUT_HEADERS,
-    NUM_TOUCHES,
-    TOTAL_OUTPUT_COLS,
 )
+
+from prompt_templates import _flatten_emails, _output_headers
 
 
 # ---------------------------------------------------------------------------
@@ -224,15 +223,15 @@ class TestExtractAllLeads:
 # assemble_enriched_csv
 # ---------------------------------------------------------------------------
 
-def _make_email_results(num_rows: int) -> list[dict]:
+def _make_email_results(num_rows: int, num_emails: int = 8) -> list[dict]:
     """Generate well-formed email results for the given number of rows."""
     results = []
     for i in range(num_rows):
         emails = [
             {"subject": f"Subject T{t+1} R{i}", "body": f"Body T{t+1} R{i}"}
-            for t in range(NUM_TOUCHES)
+            for t in range(num_emails)
         ]
-        results.append({"row_index": i, "emails": emails})
+        results.append({"row_index": i, "parsed": emails})
     return results
 
 
@@ -240,17 +239,18 @@ class TestAssembleEnrichedCSV:
     def test_adds_output_columns(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
         results = _make_email_results(1)
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        # Should have the output headers
         assert "Subject_Touch1" in df.columns
         assert "Body_Touch8" in df.columns
 
     def test_correct_values_placed(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
         results = _make_email_results(1)
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
         assert df["Subject_Touch1"].iloc[0] == "Subject T1 R0"
@@ -261,7 +261,8 @@ class TestAssembleEnrichedCSV:
     def test_preserves_original_data(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
         results = _make_email_results(1)
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
         assert df.iloc[0, 0] == "Microsoft 365 E5"
@@ -273,7 +274,8 @@ class TestAssembleEnrichedCSV:
         rows[2][10] = "Bob"
         csv_bytes = _build_csv_bytes(rows)
         results = _make_email_results(3)
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
         assert len(df) == 3
@@ -283,7 +285,8 @@ class TestAssembleEnrichedCSV:
     def test_error_result_fills_error_marker(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
         results = [{"row_index": 0, "error": "API timeout"}]
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
         assert "[ERROR: API timeout]" in df["Subject_Touch1"].iloc[0]
@@ -291,33 +294,21 @@ class TestAssembleEnrichedCSV:
 
     def test_skips_out_of_range_row_index(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
-        results = [{"row_index": 99, "emails": []}]
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        results = [{"row_index": 99, "parsed": []}]
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        # Should not crash; output columns should be empty
         assert df["Subject_Touch1"].iloc[0] == ""
-
-    def test_invalid_email_count_marks_error(self):
-        csv_bytes = _build_csv_bytes([_make_lead_row()])
-        # Only 5 emails instead of 8
-        results = [{
-            "row_index": 0,
-            "emails": [{"subject": "s", "body": "b"} for _ in range(5)],
-        }]
-        enriched = assemble_enriched_csv(csv_bytes, results)
-
-        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        assert "[ERROR:" in df["Subject_Touch1"].iloc[0]
 
     def test_output_appended_at_end(self):
         """Output columns should be appended after existing columns."""
         csv_bytes = _build_csv_bytes([_make_lead_row()])
         results = _make_email_results(1)
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        # With 75 original columns, output starts at index 75
         assert df.columns[75] == "Subject_Touch1"
         assert df.columns[76] == "Body_Touch1"
         assert df.columns[90] == "Body_Touch8"
@@ -326,11 +317,24 @@ class TestAssembleEnrichedCSV:
         """For a CSV with only 5 columns, output should start at index 5."""
         csv_bytes = b"A,B,C,D,E\n1,2,3,4,5\n"
         results = _make_email_results(1)
-        enriched = assemble_enriched_csv(csv_bytes, results)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
         assert df.columns[5] == "Subject_Touch1"
         assert df.columns[6] == "Body_Touch1"
+
+    def test_4_email_template(self):
+        """Test assembly with a 4-email template."""
+        csv_bytes = b"Name,Org\nAlice,Acme\n"
+        results = _make_email_results(1, num_emails=4)
+        out_headers = _output_headers(4)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
+
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert "Subject_Touch1" in df.columns
+        assert "Body_Touch4" in df.columns
+        assert "Subject_Touch5" not in df.columns
 
 
 # ---------------------------------------------------------------------------
@@ -342,17 +346,54 @@ class TestConstants:
         # Legacy constant kept for backwards compatibility
         assert OUTPUT_START_COL_INDEX == 74
 
-    def test_total_output_cols(self):
-        assert TOTAL_OUTPUT_COLS == 16
 
-    def test_output_headers_count(self):
-        assert len(OUTPUT_HEADERS) == 16
+# ---------------------------------------------------------------------------
+# assemble_enriched_csv — dynamic output headers / flatten
+# ---------------------------------------------------------------------------
 
-    def test_output_headers_pattern(self):
-        assert OUTPUT_HEADERS[0] == "Subject_Touch1"
-        assert OUTPUT_HEADERS[1] == "Body_Touch1"
-        assert OUTPUT_HEADERS[14] == "Subject_Touch8"
-        assert OUTPUT_HEADERS[15] == "Body_Touch8"
+class TestAssembleEnrichedCSVDynamic:
+    def test_custom_output_headers(self):
+        """Custom output headers should appear in the output CSV."""
+        csv_bytes = b"Name,Email\nAlice,alice@example.com\n"
+        results = [{"row_index": 0, "parsed": [{"greeting": "Hello", "tone": "warm"}]}]
+        custom_headers = ["greeting", "tone"]
+        flat_fn = lambda parsed: {k: v for item in parsed for k, v in item.items()}
+
+        enriched = assemble_enriched_csv(csv_bytes, results,
+                                          output_headers=custom_headers,
+                                          flatten_result=flat_fn)
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert "greeting" in df.columns
+        assert "tone" in df.columns
+        assert df["greeting"].iloc[0] == "Hello"
+        assert df["tone"].iloc[0] == "warm"
+
+    def test_error_fills_all_custom_columns(self):
+        """Errors should fill all dynamic output columns."""
+        csv_bytes = b"Name\nBob\n"
+        results = [{"row_index": 0, "error": "Timeout"}]
+        custom_headers = ["col_a", "col_b", "col_c"]
+
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=custom_headers)
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert "[ERROR: Timeout]" in df["col_a"].iloc[0]
+        assert "[ERROR: Timeout]" in df["col_c"].iloc[0]
+
+    def test_legacy_results_with_explicit_headers(self):
+        """Results with parsed key work when output_headers and flatten_result are provided."""
+        csv_bytes = _build_csv_bytes([_make_lead_row()])
+        results = _make_email_results(1)
+        out_headers = _output_headers(8)
+        enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
+        df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
+        assert df["Subject_Touch1"].iloc[0] == "Subject T1 R0"
+
+    def test_output_headers_function(self):
+        headers = _output_headers(8)
+        assert headers[0] == "Subject_Touch1"
+        assert headers[1] == "Body_Touch1"
+        assert headers[14] == "Subject_Touch8"
+        assert headers[15] == "Body_Touch8"
 
 
 # ---------------------------------------------------------------------------

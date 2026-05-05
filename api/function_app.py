@@ -4,6 +4,7 @@ Endpoints:
   POST /api/upload        — Upload CSV, start email generation
   GET  /api/status/{jobId} — Check processing progress
   GET  /api/download/{jobId} — Download enriched CSV
+  GET  /api/templates     — List available prompt templates
 """
 
 import json
@@ -18,7 +19,13 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from azure.identity import DefaultAzureCredential
 from openai import AzureOpenAI
 
-from prompt_templates import SYSTEM_PROMPT, build_user_prompt
+from prompt_templates import (
+    SYSTEM_PROMPT,
+    build_user_prompt,
+    PROMPT_REGISTRY,
+    get_template,
+    list_templates,
+)
 from csv_processor import (
     parse_csv,
     parse_file,
@@ -104,6 +111,18 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                 mimetype="application/json",
             )
 
+        # Resolve prompt template
+        prompt_id = req.form.get("prompt_id", "cold_email")
+
+        try:
+            template = get_template(prompt_id)
+        except KeyError:
+            return func.HttpResponse(
+                json.dumps({"error": f"Unknown template: {prompt_id}. Use GET /api/templates to list available templates."}),
+                status_code=400,
+                mimetype="application/json",
+            )
+
         # Parse the file (CSV or Excel)
         try:
             df_check = parse_file(file_bytes, filename)
@@ -121,21 +140,29 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                 mimetype="application/json",
             )
 
-        # Smart column detection
-        headers = df_check.columns.tolist()
-        try:
-            openai_client = AzureOpenAI(
-                api_key=AZURE_OPENAI_API_KEY,
-                azure_endpoint=AZURE_OPENAI_ENDPOINT,
-                api_version="2024-12-01-preview",
-            )
-            column_map = resolve_columns(headers, client=openai_client, deployment=AZURE_OPENAI_DEPLOYMENT)
-        except ValueError as e:
-            return func.HttpResponse(
-                json.dumps({"error": str(e)}),
-                status_code=400,
-                mimetype="application/json",
-            )
+        # Smart column detection — skip for custom templates (no required_fields)
+        column_map = None
+        required_fields = template.get("required_fields")
+        if required_fields:
+            headers = df_check.columns.tolist()
+            try:
+                openai_client = AzureOpenAI(
+                    api_key=AZURE_OPENAI_API_KEY,
+                    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+                    api_version="2024-12-01-preview",
+                )
+                column_map = resolve_columns(
+                    headers,
+                    client=openai_client,
+                    deployment=AZURE_OPENAI_DEPLOYMENT,
+                    required_fields=required_fields,
+                )
+            except ValueError as e:
+                return func.HttpResponse(
+                    json.dumps({"error": str(e)}),
+                    status_code=400,
+                    mimetype="application/json",
+                )
 
         # Always store as CSV in blob storage (convert Excel if needed)
         if filename.lower().endswith(".xlsx"):
@@ -147,16 +174,25 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
         blob_name = f"{job_id}.csv"
 
         _upload_blob(INPUT_CONTAINER, blob_name, csv_bytes)
-        logger.info("Uploaded %s (%d leads) as %s", filename, total_leads, blob_name)
+        logger.info("Uploaded %s (%d leads) as %s [template=%s]", filename, total_leads, blob_name, template["id"])
 
-        # Start orchestration — pass job_id and column_map
-        orchestrator_input = {"job_id": job_id, "column_map": column_map}
+        # Store template config for use by activities
+        template_config = {"id": prompt_id}
+
+        # Start orchestration
+        orchestrator_input = {
+            "job_id": job_id,
+            "column_map": column_map,
+            "template_config": template_config,
+        }
         instance_id = await client.start_new("orchestrate_emails", client_input=orchestrator_input, instance_id=job_id)
 
         return func.HttpResponse(
             json.dumps({
                 "jobId": job_id,
                 "totalLeads": total_leads,
+                "templateId": template["id"],
+                "templateName": template["name"],
                 "statusUrl": f"/api/status/{job_id}",
                 "downloadUrl": f"/api/download/{job_id}",
             }),
@@ -185,9 +221,11 @@ def orchestrate_emails(context: df.DurableOrchestrationContext):
     if isinstance(input_data, dict):
         job_id = input_data["job_id"]
         column_map = input_data.get("column_map")
+        template_config = input_data.get("template_config", {"id": "cold_email"})
     else:
         job_id = input_data
         column_map = None
+        template_config = {"id": "cold_email"}
 
     # Step 1: Read CSV and extract leads (activity — deterministic requirement)
     extract_input = {"job_id": job_id, "column_map": column_map}
@@ -202,7 +240,14 @@ def orchestrate_emails(context: df.DurableOrchestrationContext):
         batch = leads[batch_start : batch_start + BATCH_SIZE]
 
         # Fan-out: process all leads in this batch in parallel
-        tasks = [context.call_activity("process_lead_activity", lead) for lead in batch]
+        # Attach template_config to each lead for the activity
+        tasks = [
+            context.call_activity(
+                "process_lead_activity",
+                {"lead_data": lead, "template_config": template_config},
+            )
+            for lead in batch
+        ]
         batch_results = yield context.task_all(tasks)
         results.extend(batch_results)
 
@@ -217,7 +262,7 @@ def orchestrate_emails(context: df.DurableOrchestrationContext):
     context.set_custom_status({"processedLeads": total, "totalLeads": total, "phase": "assembling"})
 
     # Step 3: Assemble enriched CSV
-    assemble_input = {"job_id": job_id, "results": results}
+    assemble_input = {"job_id": job_id, "results": results, "template_config": template_config}
     output_blob = yield context.call_activity("assemble_csv_activity", assemble_input)
 
     return {"status": "completed", "totalLeads": total, "outputBlob": output_blob}
@@ -239,30 +284,46 @@ def extract_leads_activity(extractInput: dict) -> list:
 
 
 # ===========================================================================
+# Helper — Resolve template from config
+# ===========================================================================
+def _resolve_template(template_config: dict) -> dict:
+    """Resolve a template dict from the config passed through the orchestrator."""
+    template_id = template_config.get("id", "cold_email")
+    return get_template(template_id)
+
+
+# ===========================================================================
 # 4. ACTIVITY — Process a single lead (call GPT 5.3)
 # ===========================================================================
-@app.activity_trigger(input_name="leadData")
-def process_lead_activity(leadData: dict) -> dict:
-    """Generate 8 cold emails for a single lead using GPT 5.3."""
-    row_index = leadData.get("row_index", -1)
-    first_name = leadData.get("first_name", "Unknown")
-    organization = leadData.get("organization", "Unknown")
+@app.activity_trigger(input_name="leadInput")
+def process_lead_activity(leadInput: dict) -> dict:
+    """Generate content for a single lead using the selected template."""
+    # Unpack lead data and template config
+    lead_data = leadInput.get("lead_data", leadInput)  # backward compat
+    template_config = leadInput.get("template_config", {"id": "cold_email"})
+
+    row_index = lead_data.get("row_index", -1)
+    first_name = lead_data.get("first_name", "Unknown")
+    organization = lead_data.get("organization", lead_data.get("organisation_name", "Unknown"))
 
     logger.info("Processing lead %d: %s at %s", row_index, first_name, organization)
 
     try:
+        template = _resolve_template(template_config)
+
         client = AzureOpenAI(
             api_key=AZURE_OPENAI_API_KEY,
             azure_endpoint=AZURE_OPENAI_ENDPOINT,
             api_version="2024-12-01-preview",
         )
 
-        user_prompt = build_user_prompt(leadData)
+        user_prompt_builder = template["build_user_prompt"]
+        user_prompt = user_prompt_builder(lead_data)
 
         completion = client.chat.completions.create(
             model=AZURE_OPENAI_DEPLOYMENT,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": template["system_prompt"]},
                 {"role": "user", "content": user_prompt},
             ],
             max_completion_tokens=8192,
@@ -270,37 +331,20 @@ def process_lead_activity(leadData: dict) -> dict:
 
         response_text = completion.choices[0].message.content or ""
 
-        # Parse JSON response
-        response_text = response_text.strip()
-        # Handle potential markdown code fences
-        if response_text.startswith("```"):
-            lines = response_text.split("\n")
-            # Remove first and last line (code fences)
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            response_text = "\n".join(lines)
+        # Parse using template's parser
+        parse_response = template["parse_response"]
+        parsed = parse_response(response_text)
 
-        emails = json.loads(response_text)
+        logger.info("Successfully generated content for lead %d [template=%s]", row_index, template["id"])
 
-        if not isinstance(emails, list) or len(emails) != 8:
-            return {
-                "row_index": row_index,
-                "error": f"Expected 8 emails, got {len(emails) if isinstance(emails, list) else 'non-list'}",
-            }
-
-        # Validate each email has subject and body
-        for i, email in enumerate(emails):
-            if "subject" not in email or "body" not in email:
-                return {
-                    "row_index": row_index,
-                    "error": f"Email {i+1} missing 'subject' or 'body' key",
-                }
-
-        logger.info("Successfully generated 8 emails for lead %d", row_index)
-        return {"row_index": row_index, "emails": emails}
+        return {"row_index": row_index, "parsed": parsed}
 
     except json.JSONDecodeError as e:
         logger.error("JSON parse error for lead %d: %s", row_index, str(e))
         return {"row_index": row_index, "error": f"Invalid JSON from model: {str(e)}"}
+    except ValueError as e:
+        logger.error("Validation error for lead %d: %s", row_index, str(e))
+        return {"row_index": row_index, "error": str(e)}
     except Exception as e:
         logger.error("Error processing lead %d: %s", row_index, str(e))
         return {"row_index": row_index, "error": str(e)}
@@ -311,22 +355,49 @@ def process_lead_activity(leadData: dict) -> dict:
 # ===========================================================================
 @app.activity_trigger(input_name="assembleInput")
 def assemble_csv_activity(assembleInput: dict) -> str:
-    """Merge generated emails into the original CSV and upload the result."""
+    """Merge generated content into the original CSV and upload the result."""
     job_id = assembleInput["job_id"]
     results = assembleInput["results"]
+    template_config = assembleInput.get("template_config", {"id": "cold_email"})
+
+    template = _resolve_template(template_config)
+
+    # Get output headers and flatten function from the template
+    output_headers_fn = template.get("output_headers")
+    flatten_result_fn = template.get("flatten_result")
+    output_headers = output_headers_fn()
 
     csv_bytes = _download_blob(INPUT_CONTAINER, f"{job_id}.csv")
-    enriched_bytes = assemble_enriched_csv(csv_bytes, results)
+    enriched_bytes = assemble_enriched_csv(
+        csv_bytes,
+        results,
+        output_headers=output_headers,
+        flatten_result=flatten_result_fn,
+    )
 
     output_blob_name = f"{job_id}.csv"
     _upload_blob(OUTPUT_CONTAINER, output_blob_name, enriched_bytes)
 
-    logger.info("Assembled enriched CSV for job %s (%d bytes)", job_id, len(enriched_bytes))
+    logger.info("Assembled enriched CSV for job %s (%d bytes) [template=%s]", job_id, len(enriched_bytes), template["id"])
     return output_blob_name
 
 
 # ===========================================================================
-# 6. STATUS — HTTP Trigger
+# 6. TEMPLATES — HTTP Trigger (list available prompt templates)
+# ===========================================================================
+@app.route(route="templates", methods=["GET"])
+async def get_templates(req: func.HttpRequest) -> func.HttpResponse:
+    """Return the list of available prompt templates."""
+    templates = list_templates()
+    return func.HttpResponse(
+        json.dumps({"templates": templates}),
+        status_code=200,
+        mimetype="application/json",
+    )
+
+
+# ===========================================================================
+# 7. STATUS — HTTP Trigger
 # ===========================================================================
 @app.route(route="status/{jobId}", methods=["GET"])
 @app.durable_client_input(client_name="client")

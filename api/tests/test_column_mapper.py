@@ -221,3 +221,45 @@ class TestResolveColumns:
         result = resolve_columns(headers)
         for v in result.values():
             assert isinstance(v, int)
+
+
+# ---------------------------------------------------------------------------
+# Custom required_fields parameter
+# ---------------------------------------------------------------------------
+
+class TestCustomRequiredFields:
+    """Test that fuzzy_match and resolve_columns work with non-default required_fields."""
+
+    E_INVOICE_FIELDS = {
+        "first_name": ["first name", "firstname", "first_name", "fname"],
+        "last_name": ["last name", "lastname", "last_name", "lname", "surname"],
+        "organisation_name": ["company", "organization", "organisation", "org", "employer"],
+        "email_address": ["email", "e-mail", "email address", "email_address", "mail"],
+    }
+
+    def test_fuzzy_match_e_invoice_fields(self):
+        headers = ["First Name", "Last Name", "Organisation", "Email Address", "Phone"]
+        result = fuzzy_match_columns(headers, required_fields=self.E_INVOICE_FIELDS)
+        assert result["first_name"] == 0
+        assert result["last_name"] == 1
+        assert result["organisation_name"] == 2
+        assert result["email_address"] == 3
+
+    def test_resolve_columns_e_invoice(self):
+        headers = ["First Name", "Surname", "Company Name", "Email"]
+        result = resolve_columns(headers, required_fields=self.E_INVOICE_FIELDS)
+        assert result["first_name"] == 0
+        assert result["last_name"] == 1
+        assert result["organisation_name"] == 2
+        assert result["email_address"] == 3
+
+    def test_resolve_raises_for_missing_custom_field(self):
+        headers = ["Name", "Phone"]
+        with pytest.raises(ValueError, match="Could not detect"):
+            resolve_columns(headers, required_fields=self.E_INVOICE_FIELDS)
+
+    def test_none_required_fields_falls_back_to_default(self):
+        headers = ["First Name", "Last Name", "Company", "License", "Engagement"]
+        result = fuzzy_match_columns(headers, required_fields=None)
+        assert "first_name" in result
+        assert "license_renewal" in result

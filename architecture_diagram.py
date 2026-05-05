@@ -56,7 +56,7 @@ with Diagram(
         with Cluster("Frontend", graph_attr=cluster_attr):
             swa = AppServices("Static Web App\nazswa...6476")
 
-        with Cluster("Compute  (7 Durable Functions)", graph_attr=cluster_attr):
+        with Cluster("Compute  (8 Durable Functions)", graph_attr=cluster_attr):
             func = FunctionApps("Azure Functions\nazfn...6476\nPython 3.11 | EP1")
 
         with Cluster("AI  (RG: TestFoundary)", graph_attr=cluster_attr):
@@ -77,7 +77,7 @@ with Diagram(
     swa >> Edge(label="2. POST /api/upload", color="dodgerblue", style="bold", fontsize="13") >> func
     func >> Edge(label="3. Store CSV", color="forestgreen", fontsize="13") >> blob
     func >> Edge(label="4. Fan-out x15", color="darkorange", style="bold", fontsize="13") >> openai
-    openai >> Edge(label="5. 8 emails/lead", color="darkorange", style="dashed", fontsize="13") >> func
+    openai >> Edge(label="5. 2-8 emails/lead", color="darkorange", style="dashed", fontsize="13") >> func
     func >> Edge(label="6. Assemble CSV", color="forestgreen", fontsize="13") >> blob
     blob >> Edge(label="7. Download CSV", color="purple", style="bold", fontsize="13") >> swa
     swa >> Edge(label="8. CSV to user", color="purple", style="bold", fontsize="13") >> user

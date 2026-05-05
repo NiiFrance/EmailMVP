@@ -1,130 +1,164 @@
-# Reliance Infosystems — Cold Email Generator MVP
+# Reliance Infosystems — Email Campaign Generator
 
-Upload a CSV or Excel (.xlsx) file of leads and generate **8 personalized cold email sequences per lead** using **GPT 5.3** on Azure OpenAI. The enriched CSV is returned with 16 new columns (8 Subject + 8 Body) appended after the original data.
+A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 10 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
 
-**Smart column detection** automatically identifies the required fields (first name, last name, organization, license, engagement objectives) regardless of column order or naming convention — no rigid column layout required.
+## Live Environments
 
-> **Live URL:** https://blue-mud-0ae74790f.4.azurestaticapps.net
+| Environment | URL |
+|---|---|
+| **Staging** | https://calm-smoke-02e96b50f.6.azurestaticapps.net |
+| **Production** | https://blue-mud-0ae74790f.4.azurestaticapps.net |
+
+## Available Templates
+
+All templates share a unified output format: JSON array of `{"subject": ..., "body": ...}` objects, flattened into `Subject_Touch1`, `Body_Touch1`, etc. columns in the output CSV.
+
+| Group | Template | Emails/Lead | Required Fields |
+|---|---|---|---|
+| **Renewals** | CSP Renewal — With License | 4 | `first_name`, `organization` |
+| **Renewals** | CSP Renewal — Without License | 4 | `first_name`, `organization`, `email_address` |
+| **Renewals** | Price Change Early Renewal | 4 | `first_name`, `organization` |
+| **Migrations** | EA to CSP Migration | 4 | `first_name`, `organization` |
+| **Migrations** | E7 Upsell — AI Governance | 5 | `first_name`, `organization`, `email_address` |
+| **Demand Gen** | CloudAscent — Solution Focus | 4 | `first_name`, `organization` |
+| **Demand Gen** | Marketplace Offers | 4 | `first_name`, `organization` |
+| **Demand Gen** | Cold Email — Original | 8 | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
+| **Compliance** | NRS E-Invoice — Nigeria | 4 | `first_name`, `organization` |
+| **Inbound** | Help & Assistance — Leads | 2 | `first_name` |
 
 ## Architecture
 
 ![Architecture Diagram](emailmvp_architecture.png)
 
 ```
-[Azure Static Web App]  ──  HTML/CSS/JS (vanilla)
-        │
-        ▼  /api/*
-[Azure Functions App]  ──  Python 3.11, Durable Functions, Premium EP1
-   ├── POST /api/upload          → receives CSV/XLSX, detects columns, stores in Blob, starts orchestration
-   ├── GET  /api/status/{jobId}  → returns real-time processing progress
-   ├── GET  /api/download/{jobId}→ returns enriched CSV
-   │
-   ├── Orchestrator              → fan-out/fan-in: batches of 100, 2s delay between batches
-   ├── Activity: extract_leads   → parses CSV into per-lead dictionaries using column map
-   ├── Activity: process_lead    → calls GPT 5.3 per lead, returns 8 email pairs
-   └── Activity: assemble_csv    → merges results into output CSV, uploads to Blob
-        │
-        ▼
-[Azure Blob Storage]             ← csv-input / csv-output containers
-        │
-        ▼
-[Azure OpenAI — GPT 5.3]        ← GlobalStandard SKU, deployment: gpt-53-chat
+[Azure Static Web App]  -> vanilla HTML/CSS/JS
+        |
+        +-> GET  /api/templates        (list 10 campaign templates)
+        +-> POST /api/upload           (CSV/Excel + template selection)
+        +-> GET  /api/status/{jobId}   (real-time progress)
+        +-> GET  /api/download/{jobId} (enriched CSV)
+        |
+        v
+[Azure Functions App]   -> Python 3.11, Durable Functions, EP1
+   |
+   +-> upload_csv               parse file, detect columns, start orchestration
+   +-> orchestrate_emails       fan-out/fan-in across leads in batches of 100
+   +-> extract_leads_activity   extract lead rows from stored CSV
+   +-> process_lead_activity    build prompt pair, call GPT 5.3, parse JSON
+   +-> assemble_csv_activity    flatten emails into CSV columns, upload output
+
+[Azure Blob Storage]    <- csv-input / csv-output containers
+[Azure OpenAI]          <- deployment: gpt-53-chat (GPT 5.3)
 ```
 
-## Azure Resources
+## API Surface
 
-| Resource | Name | Resource Group |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| Function App (Python 3.11, EP1) | `azfn4homfpggr6476` | `rg-emailmvp-eastus2` |
-| Static Web App | `azswa4homfpggr6476` | `rg-emailmvp-eastus2` |
-| Storage Account | `azst4homfpggr6476` | `rg-emailmvp-eastus2` |
-| Key Vault | `azkv4homfpggr6476` | `rg-emailmvp-eastus2` |
-| Application Insights | `azai4homfpggr6476` | `rg-emailmvp-eastus2` |
-| Managed Identity | `azid4homfpggr6476` | `rg-emailmvp-eastus2` |
-| Azure OpenAI (AI Services) | `EnochClaude` | `TestFoundary` |
+| `/api/templates` | `GET` | Returns all 10 templates with group, description, email count |
+| `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
+| `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
+| `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
 
-**Subscription:** `1026bf75-8146-43b4-8f2c-32e69ef52837` (EnochFrance_Sponsorship_Account)
-**Region:** East US 2
+### Upload Form Fields
+
+- `file`: CSV or Excel (.xlsx) file
+- `prompt_id`: one of the 10 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
 
 ## Column Detection
 
-The system **automatically detects** the required columns using a hybrid approach:
+Required columns are detected automatically using a two-stage resolver:
 
-1. **Fuzzy matching** — Matches column headers against keyword patterns (e.g., "First Name", "firstname", "fname", "Given Name" all map to `first_name`)
-2. **LLM fallback** — If fuzzy matching fails for any field, GPT 5.3 is used to resolve the remaining columns
-3. **Error rejection** — If a required column can't be found by either method, the file is rejected with a clear error message
+1. **Fuzzy matching** against template-specific keyword sets (e.g. "company", "firm", "employer" all resolve to `organization`)
+2. **Azure OpenAI fallback** for any unresolved fields
+3. Upload rejection with a clear error if fields still cannot be resolved
 
-### Required Fields
+Invalid email addresses (containing patterns like `noemail`, `unknown`, `test@test`) are automatically disqualified during mapping.
 
-| Field | Example Header Variations |
-|---|---|
-| First Name | `first_name`, `First Name`, `fname`, `Given Name` |
-| Last Name | `last_name`, `Last Name`, `lname`, `Surname`, `Family Name` |
-| Organization | `current_company`, `Company`, `Organization`, `Employer`, `Firm` |
-| License / Product | `Licenses SKUs`, `License Renewal`, `Subscription`, `Product`, `SKU` |
-| Engagement Objectives | `Engagement Objective`, `Goal`, `Purpose`, `Initiative` |
+All non-required columns are preserved as context and passed to the model for personalization.
 
-All other columns are automatically included as demographic/psychographic context for email personalization.
+## Output Behavior
 
-**Output:** 16 columns (Subject_Touch1 through Body_Touch8) are **appended at the end** of the original data.
+- Output columns are appended to the end of the uploaded dataset
+- Column count varies by template: 4 columns (2-email template) to 16 columns (8-email template)
+- Each email produces `Subject_TouchN` + `Body_TouchN` column pair
+- Error rows are preserved with `[ERROR: ...]` markers in the generated columns
+- Output CSV uses UTF-8 BOM encoding for Excel compatibility
+
+## Frontend
+
+The frontend groups templates by campaign category in an `<optgroup>` dropdown:
+
+- Template selector loaded dynamically from `/api/templates`
+- Grouped dropdown: Renewals, Migrations, Demand Generation, Compliance, Inbound
+- Dynamic button text showing email count for selected template
+- CSV and Excel upload support
+- Real-time progress bar with pulse animation during initial batch
+- Job summary (leads, elapsed time, job ID) on the download screen
 
 ## Project Structure
 
 ```
 EmailMVP/
-├── api/
-│   ├── function_app.py          # Main Azure Functions entry (7 functions)
-│   ├── prompt_templates.py      # System prompt + user prompt builder
-│   ├── csv_processor.py         # CSV/Excel parsing and assembly utilities
-│   ├── column_mapper.py         # Smart column detection (fuzzy + LLM fallback)
-│   ├── host.json                # Durable Functions config (100 concurrent, 2h timeout)
-│   ├── requirements.txt         # Python dependencies (incl. openpyxl)
-│   ├── local.settings.json      # Local dev settings
-│   └── tests/
-│       ├── test_csv_processor.py    # 31 tests
-│       ├── test_column_mapper.py    # 23 tests
-│       ├── test_prompt_templates.py # 15 tests
-│       └── test_function_app.py     # Integration tests
-├── frontend/
-│   ├── index.html               # Upload UI
-│   ├── styles.css               # Styling
-│   ├── app.js                   # Frontend logic (upload, poll, download)
-│   └── staticwebapp.config.json # SWA routing config
-├── infra/
-│   └── main.bicep               # Infrastructure as Code
-├── architecture_diagram.py      # Generates architecture PNG (Python diagrams library)
-├── emailmvp_architecture.png    # Architecture diagram
-├── PLAN.md                      # Original design plan & implementation history
-└── README.md                    # This file
+|- api/
+|  |- function_app.py          # HTTP triggers, orchestrator, activities
+|  |- prompt_templates.py      # 10-template registry with shared helpers
+|  |- csv_processor.py         # CSV/Excel parsing and dynamic CSV assembly
+|  |- column_mapper.py         # Fuzzy matching + LLM fallback for required fields
+|  |- host.json                # Durable Functions configuration
+|  |- requirements.txt         # Python dependencies
+|  |- prompts/                 # System prompt text files (one per template)
+|  |  |- cold_email.txt
+|  |  |- csp_renewal_with_license.txt
+|  |  |- csp_renewal_without_license.txt
+|  |  |- e7_upsell.txt
+|  |  |- ea_to_csp.txt
+|  |  |- leads.txt
+|  |  |- marketplace.txt
+|  |  |- price_change.txt
+|  |  |- nrs_einvoice.txt
+|  |  \- cloud_ascent.txt
+|  \- tests/
+|     |- test_column_mapper.py
+|     |- test_csv_processor.py
+|     |- test_function_app.py
+|     \- test_prompt_templates.py
+|- frontend/
+|  |- index.html               # Upload UI with grouped template selector
+|  |- app.js                   # Upload, polling, download, template loading
+|  |- styles.css               # UI styling and progress animation
+|  \- staticwebapp.config.json
+|- infra/
+|  \- main.bicep
+\- README.md
 ```
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| AI Model | Azure OpenAI GPT 5.3 (`gpt-53-chat`, GlobalStandard) |
-| Backend | Azure Functions (Python 3.11, Durable Functions) |
-| Frontend | Azure Static Web App (vanilla HTML/CSS/JS) |
-| Storage | Azure Blob Storage (identity-based auth) |
+| AI Model | Azure OpenAI GPT 5.3 (`gpt-53-chat`) |
+| Backend | Azure Functions v4, Durable Functions, Python 3.11 |
+| Frontend | Azure Static Web Apps, vanilla HTML/CSS/JS |
+| File Parsing | pandas + openpyxl |
+| Storage | Azure Blob Storage |
+| Identity | Managed Identity + RBAC |
 | Secrets | Azure Key Vault |
-| Auth | Managed Identity with RBAC |
 | Monitoring | Application Insights |
 | IaC | Bicep |
 
 ## Local Development
 
-### 1. Install Python dependencies
+### 1. Create the Python environment
 
-```bash
+```powershell
 cd api
 python -m venv .venv
-.venv\Scripts\activate      # Windows
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure local settings
-
-Edit `api/local.settings.json`:
+### 2. Configure `api/local.settings.json`
 
 ```json
 {
@@ -132,224 +166,96 @@ Edit `api/local.settings.json`:
   "Values": {
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "python",
-    "AZURE_OPENAI_ENDPOINT": "https://enochclaude.openai.azure.com/",
-    "AZURE_OPENAI_API_KEY": "<your-api-key>",
+    "AZURE_OPENAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
+    "AZURE_OPENAI_API_KEY": "<api-key>",
     "AZURE_OPENAI_DEPLOYMENT": "gpt-53-chat",
-    "AZURE_STORAGE_CONNECTION_STRING": "<your-storage-connection-string>"
+    "CSV_INPUT_CONTAINER": "csv-input",
+    "CSV_OUTPUT_CONTAINER": "csv-output",
+    "BATCH_SIZE": "100"
   }
 }
 ```
 
-### 3. Start Azurite (local storage emulator)
+### 3. Start local storage
 
-```bash
+```powershell
 azurite --silent --location .azurite --debug .azurite/debug.log
-```
-
-Create the required containers:
-
-```bash
-az storage container create -n csv-input  --connection-string "UseDevelopmentStorage=true"
+az storage container create -n csv-input --connection-string "UseDevelopmentStorage=true"
 az storage container create -n csv-output --connection-string "UseDevelopmentStorage=true"
 ```
 
-### 4. Run the Functions App
+### 4. Run the backend and frontend
 
-```bash
+```powershell
 cd api
 func start
 ```
 
-### 5. Open the frontend
-
-```bash
+```powershell
 cd frontend
 python -m http.server 4280
 ```
 
-Then open http://localhost:4280 in your browser.
+Open `http://localhost:4280` in your browser.
 
 ## Running Tests
 
-```bash
+```powershell
 cd api
-python -m pytest tests/test_csv_processor.py tests/test_prompt_templates.py -v
+python -m pytest tests -q
 ```
 
-69 tests total (31 CSV processor + 23 column mapper + 15 prompt templates).
+Current status: **151 passed**
 
 ## Deployment
 
-### Deploy Function App (ZIP deploy with remote build)
+### Backend — Function App (ZIP deploy with remote build)
 
 ```powershell
-cd EmailMVP
-Compress-Archive -Path api\* -DestinationPath deploy.zip -Force
+# Create zip from api/ excluding dev files
+cd api
+$items = Get-ChildItem -Path . -Exclude tests,__pycache__,.pytest_cache,.venv,.funcignore,local.settings.json
+Compress-Archive -Path ($items | ForEach-Object { $_.FullName }) -DestinationPath ..\deploy.zip -Force
+
+# Deploy with Oryx build (required for pip install)
 az functionapp deployment source config-zip `
-  --resource-group rg-emailmvp-eastus2 `
-  --name azfn4homfpggr6476 `
-  --src deploy.zip `
+  --resource-group rg-emailmvp-stg-eastus2 `
+  --name azfnemailmvpstg6476 `
+  --src ..\deploy.zip `
   --build-remote true
 ```
 
-> **Note:** `--build-remote true` is required so Azure installs Python dependencies from `requirements.txt`.
+**Important:** `SCM_DO_BUILD_DURING_DEPLOYMENT` must be `true` in app settings, otherwise `requirements.txt` dependencies won't be installed.
 
-### Deploy Static Web App
+### Frontend — Static Web App
 
-The Static Web App is deployed via the Azure portal or Azure CLI. The frontend is vanilla HTML/CSS/JS with no build step.
+```powershell
+npx @azure/static-web-apps-cli deploy ./frontend `
+  --deployment-token <token> `
+  --env production
+```
+
+### Staging Environment
+
+| Resource | Name |
+|---|---|
+| Resource Group | `rg-emailmvp-stg-eastus2` |
+| Function App | `azfnemailmvpstg6476` |
+| Static Web App | `azswa-emailmvp-stg-6476` |
+| Storage Account | `azstemailmvpstg6476` |
+| App Insights | `appi-emailmvp-stg` |
+
+The SWA has the Function App linked as a backend, so `/api/*` routes are proxied automatically.
 
 ## Key Design Decisions
 
-- **No RAG** — All context the model needs comes from the CSV row data and the system prompt. No embeddings, vector stores, or document retrieval.
-- **Fan-out/fan-in** — Durable Functions process up to 100 leads concurrently per batch, with a 2-second delay between batches to respect rate limits.
-- **Excel support** — Accepts both `.csv` and `.xlsx` files. Excel files are converted to CSV at upload time.
-- **Smart column detection** — Fuzzy keyword matching with LLM fallback identifies required columns regardless of naming or ordering. No rigid column layout required.
-- **Real-time progress** — The orchestrator reports `processedLeads/totalLeads` via `set_custom_status()`, exposed in the status API and displayed in the frontend progress bar. A pulse animation keeps the bar active while the first batch is in-flight.
-- **UTF-8 BOM encoding** — CSV output uses `utf-8-sig` so Excel opens it correctly without garbled characters.
-- **ASCII-only constraint** — The system prompt enforces plain ASCII to prevent encoding issues (no em dashes, curly quotes, etc.).
-- **No license specifics** — The prompt explicitly forbids mentioning specific Microsoft license types (E3, E5, etc.) or seat counts to avoid making recipients feel surveilled.
-- **GPT 5.3** — Originally designed for Claude Opus 4.6, but switched to GPT 5.3 due to zero Claude quota in the subscription. Uses `max_completion_tokens` (not `max_tokens`) and default temperature only.
+- **10-template registry** with prompts loaded from individual `.txt` files for easy editing
+- **Unified output schema** — all templates produce `[{"subject": ..., "body": ...}]`, eliminating per-template parsers and flatteners
+- **Shared generic helpers** — factory functions for parsing, headers, and flattening parameterized by email count
+- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Compliance, Inbound)
+- **No custom prompt mode** — removed in favor of purpose-built templates vetted by the marketing team
+- **Excel normalization** — `.xlsx` uploads are converted to CSV at upload time so the downstream pipeline stays consistent
+- **Durable fan-out/fan-in** — batch size 100, 2-second inter-batch delay, 2-hour timeout on EP1
+- The cold-email template remains backward compatible through `SYSTEM_PROMPT` and `build_user_prompt` aliases
 
-See [PLAN.md](PLAN.md) for the full implementation history and design rationale.
-
-The frontend expects the API at `/api/*`. When using separate servers, update the base URL in `app.js`.
-
----
-
-## Azure Provisioning
-
-### 1. Resource Group
-
-```bash
-az group create --name rg-emailmvp-eastus2 --location eastus2
-```
-
-### 2. Azure Foundry — Claude Opus 4.6
-
-1. In the Azure Portal, create a **Microsoft Foundry** resource in **East US2**.
-2. Create a project within the Foundry resource.
-3. Deploy `claude-opus-4-6` as a **Global Standard** deployment.
-4. Copy the **Target URI** and **API Key** from the deployment details.
-
-### 3. Storage Account
-
-```bash
-az storage account create \
-  --name stemailmvp \
-  --resource-group rg-emailmvp-eastus2 \
-  --location eastus2 \
-  --sku Standard_LRS
-
-az storage container create -n csv-input  --account-name stemailmvp
-az storage container create -n csv-output --account-name stemailmvp
-```
-
-### 4. Functions App (Premium EP1)
-
-```bash
-az functionapp plan create \
-  --name plan-emailmvp \
-  --resource-group rg-emailmvp-eastus2 \
-  --location eastus2 \
-  --sku EP1 \
-  --is-linux true
-
-az functionapp create \
-  --name func-emailmvp \
-  --resource-group rg-emailmvp-eastus2 \
-  --plan plan-emailmvp \
-  --runtime python \
-  --runtime-version 3.11 \
-  --storage-account stemailmvp \
-  --os-type Linux \
-  --functions-version 4
-```
-
-Configure app settings:
-
-```bash
-az functionapp config appsettings set \
-  --name func-emailmvp \
-  --resource-group rg-emailmvp-eastus2 \
-  --settings \
-    ANTHROPIC_BASE_URL="https://<resource>.services.ai.azure.com/anthropic" \
-    ANTHROPIC_API_KEY="<key>" \
-    ANTHROPIC_MODEL="claude-opus-4-6" \
-    CSV_INPUT_CONTAINER="csv-input" \
-    CSV_OUTPUT_CONTAINER="csv-output"
-```
-
-### 5. Static Web App
-
-```bash
-az staticwebapp create \
-  --name swa-emailmvp \
-  --resource-group rg-emailmvp-eastus2 \
-  --location eastus2 \
-  --sku Standard
-```
-
-Link to the Functions App backend via **Bring Your Own Functions** in the Azure Portal (Settings → APIs → Link).
-
-### 6. Key Vault (recommended)
-
-```bash
-az keyvault create \
-  --name kv-emailmvp \
-  --resource-group rg-emailmvp-eastus2 \
-  --location eastus2
-
-az keyvault secret set \
-  --vault-name kv-emailmvp \
-  --name AnthropicApiKey \
-  --value "<your-api-key>"
-```
-
-Then reference in app settings:
-
-```
-ANTHROPIC_API_KEY=@Microsoft.KeyVault(SecretUri=https://kv-emailmvp.vault.azure.net/secrets/AnthropicApiKey)
-```
-
----
-
-## Deployment
-
-### Deploy Functions App
-
-```bash
-cd api
-func azure functionapp publish func-emailmvp
-```
-
-### Deploy Static Web App
-
-Push the repo to GitHub and connect the SWA to the repo, or use the SWA CLI:
-
-```bash
-npm i -g @azure/static-web-apps-cli
-swa deploy ./frontend --env production
-```
-
----
-
-## Email Touch Sequence
-
-| # | Purpose | Description |
-|---|---|---|
-| 1 | Introduction | Introduce Reliance as a trusted Microsoft licensing advisor |
-| 2 | Diagnostic | Ask a diagnostic question about renewal/licensing pain points |
-| 3 | Benefit | Highlight specific benefits of working with a Microsoft partner |
-| 4 | Social Proof | Reference anonymized success stories from similar organizations |
-| 5 | Authority | Position Reliance as a Microsoft-authorized expert partner |
-| 6 | Promo Canvas | Reference current Microsoft promotions/incentives |
-| 7 | Switch Plan / Risk Reversal | Address switching risk, offer guarantees |
-| 8 | Danger / Close the Loop | Create urgency around renewal deadlines; final CTA |
-
-## Constraints per Email
-
-- Subject: **≤ 7 words**
-- Body: **200–260 words**, **≥ 3 paragraphs**
-- Closing phrase included (e.g., "Warm regards,")
-- **No** signature block, links, or URLs
-- Personalized with first name, organization, and license type
+See `PLAN.md` for the implementation history and the design changes that took the app from a single-purpose cold-email generator to a multi-template branch.
