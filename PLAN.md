@@ -66,7 +66,7 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
 |---|---|---|
 | Frontend | Azure Static Web App (vanilla HTML/CSS/JS) | No build step, fast to deploy, free tier available |
 | Backend | Azure Functions v4 (Python 3.11, Durable) | Serverless orchestration with template-aware pipeline |
-| AI Model | Azure OpenAI GPT 5.3 | Best available model with quota in subscription |
+| AI Model | Azure OpenAI GPT 5.5 | Current Cloudware production deployment |
 | Storage | Azure Blob Storage | Simple object storage for CSV files |
 | Secrets | Azure Key Vault | Industry standard for secret management |
 | Auth | Managed Identity + RBAC | Passwordless, no credentials in code |
@@ -89,7 +89,7 @@ Chose **Azure Durable Functions (fan-out/fan-in)** because:
    process_lead_activity calls with template_config, updates progress, then calls
    assemble_csv_activity.
 7. process_lead_activity builds the system/user prompt pair using the template's prompt
-   builder, calls GPT 5.3, and parses the JSON response into email dicts.
+  builder, calls GPT 5.5, and parses the JSON response into email dicts.
 8. assemble_csv_activity flattens parsed emails into Subject_TouchN / Body_TouchN columns
    and uploads the final CSV to Blob Storage.
 9. Frontend shows progress, then download summary, and downloads the enriched CSV.
@@ -257,16 +257,16 @@ The "Generic" user prompt builder dumps all non-empty lead columns. The `cold_em
 
 ---
 
-## 7. GPT 5.3 Known Constraints
+## 7. Current Azure OpenAI Configuration
 
 | Constraint | Detail |
 |---|---|
-| `max_tokens` | Not supported. Use `max_completion_tokens` instead |
-| `temperature` | Only default (1.0) supported. Custom values cause errors |
+| `max_tokens` | Not supported by current GPT 5.x deployments. Use `max_completion_tokens` instead |
+| `temperature` | Keep default temperature unless model support is verified |
 | API version | `2024-12-01-preview` |
-| Rate limits | 5,000 TPM capacity (GlobalStandard, scaled from initial 10) |
-| Deployment name | `gpt-53-chat` |
-| Content filter | Custom `EmailMVP-Relaxed` policy (blocks HIGH severity only) |
+| Rate limits | 10,000 capacity units on GPT 5.5 GlobalStandard |
+| Deployment name | `gpt-5.5` |
+| Content filter | Microsoft.DefaultV2 policy on GPT 5.5 |
 
 ---
 
@@ -362,7 +362,7 @@ These benchmark numbers come from the cold-email template. Other templates may v
 - **Smart column detection** — A hybrid fuzzy matching + LLM fallback system (`column_mapper.py`) automatically identifies the 5 required columns regardless of naming or position:
   - Fuzzy matching uses keyword patterns (e.g., "first name", "firstname", "fname", "given name" all match `first_name`)
   - Disqualification rules prevent false positives (e.g., "organization_domain_1" won't match `organization`)
-  - If fuzzy matching fails, GPT 5.3 resolves remaining fields
+  - If fuzzy matching fails, the configured Azure OpenAI deployment resolves remaining fields
   - Files are rejected with a clear error if required columns can't be detected
 - **Dynamic output positioning** — Output columns (Subject_Touch1 through Body_Touch8) are now appended at the end of the original data instead of hardcoded to column BW (index 74)
 - **Column map passed through orchestrator** — The `column_map` dict flows from upload → orchestrator → extract_leads_activity, ensuring correct field extraction
@@ -404,7 +404,7 @@ These were discussed but intentionally deferred for the MVP:
 - **User authentication** — Azure AD / Entra ID login for sales reps
 - **Job history** — Store past runs in Cosmos DB or Table Storage
 - **Claude model** — Switch to Claude Opus 4.6 if/when quota becomes available
-- **GPT 5.4** — Only `gpt-5.4-mini` and `gpt-5.4-nano` available currently (no full 5.4)
+- **A/B testing workflow** — Compare GPT 5.5 against future candidate deployments without changing the production default
 - **RAG** — Retrieve past successful emails as few-shot examples
 - **A/B testing** — Compare email variants across models
 - **Webhook notifications** — Notify sales reps when processing completes
@@ -418,11 +418,11 @@ These were discussed but intentionally deferred for the MVP:
 | Issue | Solution |
 |---|---|
 | `AnthropicFoundry` import error | Switched to `from openai import AzureOpenAI` |
-| `max_tokens` error on GPT 5.3 | Use `max_completion_tokens` instead |
-| `temperature` error on GPT 5.3 | Remove `temperature` param entirely |
+| `max_tokens` error on GPT 5.x | Use `max_completion_tokens` instead |
+| `temperature` error on GPT 5.x | Remove `temperature` param unless model support is verified |
 | Missing dependencies after deploy | Set `SCM_DO_BUILD_DURING_DEPLOYMENT=true` and use `--build-remote true` |
 | Garbled characters (curly quotes) | Use `utf-8-sig` encoding + ASCII-only prompt |
-| Claude 0 quota | No fix — switched to GPT 5.3 |
+| Claude 0 quota | No fix — using Azure OpenAI GPT 5.5 |
 | `func` CLI ENOENT | Use `az functionapp deployment source config-zip` instead |
 | 429 rate limit | SDK auto-retries; 2s delay between batches helps |
 | Managed Identity auth failure | Set `managed_identity_client_id` explicitly |

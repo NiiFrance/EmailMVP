@@ -42,11 +42,11 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
    +-> upload_csv               parse file, detect columns, start orchestration
    +-> orchestrate_emails       fan-out/fan-in across leads in batches of 100
    +-> extract_leads_activity   extract lead rows from stored CSV
-   +-> process_lead_activity    build prompt pair, call GPT 5.3, parse JSON
+  +-> process_lead_activity    build prompt pair, call GPT 5.5, parse JSON
    +-> assemble_csv_activity    flatten emails into CSV columns, upload output
 
 [Azure Blob Storage]    <- csv-input / csv-output containers
-[Azure OpenAI]          <- deployment: gpt-53-chat (GPT 5.3)
+[Azure OpenAI]          <- deployment: gpt-5.5 (GPT 5.5)
 ```
 
 ## API Surface
@@ -134,7 +134,7 @@ EmailMVP/
 
 | Layer | Technology |
 |---|---|
-| AI Model | Azure OpenAI GPT 5.3 (`gpt-53-chat`) |
+| AI Model | Azure OpenAI GPT 5.5 (`gpt-5.5`) |
 | Backend | Azure Functions v4, Durable Functions, Python 3.11 |
 | Frontend | Azure Static Web Apps, vanilla HTML/CSS/JS |
 | File Parsing | pandas + openpyxl |
@@ -165,7 +165,7 @@ pip install -r requirements.txt
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AZURE_OPENAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
     "AZURE_OPENAI_API_KEY": "<api-key>",
-    "AZURE_OPENAI_DEPLOYMENT": "gpt-53-chat",
+    "AZURE_OPENAI_DEPLOYMENT": "gpt-5.5",
     "CSV_INPUT_CONTAINER": "csv-input",
     "CSV_OUTPUT_CONTAINER": "csv-output",
     "BATCH_SIZE": "100"

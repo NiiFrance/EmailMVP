@@ -22,7 +22,7 @@ param azureOpenAiEndpoint string
 param azureOpenAiApiKey string
 
 @description('Azure OpenAI deployment name')
-param azureOpenAiDeployment string = 'gpt-53-chat'
+param azureOpenAiDeployment string = 'gpt-5.5'
 
 @description('Number of leads processed concurrently per durable batch')
 param batchSize string = '100'

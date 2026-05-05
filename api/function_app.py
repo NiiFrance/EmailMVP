@@ -47,7 +47,7 @@ INPUT_CONTAINER = os.environ.get("CSV_INPUT_CONTAINER", "csv-input")
 OUTPUT_CONTAINER = os.environ.get("CSV_OUTPUT_CONTAINER", "csv-output")
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
-AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-53-chat")
+AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-5.5")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "100"))
 MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -293,7 +293,7 @@ def _resolve_template(template_config: dict) -> dict:
 
 
 # ===========================================================================
-# 4. ACTIVITY — Process a single lead (call GPT 5.3)
+# 4. ACTIVITY — Process a single lead (call Azure OpenAI)
 # ===========================================================================
 @app.activity_trigger(input_name="leadInput")
 def process_lead_activity(leadInput: dict) -> dict:

@@ -242,4 +242,4 @@ class TestConfiguration:
         assert fa.MAX_CSV_SIZE_BYTES == 50 * 1024 * 1024
 
     def test_default_model(self):
-        assert fa.AZURE_OPENAI_DEPLOYMENT == "gpt-53-chat"
+        assert fa.AZURE_OPENAI_DEPLOYMENT == "gpt-5.5"
