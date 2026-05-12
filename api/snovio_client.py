@@ -85,6 +85,11 @@ class SnovioClient:
         response = self._request("GET", "/v1/get-user-lists")
         return response if isinstance(response, list) else []
 
+    def create_prospect_list(self, name: str) -> Any:
+        if not name.strip():
+            raise ValueError("name is required.")
+        return self._request("POST", "/v1/lists", data={"name": name.strip()})
+
     def get_user_campaigns(self) -> list[dict[str, Any]]:
         response = self._request("GET", "/v1/get-user-campaigns")
         return response if isinstance(response, list) else []
@@ -108,7 +113,9 @@ class SnovioClient:
     def add_prospect_to_list(self, list_id: str, prospect: dict[str, Any]) -> dict[str, Any]:
         if not list_id:
             raise ValueError("list_id is required.")
-        if not prospect.get("email") and not prospect.get("socialLinks[linkedIn]"):
+        social_links = prospect.get("socialLinks") if isinstance(prospect.get("socialLinks"), dict) else {}
+        linkedin_url = prospect.get("socialLinks[linkedIn]") or social_links.get("linkedIn")
+        if not prospect.get("email") and not linkedin_url:
             raise ValueError("A prospect email or LinkedIn URL is required.")
 
         data = {

@@ -173,6 +173,36 @@ def _snovio_client() -> SnovioClient:
     )
 
 
+def _snovio_campaign_list_id(campaign: dict | None) -> str:
+    if not campaign:
+        return ""
+    return str(campaign.get("list_id") or campaign.get("listId") or "").strip()
+
+
+def _snovio_list_name(payload: dict, job_id: str) -> str:
+    explicit_name = str(payload.get("listName") or payload.get("list_name") or "").strip()
+    if explicit_name:
+        return explicit_name[:120]
+
+    template_name = str(payload.get("templateName") or payload.get("templateId") or "Generated Leads").strip()
+    source_file = str(payload.get("sourceFileName") or "").strip()
+    date_suffix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parts = ["Cloudware", template_name]
+    if source_file:
+        parts.append(source_file.rsplit(".", 1)[0])
+    parts.append(date_suffix)
+    name = " - ".join(part for part in parts if part)
+    return (name or f"Cloudware - {job_id[:8]} - {date_suffix}")[:120]
+
+
+def _snovio_created_list_id(response: Any) -> str:
+    payload = response[0] if isinstance(response, list) and response else response
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    return str(data.get("id") or payload.get("id") or "").strip()
+
+
 # ===========================================================================
 # 1. UPLOAD — HTTP Trigger
 # ===========================================================================
@@ -667,19 +697,33 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
     list_id = str(payload.get("listId") or payload.get("list_id") or "").strip()
     campaign_id = str(payload.get("campaignId") or payload.get("campaign_id") or "").strip()
     dry_run = _parse_bool(payload.get("dryRun"), default=True)
+    auto_create_list = _parse_bool(payload.get("createListIfMissing", payload.get("autoCreateList")), default=False)
     require_verification = _parse_bool(payload.get("requireVerification"), default=True)
     confirm_active_campaign = _parse_bool(payload.get("confirmActiveCampaign"), default=False)
     allow_unknown = _parse_bool(payload.get("allowUnknown"), SNOVIO_ALLOW_UNKNOWN_VERIFICATION)
     suppressed_emails = {str(item).strip().lower() for item in payload.get("suppressedEmails", [])}
     suppressed_domains = {str(item).strip().lower() for item in payload.get("suppressedDomains", [])}
 
-    if not list_id:
-        return _json_response({"error": "listId is required."}, 400)
-
     try:
         client = _snovio_client()
         campaigns = client.get_user_campaigns() if campaign_id else []
         campaign = find_campaign(campaigns, campaign_id) if campaign_id else None
+        campaign_list_id = _snovio_campaign_list_id(campaign)
+        list_source = "selected" if list_id else ""
+        if not list_id and campaign_list_id:
+            list_id = campaign_list_id
+            list_source = "campaign"
+
+        list_name = _snovio_list_name(payload, job_id)
+        planned_list_creation = not list_id and auto_create_list
+        created_list = None
+
+        if not list_id and not auto_create_list:
+            return _json_response({
+                "error": "listId is required unless autoCreateList=true or the selected campaign includes list_id.",
+                "campaign": campaign,
+            }, 400)
+
         active_campaign = is_sending_campaign(campaign)
         if active_campaign and not dry_run and not confirm_active_campaign:
             return _json_response({
@@ -688,11 +732,15 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
                 "dryRunRecommended": True,
             }, 409)
 
+        if planned_list_creation:
+            list_source = "planned_create"
+
         dataframe = parse_csv(_download_job_csv(job_id))
         rows, columns = build_job_rows(dataframe)
         custom_fields = client.get_custom_fields() if payload.get("includeGeneratedCustomFields", True) else []
         verification = verification_lookup(payload.get("verificationResults", []), allow_unknown=allow_unknown)
         report_rows = []
+        sync_candidates = []
 
         for row_info in rows:
             row_index = row_info["rowIndex"]
@@ -714,6 +762,21 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
             }
 
             if row_report["eligible"] and not dry_run:
+                sync_candidates.append((row_info, row_report))
+
+            report_rows.append(row_report)
+
+        if planned_list_creation and sync_candidates:
+            created_list = client.create_prospect_list(list_name)
+            list_id = _snovio_created_list_id(created_list)
+            if not list_id:
+                return _json_response({"error": "Snov.io list was created but no list ID was returned.", "createdList": created_list}, 502)
+            list_source = "created"
+
+        for row_info, row_report in sync_candidates:
+            row_index = row_info["rowIndex"]
+            email = row_info.get("email", "")
+            if row_report["eligible"]:
                 try:
                     duplicate = client.get_prospects_by_email(email) if email else {"data": []}
                     existing_in_target = any(
@@ -732,11 +795,13 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
                 except Exception as error:
                     row_report.update({"status": "failed", "error": str(error)})
 
-            report_rows.append(row_report)
-
         report = {
             "jobId": job_id,
             "listId": list_id,
+            "listSource": list_source,
+            "listName": list_name if planned_list_creation or list_source == "created" else "",
+            "plannedListCreation": planned_list_creation and not created_list,
+            "createdList": created_list,
             "campaignId": campaign_id,
             "campaign": campaign,
             "activeCampaign": active_campaign,

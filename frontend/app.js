@@ -43,9 +43,11 @@
     const snovioRefreshBtn = document.getElementById("snovio-refresh-btn");
     const snovioListSelect = document.getElementById("snovio-list-select");
     const snovioCampaignSelect = document.getElementById("snovio-campaign-select");
+    const snovioListName = document.getElementById("snovio-list-name");
     const snovioDateFrom = document.getElementById("snovio-date-from");
     const snovioDateTo = document.getElementById("snovio-date-to");
     const snovioRequireVerification = document.getElementById("snovio-require-verification");
+    const snovioAutoCreateList = document.getElementById("snovio-auto-create-list");
     const snovioConfirmActive = document.getElementById("snovio-confirm-active");
     const snovioVerifyBtn = document.getElementById("snovio-verify-btn");
     const snovioDryRunBtn = document.getElementById("snovio-dry-run-btn");
@@ -155,7 +157,16 @@
 
     function renderSnovioReport(title, payload) {
         snovioReport.hidden = false;
-        const summary = payload.summary || payload.estimate || payload.analytics || payload.balance || payload;
+        let summary = payload.summary || payload.estimate || payload.analytics || payload.balance || payload;
+        if (payload.summary) {
+            summary = {
+                ...payload.summary,
+                listId: payload.listId || "",
+                listSource: payload.listSource || "",
+                listName: payload.listName || "",
+                plannedListCreation: !!payload.plannedListCreation,
+            };
+        }
         snovioReport.innerHTML = "";
         const heading = document.createElement("h4");
         heading.textContent = title;
@@ -183,6 +194,7 @@
         campaigns.forEach((item) => {
             snovioCampaignSelect.appendChild(new Option(`${item.campaign || "Campaign"} - ${item.status || "Unknown"}`, item.id));
         });
+        applyCampaignListSelection();
     }
 
     async function loadSnovioOptions() {
@@ -231,26 +243,67 @@
         return (snovioOptions.campaigns || []).find((item) => String(item.id) === String(campaignId)) || null;
     }
 
+    function campaignListId(campaign) {
+        if (!campaign) return "";
+        return String(campaign.list_id || campaign.listId || "").trim();
+    }
+
+    function applyCampaignListSelection() {
+        const campaign = selectedCampaign();
+        const inferredListId = campaignListId(campaign);
+        if (!inferredListId) return;
+        const existingOption = Array.from(snovioListSelect.options).find((option) => String(option.value) === inferredListId);
+        if (!existingOption) {
+            snovioListSelect.appendChild(new Option(`Campaign list ${inferredListId}`, inferredListId));
+        }
+        snovioListSelect.value = inferredListId;
+    }
+
+    function selectedTemplateName() {
+        const selected = templateSelect.options[templateSelect.selectedIndex];
+        return selected ? selected.textContent.replace(/\s*\([^)]*emails?\)\s*$/i, "").trim() : "Generated Leads";
+    }
+
+    function defaultSnovioListName() {
+        const customName = snovioListName.value.trim();
+        if (customName) return customName;
+        const date = new Date().toISOString().slice(0, 10);
+        const fileBase = selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : "";
+        return ["Cloudware", selectedTemplateName(), fileBase, date].filter(Boolean).join(" - ");
+    }
+
     async function runSnovioSync(dryRun) {
         if (!currentJobId) return;
-        if (!snovioListSelect.value) {
-            renderSnovioReport("Snov.io", { error: "Select a list first." });
+        const campaign = selectedCampaign();
+        const inferredListId = campaignListId(campaign);
+        const autoCreateList = snovioAutoCreateList.checked;
+        if (!snovioListSelect.value && !inferredListId && !autoCreateList) {
+            renderSnovioReport("Snov.io", { error: "Select a list, select a campaign with a list, or enable automatic list creation." });
             return;
         }
         setSnovioBusy(true);
         try {
-            const campaign = selectedCampaign();
             const payload = {
                 dryRun,
-                listId: snovioListSelect.value,
+                listId: snovioListSelect.value || inferredListId,
                 campaignId: snovioCampaignSelect.value,
                 campaignStatus: campaign ? campaign.status : "",
+                autoCreateList,
+                createListIfMissing: autoCreateList,
+                listName: defaultSnovioListName(),
+                templateId: templateSelect.value,
+                templateName: selectedTemplateName(),
+                sourceFileName: selectedFile ? selectedFile.name : "",
                 confirmActiveCampaign: snovioConfirmActive.checked,
                 requireVerification: snovioRequireVerification.checked,
                 verificationResults: snovioVerificationResults,
                 includeGeneratedCustomFields: true,
             };
             const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
+            if (!dryRun && report.createdList) {
+                await loadSnovioOptions();
+                if (report.listId) snovioListSelect.value = report.listId;
+            }
             renderSnovioReport(dryRun ? "Dry Run" : "Sync Report", report);
         } catch (err) {
             renderSnovioReport("Snov.io", { error: err.message });
@@ -260,6 +313,7 @@
     }
 
     snovioRefreshBtn.addEventListener("click", loadSnovioOptions);
+    snovioCampaignSelect.addEventListener("change", applyCampaignListSelection);
     snovioVerifyBtn.addEventListener("click", async () => {
         if (!currentJobId) return;
         setSnovioBusy(true);

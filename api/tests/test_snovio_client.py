@@ -99,3 +99,26 @@ def test_custom_fields_are_flattened_for_prospect_sync(mock_urlopen):
     request = mock_urlopen.call_args_list[1].args[0]
     assert result["added"] is True
     assert b"customFields%5BSubject_Touch1%5D=Hello" in request.data
+
+
+@patch("snovio_client.urlopen")
+def test_create_prospect_list_posts_name(mock_urlopen):
+    mock_urlopen.side_effect = [
+        FakeResponse({"access_token": "token-1", "expires_in": 3600}),
+        FakeResponse([{"success": True, "data": {"id": 1234567}}]),
+    ]
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    result = client.create_prospect_list("Cloudware Leads")
+
+    request = mock_urlopen.call_args_list[1].args[0]
+    assert result[0]["data"]["id"] == 1234567
+    assert request.full_url == "https://api.snov.io/v1/lists"
+    assert b"name=Cloudware+Leads" in request.data
+
+
+def test_create_prospect_list_requires_name():
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    with pytest.raises(ValueError):
+        client.create_prospect_list("  ")

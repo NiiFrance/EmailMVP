@@ -363,6 +363,108 @@ class TestSnovioEndpoints:
         assert payload["rows"][0]["status"] == "skipped"
         mock_client.add_prospect_to_list.assert_not_called()
 
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company\na@example.com,Ada,Lovelace,Contoso\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_sync_job_uses_selected_campaign_list_id(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
+        mock_client = MagicMock()
+        mock_client.get_user_campaigns.return_value = [{"id": "7", "campaign": "Help", "status": "Paused", "list_id": 999}]
+        mock_client.get_custom_fields.return_value = []
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"campaignId": "7", "dryRun": True, "requireVerification": False},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.sync_job_to_snovio(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["listId"] == "999"
+        assert payload["listSource"] == "campaign"
+        assert payload["plannedListCreation"] is False
+
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company\na@example.com,Ada,Lovelace,Contoso\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_sync_job_dry_run_plans_auto_created_list(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
+        mock_client = MagicMock()
+        mock_client.get_custom_fields.return_value = []
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={
+                "autoCreateList": True,
+                "dryRun": True,
+                "requireVerification": False,
+                "templateName": "Help & Assistance - Leads",
+                "sourceFileName": "inbound.csv",
+            },
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.sync_job_to_snovio(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["listId"] == ""
+        assert payload["listSource"] == "planned_create"
+        assert payload["plannedListCreation"] is True
+        assert payload["listName"].startswith("Cloudware - Help & Assistance - Leads - inbound")
+        mock_client.create_prospect_list.assert_not_called()
+
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company\na@example.com,Ada,Lovelace,Contoso\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_sync_job_live_creates_list_before_sync(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
+        mock_client = MagicMock()
+        mock_client.create_prospect_list.return_value = [{"success": True, "data": {"id": 321}}]
+        mock_client.get_custom_fields.return_value = []
+        mock_client.get_prospects_by_email.return_value = {"data": []}
+        mock_client.add_prospect_to_list.return_value = {"success": True, "id": "prospect-1", "added": True}
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"autoCreateList": True, "dryRun": False, "requireVerification": False, "listName": "Cloudware Test Leads"},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.sync_job_to_snovio(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["listId"] == "321"
+        assert payload["listSource"] == "created"
+        assert payload["createdList"][0]["data"]["id"] == 321
+        assert payload["rows"][0]["status"] == "added"
+        mock_client.create_prospect_list.assert_called_once_with("Cloudware Test Leads")
+        mock_client.add_prospect_to_list.assert_called_once()
+
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company\na@example.com,Ada,Lovelace,Contoso\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_sync_job_does_not_create_list_when_no_rows_are_eligible(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
+        mock_client = MagicMock()
+        mock_client.get_custom_fields.return_value = []
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"autoCreateList": True, "dryRun": False, "requireVerification": True, "listName": "Cloudware Empty"},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.sync_job_to_snovio(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["listId"] == ""
+        assert payload["listSource"] == "planned_create"
+        assert payload["plannedListCreation"] is True
+        assert payload["rows"][0]["blockedReason"] == "verification_required"
+        mock_client.create_prospect_list.assert_not_called()
+        mock_client.add_prospect_to_list.assert_not_called()
+
     @patch.object(fa, "_upload_blob")
     def test_webhook_requires_shared_secret_and_persists_event(self, mock_upload):
         req = self._request(
