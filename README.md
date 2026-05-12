@@ -240,7 +240,7 @@ cd api
 python -m pytest tests -q
 ```
 
-Current status: **151 passed**
+Current status: **180 passed**
 
 ## Deployment
 
