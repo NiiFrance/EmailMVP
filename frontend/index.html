@@ -94,6 +94,82 @@
                     <p><strong>Elapsed Time:</strong> <span id="summary-elapsed">—</span></p>
                     <p><strong>Job ID:</strong> <code id="summary-job-id"></code></p>
                 </div>
+
+                <div id="snovio-panel" class="snovio-panel">
+                    <div class="snovio-header">
+                        <div>
+                            <h3>Snov.io</h3>
+                            <p id="snovio-status">Checking account...</p>
+                        </div>
+                        <button id="snovio-refresh-btn" class="btn-icon" title="Refresh Snov.io data" type="button">&#8635;</button>
+                    </div>
+
+                    <div class="snovio-grid">
+                        <div>
+                            <label for="snovio-list-select">List</label>
+                            <select id="snovio-list-select"></select>
+                        </div>
+                        <div>
+                            <label for="snovio-campaign-select">Campaign</label>
+                            <select id="snovio-campaign-select"></select>
+                        </div>
+                        <div>
+                            <label for="snovio-date-from">From</label>
+                            <input id="snovio-date-from" type="date">
+                        </div>
+                        <div>
+                            <label for="snovio-date-to">To</label>
+                            <input id="snovio-date-to" type="date">
+                        </div>
+                    </div>
+
+                    <div class="snovio-checks">
+                        <label><input id="snovio-require-verification" type="checkbox" checked> Require verified recipients</label>
+                        <label><input id="snovio-confirm-active" type="checkbox"> Confirm active campaign sync</label>
+                    </div>
+
+                    <div class="snovio-actions">
+                        <button id="snovio-verify-btn" class="btn btn-secondary" type="button">Verify</button>
+                        <button id="snovio-dry-run-btn" class="btn btn-secondary" type="button">Dry Run</button>
+                        <button id="snovio-sync-btn" class="btn btn-primary" type="button">Sync to Snov.io</button>
+                    </div>
+
+                    <div class="snovio-actions secondary-actions">
+                        <button id="snovio-enrich-btn" class="btn btn-secondary" type="button">Enrichment Estimate</button>
+                        <button id="snovio-analytics-btn" class="btn btn-secondary" type="button">Analytics</button>
+                    </div>
+
+                    <div class="snovio-grid snovio-admin-grid">
+                        <div>
+                            <label for="snovio-suppression-list-id">Do-not-email list ID</label>
+                            <input id="snovio-suppression-list-id" type="text" autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="snovio-suppression-items">Emails or domains</label>
+                            <input id="snovio-suppression-items" type="text" autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="snovio-recipient-email">Recipient email</label>
+                            <input id="snovio-recipient-email" type="email" autocomplete="off">
+                        </div>
+                        <div>
+                            <label for="snovio-recipient-status">Recipient status</label>
+                            <select id="snovio-recipient-status">
+                                <option value="Paused">Paused</option>
+                                <option value="Unsubscribed">Unsubscribed</option>
+                                <option value="Active">Active</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="snovio-actions secondary-actions">
+                        <button id="snovio-suppress-btn" class="btn btn-secondary" type="button">Add Suppression</button>
+                        <button id="snovio-recipient-status-btn" class="btn btn-secondary" type="button">Update Recipient</button>
+                    </div>
+
+                    <div id="snovio-report" class="snovio-report" hidden></div>
+                </div>
+
                 <button id="download-btn" class="btn btn-primary">
                     Download Enriched CSV
                 </button>

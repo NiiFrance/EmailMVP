@@ -38,6 +38,28 @@
     const downloadBtn    = document.getElementById("download-btn");
     const newJobBtn      = document.getElementById("new-job-btn");
 
+    const snovioPanel = document.getElementById("snovio-panel");
+    const snovioStatus = document.getElementById("snovio-status");
+    const snovioRefreshBtn = document.getElementById("snovio-refresh-btn");
+    const snovioListSelect = document.getElementById("snovio-list-select");
+    const snovioCampaignSelect = document.getElementById("snovio-campaign-select");
+    const snovioDateFrom = document.getElementById("snovio-date-from");
+    const snovioDateTo = document.getElementById("snovio-date-to");
+    const snovioRequireVerification = document.getElementById("snovio-require-verification");
+    const snovioConfirmActive = document.getElementById("snovio-confirm-active");
+    const snovioVerifyBtn = document.getElementById("snovio-verify-btn");
+    const snovioDryRunBtn = document.getElementById("snovio-dry-run-btn");
+    const snovioSyncBtn = document.getElementById("snovio-sync-btn");
+    const snovioEnrichBtn = document.getElementById("snovio-enrich-btn");
+    const snovioAnalyticsBtn = document.getElementById("snovio-analytics-btn");
+    const snovioSuppressionListId = document.getElementById("snovio-suppression-list-id");
+    const snovioSuppressionItems = document.getElementById("snovio-suppression-items");
+    const snovioSuppressBtn = document.getElementById("snovio-suppress-btn");
+    const snovioRecipientEmail = document.getElementById("snovio-recipient-email");
+    const snovioRecipientStatus = document.getElementById("snovio-recipient-status");
+    const snovioRecipientStatusBtn = document.getElementById("snovio-recipient-status-btn");
+    const snovioReport = document.getElementById("snovio-report");
+
     const errorMessage = document.getElementById("error-message");
     const retryBtn     = document.getElementById("retry-btn");
 
@@ -49,6 +71,8 @@
     let startTime    = null;
     let elapsedTimer = null;
     let templateData = [];  // cached template list from API
+    let snovioOptions = null;
+    let snovioVerificationResults = [];
 
     // ── Load Templates ──
     async function loadTemplates() {
@@ -122,6 +146,208 @@
         if (m > 0) return `${m}m ${s % 60}s`;
         return `${s}s`;
     }
+
+    function setSnovioBusy(isBusy) {
+        [snovioRefreshBtn, snovioVerifyBtn, snovioDryRunBtn, snovioSyncBtn, snovioEnrichBtn, snovioAnalyticsBtn, snovioSuppressBtn, snovioRecipientStatusBtn].forEach((button) => {
+            button.disabled = isBusy;
+        });
+    }
+
+    function renderSnovioReport(title, payload) {
+        snovioReport.hidden = false;
+        const summary = payload.summary || payload.estimate || payload.analytics || payload.balance || payload;
+        snovioReport.innerHTML = "";
+        const heading = document.createElement("h4");
+        heading.textContent = title;
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(summary, null, 2);
+        snovioReport.appendChild(heading);
+        snovioReport.appendChild(pre);
+    }
+
+    function renderSnovioOptions(options) {
+        const lists = options.lists || [];
+        const campaigns = options.campaigns || [];
+
+        snovioListSelect.innerHTML = "";
+        if (!lists.length) {
+            snovioListSelect.appendChild(new Option("No lists found", ""));
+        } else {
+            lists.filter((item) => !item.isDeleted).forEach((item) => {
+                snovioListSelect.appendChild(new Option(`${item.name || "List"} (${item.contacts || 0})`, item.id));
+            });
+        }
+
+        snovioCampaignSelect.innerHTML = "";
+        snovioCampaignSelect.appendChild(new Option("No campaign", ""));
+        campaigns.forEach((item) => {
+            snovioCampaignSelect.appendChild(new Option(`${item.campaign || "Campaign"} - ${item.status || "Unknown"}`, item.id));
+        });
+    }
+
+    async function loadSnovioOptions() {
+        if (!snovioPanel) return;
+        setSnovioBusy(true);
+        snovioStatus.textContent = "Checking account...";
+        try {
+            const [statusResp, optionsResp, preflightResp] = await Promise.all([
+                fetch("/api/snovio/status"),
+                fetch("/api/snovio/options"),
+                currentJobId ? fetch(`/api/snovio/preflight?jobId=${encodeURIComponent(currentJobId)}&operation=full`) : Promise.resolve(null),
+            ]);
+            const status = await statusResp.json();
+            const options = await optionsResp.json();
+            const preflight = preflightResp ? await preflightResp.json() : null;
+            snovioOptions = options;
+            renderSnovioOptions(options);
+            if (!status.configured) {
+                snovioStatus.textContent = "Not configured";
+                return;
+            }
+            const balance = preflight && preflight.balance && preflight.balance.data ? preflight.balance.data.balance : "ready";
+            snovioStatus.textContent = `Ready · balance ${balance}`;
+            if (preflight) renderSnovioReport("Preflight", preflight);
+        } catch (err) {
+            snovioStatus.textContent = "Unavailable";
+        } finally {
+            setSnovioBusy(false);
+        }
+    }
+
+    async function postJson(url, payload) {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Snov.io request failed.");
+        return data;
+    }
+
+    function selectedCampaign() {
+        const campaignId = snovioCampaignSelect.value;
+        if (!campaignId || !snovioOptions) return null;
+        return (snovioOptions.campaigns || []).find((item) => String(item.id) === String(campaignId)) || null;
+    }
+
+    async function runSnovioSync(dryRun) {
+        if (!currentJobId) return;
+        if (!snovioListSelect.value) {
+            renderSnovioReport("Snov.io", { error: "Select a list first." });
+            return;
+        }
+        setSnovioBusy(true);
+        try {
+            const campaign = selectedCampaign();
+            const payload = {
+                dryRun,
+                listId: snovioListSelect.value,
+                campaignId: snovioCampaignSelect.value,
+                campaignStatus: campaign ? campaign.status : "",
+                confirmActiveCampaign: snovioConfirmActive.checked,
+                requireVerification: snovioRequireVerification.checked,
+                verificationResults: snovioVerificationResults,
+                includeGeneratedCustomFields: true,
+            };
+            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
+            renderSnovioReport(dryRun ? "Dry Run" : "Sync Report", report);
+        } catch (err) {
+            renderSnovioReport("Snov.io", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    }
+
+    snovioRefreshBtn.addEventListener("click", loadSnovioOptions);
+    snovioVerifyBtn.addEventListener("click", async () => {
+        if (!currentJobId) return;
+        setSnovioBusy(true);
+        try {
+            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/verify`, {
+                dryRun: false,
+                poll: true,
+            });
+            snovioVerificationResults = report.results || [];
+            renderSnovioReport("Verification", report);
+        } catch (err) {
+            renderSnovioReport("Verification", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    });
+    snovioDryRunBtn.addEventListener("click", () => runSnovioSync(true));
+    snovioSyncBtn.addEventListener("click", () => runSnovioSync(false));
+    snovioEnrichBtn.addEventListener("click", async () => {
+        if (!currentJobId) return;
+        setSnovioBusy(true);
+        try {
+            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/enrich`, { dryRun: true });
+            renderSnovioReport("Enrichment", report);
+        } catch (err) {
+            renderSnovioReport("Enrichment", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    });
+    snovioAnalyticsBtn.addEventListener("click", async () => {
+        if (!snovioCampaignSelect.value) {
+            renderSnovioReport("Analytics", { error: "Select a campaign first." });
+            return;
+        }
+        setSnovioBusy(true);
+        try {
+            const params = new URLSearchParams({ campaignId: snovioCampaignSelect.value });
+            if (snovioDateFrom.value) params.set("dateFrom", snovioDateFrom.value);
+            if (snovioDateTo.value) params.set("dateTo", snovioDateTo.value);
+            const response = await fetch(`/api/snovio/analytics?${params.toString()}`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Analytics unavailable.");
+            renderSnovioReport("Analytics", data);
+        } catch (err) {
+            renderSnovioReport("Analytics", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    });
+    snovioSuppressBtn.addEventListener("click", async () => {
+        const items = snovioSuppressionItems.value.split(",").map((item) => item.trim()).filter(Boolean);
+        if (!snovioSuppressionListId.value || !items.length) {
+            renderSnovioReport("Suppression", { error: "List ID and at least one item are required." });
+            return;
+        }
+        setSnovioBusy(true);
+        try {
+            const report = await postJson("/api/snovio/suppressions", {
+                listId: snovioSuppressionListId.value,
+                items,
+            });
+            renderSnovioReport("Suppression", report);
+        } catch (err) {
+            renderSnovioReport("Suppression", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    });
+    snovioRecipientStatusBtn.addEventListener("click", async () => {
+        if (!snovioCampaignSelect.value || !snovioRecipientEmail.value) {
+            renderSnovioReport("Recipient", { error: "Campaign and recipient email are required." });
+            return;
+        }
+        setSnovioBusy(true);
+        try {
+            const report = await postJson("/api/snovio/recipient-status", {
+                campaignId: snovioCampaignSelect.value,
+                email: snovioRecipientEmail.value,
+                status: snovioRecipientStatus.value,
+            });
+            renderSnovioReport("Recipient", report);
+        } catch (err) {
+            renderSnovioReport("Recipient", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    });
 
     // ── File Selection ──
     function selectFile(file) {
@@ -317,6 +543,7 @@
                     summaryElapsed.textContent = finalElapsed;
                     summaryJobId.textContent = currentJobId;
                     showSection(downloadSection);
+                    loadSnovioOptions();
                 }, 800);
             } else if (status === "Failed") {
                 stopPolling();
@@ -372,6 +599,8 @@
         currentJobId = null;
         totalLeads = 0;
         startTime = null;
+        snovioVerificationResults = [];
+        snovioReport.hidden = true;
         clearFile();
         uploadBtn.classList.remove("loading");
         showSection(uploadSection);

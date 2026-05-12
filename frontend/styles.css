@@ -272,6 +272,122 @@ body {
     margin-bottom: 0.75rem;
 }
 
+.snovio-panel {
+    border: 1px solid #d8dee6;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.snovio-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+}
+
+.snovio-header h3 {
+    font-size: 1rem;
+    margin-bottom: 0.125rem;
+}
+
+.snovio-header p {
+    color: #666;
+    font-size: 0.8125rem;
+}
+
+.btn-icon {
+    width: 36px;
+    height: 36px;
+    border: 1px solid #c8d1dc;
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 1.125rem;
+}
+
+.snovio-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.snovio-grid label,
+.snovio-checks label {
+    display: block;
+    font-size: 0.8125rem;
+    color: #555;
+    margin-bottom: 0.25rem;
+}
+
+.snovio-grid select,
+.snovio-grid input {
+    width: 100%;
+    min-width: 0;
+    padding: 0.5rem;
+    border: 1px solid #c8d1dc;
+    border-radius: 8px;
+    font: inherit;
+}
+
+.snovio-checks {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.snovio-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0.5rem;
+}
+
+.snovio-actions .btn {
+    width: 100%;
+    margin-bottom: 0;
+    padding: 0.625rem 0.75rem;
+    font-size: 0.875rem;
+}
+
+.secondary-actions {
+    grid-template-columns: 1fr 1fr;
+    margin-top: 0.5rem;
+}
+
+.snovio-admin-grid {
+    margin-top: 0.75rem;
+}
+
+.snovio-report {
+    margin-top: 0.75rem;
+    background: #f8f9fb;
+    border-radius: 8px;
+    padding: 0.75rem;
+}
+
+.snovio-report h4 {
+    font-size: 0.875rem;
+    margin-bottom: 0.5rem;
+}
+
+.snovio-report pre {
+    overflow: auto;
+    max-height: 220px;
+    white-space: pre-wrap;
+    font-size: 0.75rem;
+}
+
+@media (max-width: 640px) {
+    .snovio-grid,
+    .snovio-checks,
+    .snovio-actions,
+    .secondary-actions {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* === Footer === */
 .footer {
     text-align: center;

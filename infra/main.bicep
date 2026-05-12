@@ -27,6 +27,33 @@ param azureOpenAiDeployment string = 'gpt-5.5'
 @description('Number of leads processed concurrently per durable batch')
 param batchSize string = '100'
 
+@description('Snov.io API client ID. Leave blank to disable Snov.io integration.')
+@secure()
+param snovioClientId string = ''
+
+@description('Snov.io API client secret. Leave blank to disable Snov.io integration.')
+@secure()
+param snovioClientSecret string = ''
+
+@description('Snov.io webhook shared secret. Leave blank to disable webhook ingestion.')
+@secure()
+param snovioWebhookSecret string = ''
+
+@description('Maximum Snov.io API requests per minute')
+param snovioRequestsPerMinute string = '60'
+
+@description('Snov.io API base URL')
+param snovioApiBaseUrl string = 'https://api.snov.io'
+
+@description('JSON mapping from app template IDs to Snov.io list and campaign IDs')
+param snovioTemplateMappings string = '{}'
+
+@description('Whether unknown/catch-all verified emails are eligible for Snov.io sync')
+param snovioAllowUnknownVerification string = 'false'
+
+@description('Minimum credit buffer before warning/blocking Snov.io workflows')
+param snovioLowCreditThreshold string = '0'
+
 // -----------------------------------------------------------------------
 // Variables
 // -----------------------------------------------------------------------
@@ -39,6 +66,22 @@ var appInsightsName = 'azai${resourceToken}'
 var logAnalyticsName = 'azla${resourceToken}'
 var staticWebAppName = 'azswa${resourceToken}'
 var managedIdentityName = 'azid${resourceToken}'
+var snovioEnabled = !empty(snovioClientId) && !empty(snovioClientSecret)
+var snovioWebhookEnabled = !empty(snovioWebhookSecret)
+var snovioCredentialAppSettings = snovioEnabled ? [
+  { name: 'SNOVIO_CLIENT_ID', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioClientId)' }
+  { name: 'SNOVIO_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioClientSecret)' }
+] : []
+var snovioWebhookAppSettings = snovioWebhookEnabled ? [
+  { name: 'SNOVIO_WEBHOOK_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioWebhookSecret)' }
+] : []
+var snovioAppSettings = concat([
+  { name: 'SNOVIO_API_BASE_URL', value: snovioApiBaseUrl }
+  { name: 'SNOVIO_REQUESTS_PER_MINUTE', value: snovioRequestsPerMinute }
+  { name: 'SNOVIO_TEMPLATE_MAPPINGS', value: snovioTemplateMappings }
+  { name: 'SNOVIO_ALLOW_UNKNOWN_VERIFICATION', value: snovioAllowUnknownVerification }
+  { name: 'SNOVIO_LOW_CREDIT_THRESHOLD', value: snovioLowCreditThreshold }
+], snovioCredentialAppSettings, snovioWebhookAppSettings)
 
 // -----------------------------------------------------------------------
 // User-Assigned Managed Identity
@@ -210,6 +253,33 @@ resource azureOpenAiEndpointSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01
   dependsOn: [kvSecretsOfficerRole]
 }
 
+resource snovioClientIdSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioEnabled) {
+  parent: keyVault
+  name: 'SnovioClientId'
+  properties: {
+    value: snovioClientId
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioClientSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioEnabled) {
+  parent: keyVault
+  name: 'SnovioClientSecret'
+  properties: {
+    value: snovioClientSecret
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioWebhookSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioWebhookEnabled) {
+  parent: keyVault
+  name: 'SnovioWebhookSecret'
+  properties: {
+    value: snovioWebhookSecret
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
 // -----------------------------------------------------------------------
 // App Service Plan — Premium EP1 (required for Durable Functions long-running)
 // -----------------------------------------------------------------------
@@ -249,7 +319,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       cors: {
         allowedOrigins: ['*']
       }
-      appSettings: [
+      appSettings: concat([
         { name: 'AzureWebJobsStorage__accountName', value: storageAccountName }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__clientId', value: managedIdentity.properties.clientId }
@@ -264,7 +334,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'CSV_OUTPUT_CONTAINER', value: 'csv-output' }
         { name: 'BATCH_SIZE', value: batchSize }
         { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
-      ]
+      ], snovioAppSettings)
     }
     keyVaultReferenceIdentity: managedIdentity.id
   }

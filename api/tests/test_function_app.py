@@ -234,6 +234,151 @@ class TestTemplatesEndpoint:
         assert any(item["id"] == "cold_email" for item in payload["templates"])
 
 
+class TestSnovioEndpoints:
+    @staticmethod
+    def _request(body=None, route_params=None, params=None, headers=None):
+        req = MagicMock()
+        req.route_params = route_params or {}
+        req.params = params or {}
+        req.headers = headers or {}
+        req.get_json.return_value = body or {}
+        req.get_body.return_value = json.dumps(body or {}).encode("utf-8")
+        return req
+
+    def test_status_returns_configuration_without_secrets(self):
+        response = asyncio.run(fa.get_snovio_status(MagicMock()))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload == {
+            "configured": False,
+            "apiBaseUrl": "https://api.snov.io",
+            "rateLimitPerMinute": 60,
+            "allowUnknownVerification": False,
+            "webhookSecretConfigured": False,
+            "templateMappingsConfigured": False,
+        }
+
+    def test_balance_requires_credentials(self):
+        response = asyncio.run(fa.get_snovio_balance(MagicMock()))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 503
+        assert payload["configured"] is False
+        assert "not configured" in payload["error"]
+
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_balance_returns_snovio_payload(self, mock_configured, mock_client_factory):
+        mock_client = MagicMock()
+        mock_client.get_balance.return_value = {"success": True, "data": {"balance": "25000.00"}}
+        mock_client_factory.return_value = mock_client
+
+        response = asyncio.run(fa.get_snovio_balance(MagicMock()))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["configured"] is True
+        assert payload["balance"]["data"]["balance"] == "25000.00"
+
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_balance_maps_rate_limit_error(self, mock_configured, mock_client_factory):
+        mock_client = MagicMock()
+        mock_client.get_balance.side_effect = fa.SnovioAPIError("Snov.io request failed.", status_code=429)
+        mock_client_factory.return_value = mock_client
+
+        response = asyncio.run(fa.get_snovio_balance(MagicMock()))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 429
+        assert payload["statusCode"] == 429
+
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_options_returns_lists_campaigns_and_fields(self, mock_configured, mock_client_factory):
+        mock_client = MagicMock()
+        mock_client.get_user_lists.return_value = [{"id": 1, "name": "Prospects"}]
+        mock_client.get_user_campaigns.return_value = [{"id": 2, "campaign": "Paused", "status": "Paused"}]
+        mock_client.get_custom_fields.return_value = [{"label": "Subject_Touch1"}]
+        mock_client_factory.return_value = mock_client
+
+        response = asyncio.run(fa.get_snovio_options(MagicMock()))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["configured"] is True
+        assert payload["lists"][0]["name"] == "Prospects"
+        assert payload["customFields"][0]["label"] == "Subject_Touch1"
+
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Company\na@example.com,Ada,Contoso\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_preflight_estimates_job_usage(self, mock_configured, mock_client_factory, mock_download):
+        mock_client = MagicMock()
+        mock_client.get_balance.return_value = {"success": True, "data": {"balance": "10"}}
+        mock_client_factory.return_value = mock_client
+        req = self._request(params={"jobId": "job-1", "operation": "verify"})
+
+        response = asyncio.run(fa.get_snovio_preflight(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["estimate"]["estimatedCredits"] == 1
+        assert payload["lowCredit"] is False
+
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Company\na@example.com,Ada,Contoso\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_verify_job_dry_run_does_not_call_snovio(self, mock_configured, mock_client_factory, mock_download):
+        req = self._request(body={"dryRun": True}, route_params={"jobId": "job-1"})
+
+        response = asyncio.run(fa.verify_job_emails(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["dryRun"] is True
+        assert payload["estimate"]["estimatedCredits"] == 1
+        mock_client_factory.assert_not_called()
+
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company,Subject_Touch1,Body_Touch1\na@example.com,Ada,Lovelace,Contoso,S,B\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_sync_job_dry_run_reports_eligible_row(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
+        mock_client = MagicMock()
+        mock_client.get_user_campaigns.return_value = []
+        mock_client.get_custom_fields.return_value = [{"label": "Subject_Touch1"}, {"label": "Body_Touch1"}]
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"listId": "123", "dryRun": True, "requireVerification": False},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.sync_job_to_snovio(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["summary"]["eligible"] == 1
+        assert payload["rows"][0]["status"] == "skipped"
+        mock_client.add_prospect_to_list.assert_not_called()
+
+    @patch.object(fa, "_upload_blob")
+    def test_webhook_requires_shared_secret_and_persists_event(self, mock_upload):
+        req = self._request(
+            body={"event_object": "campaign_email", "event_action": "sent"},
+            params={"token": "secret"},
+        )
+
+        with patch.object(fa, "SNOVIO_WEBHOOK_SECRET", "secret"):
+            response = asyncio.run(fa.receive_snovio_webhook(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["accepted"] is True
+        mock_upload.assert_called_once()
+
+
 class TestConfiguration:
     def test_batch_size_default(self):
         assert fa.BATCH_SIZE == 100
@@ -243,3 +388,9 @@ class TestConfiguration:
 
     def test_default_model(self):
         assert fa.AZURE_OPENAI_DEPLOYMENT == "gpt-5.5"
+
+    def test_snovio_rate_limit_default(self):
+        assert fa.SNOVIO_REQUESTS_PER_MINUTE == 60
+
+    def test_snovio_base_url_default(self):
+        assert fa.SNOVIO_API_BASE_URL == "https://api.snov.io"

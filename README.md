@@ -57,6 +57,17 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 | `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
 | `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
 | `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
+| `/api/snovio/status` | `GET` | Returns whether Snov.io credentials are configured |
+| `/api/snovio/balance` | `GET` | Returns Snov.io balance preflight data when configured |
+| `/api/snovio/options` | `GET` | Lists Snov.io lists, campaigns, custom fields, and template mappings |
+| `/api/snovio/preflight` | `GET` | Estimates credits and request volume before Snov.io actions |
+| `/api/jobs/{jobId}/snovio/verify` | `POST` | Starts email verification for generated rows |
+| `/api/jobs/{jobId}/snovio/sync` | `POST` | Dry-runs or syncs eligible rows into a Snov.io list |
+| `/api/jobs/{jobId}/snovio/enrich` | `POST` | Dry-runs or starts optional Snov.io enrichment tasks |
+| `/api/snovio/analytics` | `GET` | Proxies campaign analytics and progress |
+| `/api/snovio/webhook` | `POST` | Receives signed Snov.io webhook events |
+| `/api/snovio/suppressions` | `POST` | Adds emails/domains to a Snov.io Do-not-email list |
+| `/api/snovio/recipient-status` | `POST` | Pauses, activates, or unsubscribes a campaign recipient |
 
 ### Upload Form Fields
 
@@ -142,6 +153,7 @@ EmailMVP/
 | Identity | Managed Identity + RBAC |
 | Secrets | Azure Key Vault |
 | Monitoring | Application Insights |
+| Outreach Integration | Snov.io verification, sync, enrichment, analytics, suppression, and webhooks |
 | IaC | Bicep |
 
 ## Local Development
@@ -168,10 +180,32 @@ pip install -r requirements.txt
     "AZURE_OPENAI_DEPLOYMENT": "gpt-5.5",
     "CSV_INPUT_CONTAINER": "csv-input",
     "CSV_OUTPUT_CONTAINER": "csv-output",
-    "BATCH_SIZE": "100"
+    "BATCH_SIZE": "100",
+    "SNOVIO_CLIENT_ID": "<snovio-client-id>",
+    "SNOVIO_CLIENT_SECRET": "<snovio-client-secret>",
+    "SNOVIO_API_BASE_URL": "https://api.snov.io",
+    "SNOVIO_REQUESTS_PER_MINUTE": "60",
+    "SNOVIO_WEBHOOK_SECRET": "<shared-webhook-secret>",
+    "SNOVIO_TEMPLATE_MAPPINGS": "{}",
+    "SNOVIO_ALLOW_UNKNOWN_VERIFICATION": "false",
+    "SNOVIO_LOW_CREDIT_THRESHOLD": "0"
   }
 }
 ```
+
+Snov.io settings are optional. If they are absent, `/api/snovio/status` reports the integration as disabled and the generation/download workflow continues unchanged.
+
+Snov.io sync is explicitly user-triggered after generation. Dry-run mode is available from the UI and backend, active campaign sync requires `confirmActiveCampaign=true`, and recipient verification is required by default before live sync.
+
+Template mappings can be provided with `SNOVIO_TEMPLATE_MAPPINGS` as JSON, for example:
+
+```json
+{
+  "cold_email": { "listId": "1234567", "campaignId": "237945" }
+}
+```
+
+Generated `Subject_TouchN` and `Body_TouchN` values are sent as Snov.io custom fields only when matching custom field labels exist in the Snov.io account.
 
 ### 3. Start local storage
 
