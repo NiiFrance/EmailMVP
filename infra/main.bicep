@@ -15,11 +15,14 @@ param location string = 'eastus2'
 
 @description('Azure OpenAI endpoint, for example https://<resource>.openai.azure.com/')
 @secure()
-param azureOpenAiEndpoint string
+param azureOpenAiEndpoint string = ''
 
 @description('Azure OpenAI API key')
 @secure()
-param azureOpenAiApiKey string
+param azureOpenAiApiKey string = ''
+
+@description('Existing Key Vault name that already contains AzureOpenAIEndpoint and AzureOpenAIApiKey. Leave blank to create secrets in this deployment Key Vault.')
+param existingAzureOpenAiKeyVaultName string = ''
 
 @description('Azure OpenAI deployment name')
 param azureOpenAiDeployment string = 'gpt-5.5'
@@ -66,6 +69,10 @@ var appInsightsName = 'azai${resourceToken}'
 var logAnalyticsName = 'azla${resourceToken}'
 var staticWebAppName = 'azswa${resourceToken}'
 var managedIdentityName = 'azid${resourceToken}'
+var useExistingAzureOpenAiKeyVault = !empty(existingAzureOpenAiKeyVaultName)
+var azureOpenAiKeyVaultName = useExistingAzureOpenAiKeyVault ? existingAzureOpenAiKeyVaultName : keyVaultName
+var azureOpenAiEndpointSetting = '@Microsoft.KeyVault(VaultName=${azureOpenAiKeyVaultName};SecretName=AzureOpenAIEndpoint)'
+var azureOpenAiApiKeySetting = '@Microsoft.KeyVault(VaultName=${azureOpenAiKeyVaultName};SecretName=AzureOpenAIApiKey)'
 var snovioEnabled = !empty(snovioClientId) && !empty(snovioClientSecret)
 var snovioWebhookEnabled = !empty(snovioWebhookSecret)
 var snovioCredentialAppSettings = snovioEnabled ? [
@@ -234,7 +241,7 @@ resource kvSecretsOfficerRole 'Microsoft.Authorization/roleAssignments@2022-04-0
 }
 
 // Store Azure OpenAI API key in Key Vault
-resource azureOpenAiApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource azureOpenAiApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!useExistingAzureOpenAiKeyVault) {
   parent: keyVault
   name: 'AzureOpenAIApiKey'
   properties: {
@@ -244,7 +251,7 @@ resource azureOpenAiApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' 
 }
 
 // Store Azure OpenAI endpoint in Key Vault
-resource azureOpenAiEndpointSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource azureOpenAiEndpointSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!useExistingAzureOpenAiKeyVault) {
   parent: keyVault
   name: 'AzureOpenAIEndpoint'
   properties: {
@@ -327,8 +334,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
         { name: 'APPINSIGHTS_INSTRUMENTATIONKEY', value: appInsights.properties.InstrumentationKey }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-        { name: 'AZURE_OPENAI_ENDPOINT', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AzureOpenAIEndpoint)' }
-        { name: 'AZURE_OPENAI_API_KEY', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AzureOpenAIApiKey)' }
+        { name: 'AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpointSetting }
+        { name: 'AZURE_OPENAI_API_KEY', value: azureOpenAiApiKeySetting }
         { name: 'AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }
         { name: 'CSV_INPUT_CONTAINER', value: 'csv-input' }
         { name: 'CSV_OUTPUT_CONTAINER', value: 'csv-output' }

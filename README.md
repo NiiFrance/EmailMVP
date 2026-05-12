@@ -197,6 +197,8 @@ Snov.io settings are optional. If they are absent, `/api/snovio/status` reports 
 
 Snov.io sync is explicitly user-triggered after generation. Dry-run mode is available from the UI and backend, active campaign sync requires `confirmActiveCampaign=true`, and recipient verification is required by default before live sync.
 
+For isolated Cloudware test environments that should reuse an existing GPT-5.5 Azure OpenAI deployment, set `existingAzureOpenAiKeyVaultName` during Bicep deployment. The Function App reads `AzureOpenAIEndpoint` and `AzureOpenAIApiKey` from that vault instead of copying the secrets into the new environment vault. Grant the Function App managed identity `Key Vault Secrets User` on the existing vault when the vault is outside the deployment resource group.
+
 Template mappings can be provided with `SNOVIO_TEMPLATE_MAPPINGS` as JSON, for example:
 
 ```json
