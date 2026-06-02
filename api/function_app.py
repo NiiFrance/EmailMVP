@@ -326,7 +326,7 @@ def process_lead_activity(leadInput: dict) -> dict:
                 {"role": "system", "content": template["system_prompt"]},
                 {"role": "user", "content": user_prompt},
             ],
-            max_completion_tokens=8192,
+            max_completion_tokens=32768,
         )
 
         response_text = completion.choices[0].message.content or ""
