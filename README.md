@@ -57,12 +57,14 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 | `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
 | `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
 | `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
-| `/api/snovio/status` | `GET` | Returns whether Snov.io credentials are configured |
+| `/api/snovio/status` | `GET` | Returns whether Snov.io credentials are configured and any active session |
+| `/api/snovio/session` | `POST` / `DELETE` | Opens or closes a secure server-side session for user-supplied Snov.io API keys |
 | `/api/snovio/balance` | `GET` | Returns Snov.io balance preflight data when configured |
-| `/api/snovio/options` | `GET` | Lists Snov.io lists, campaigns, custom fields, and template mappings |
+| `/api/snovio/options` | `GET` | Lists Snov.io lists, campaigns, sender accounts, schedules, custom fields, and template mappings |
 | `/api/snovio/preflight` | `GET` | Estimates credits and request volume before Snov.io actions |
 | `/api/jobs/{jobId}/snovio/verify` | `POST` | Starts email verification for generated rows |
 | `/api/jobs/{jobId}/snovio/sync` | `POST` | Dry-runs or syncs eligible rows into a Snov.io list |
+| `/api/jobs/{jobId}/snovio/journey` | `POST` | Dry-runs or builds a multi-touch draft drip campaign from the generated emails |
 | `/api/jobs/{jobId}/snovio/enrich` | `POST` | Dry-runs or starts optional Snov.io enrichment tasks |
 | `/api/snovio/analytics` | `GET` | Proxies campaign analytics and progress |
 | `/api/snovio/webhook` | `POST` | Receives signed Snov.io webhook events |
@@ -188,7 +190,12 @@ pip install -r requirements.txt
     "SNOVIO_WEBHOOK_SECRET": "<shared-webhook-secret>",
     "SNOVIO_TEMPLATE_MAPPINGS": "{}",
     "SNOVIO_ALLOW_UNKNOWN_VERIFICATION": "false",
-    "SNOVIO_LOW_CREDIT_THRESHOLD": "0"
+    "SNOVIO_LOW_CREDIT_THRESHOLD": "0",
+    "SNOVIO_SESSION_TTL_SECONDS": "3600",
+    "SNOVIO_SESSION_ENCRYPTION_KEY": "<optional-fernet-key>",
+    "SNOVIO_DEFAULT_DELAY_DAYS": "3",
+    "SNOVIO_CAMPAIGN_TIMEZONE": "",
+    "SNOVIO_CAMPAIGN_ARCHIVE_MONTHS": "3"
   }
 }
 ```
@@ -198,6 +205,25 @@ Snov.io settings are optional. If they are absent, `/api/snovio/status` reports 
 Snov.io sync is explicitly user-triggered after generation. Dry-run mode is available from the UI and backend, active campaign sync requires `confirmActiveCampaign=true`, and recipient verification is required by default before live sync.
 
 The app campaign template selected before generation controls the emails GPT creates. The Snov.io campaign selected after generation is optional outreach context. When a Snov.io campaign is selected and its API payload includes `list_id`, sync uses that campaign list automatically. If no list is selected or inferred, the UI can request `autoCreateList=true`; dry-run reports the planned list name, while live sync creates a Snov.io prospect list with `POST /v1/lists` before adding prospects.
+
+### Bring-your-own Snov.io credentials
+
+Credentials are resolved per request. A server-side default can be supplied through Key Vault (`SNOVIO_CLIENT_ID` / `SNOVIO_CLIENT_SECRET`), and a user can additionally connect their own keys from the UI:
+
+1. The browser sends the `client_id` / `client_secret` to `POST /api/snovio/session` over HTTPS.
+2. The backend validates them against Snov.io, then stores them server-side under an opaque session id (encrypted at rest — app-level Fernet encryption when `SNOVIO_SESSION_ENCRYPTION_KEY` is set, otherwise storage encryption only).
+3. The browser keeps only the opaque session id (in `sessionStorage`) and sends it back via the `X-Snovio-Session` header. The secret is never returned to the browser, never written to `localStorage`, and never logged.
+4. `DELETE /api/snovio/session` closes the session and deletes the stored credentials. Sessions also expire after `SNOVIO_SESSION_TTL_SECONDS`.
+
+### Customer journey (drip campaign)
+
+`POST /api/jobs/{jobId}/snovio/journey` turns the drafted, per-lead emails into one multi-touch Snov.io drip campaign:
+
+- The touch count is derived from the generated `Subject_Touch{n}` / `Body_Touch{n}` columns.
+- Each lead's drafted emails are synced as prospect **custom fields**, and every campaign email step references them through merge variables (`{{Subject_Touch1}}`, `{{Body_Touch1}}`, …) — so every recipient receives their own AI-drafted content for each touch.
+- The campaign is created in **draft** state only (this endpoint never starts a campaign). A human reviews and launches it in Snov.io.
+- **Prerequisites:** at least one connected sender email account, and the `Subject_Touch{n}` / `Body_Touch{n}` custom fields must already exist in the Snov.io account (Prospects → custom fields). If they are missing, the journey returns `422` listing the exact field names to create. `delayDays`, tracking, and campaign title are configurable from the UI; `dryRun` previews the full plan without creating anything.
+
 
 For isolated Cloudware test environments that should reuse an existing GPT-5.5 Azure OpenAI deployment, set `existingAzureOpenAiKeyVaultName` during Bicep deployment. The Function App reads `AzureOpenAIEndpoint` and `AzureOpenAIApiKey` from that vault instead of copying the secrets into the new environment vault. Grant the Function App managed identity `Key Vault Secrets User` on the existing vault when the vault is outside the deployment resource group.
 

@@ -3,6 +3,7 @@
 import pandas as pd
 
 from snovio_workflows import (
+    assess_custom_field_readiness,
     build_job_rows,
     build_prospect_payload,
     classify_verification,
@@ -92,3 +93,24 @@ def test_estimate_usage_for_full_workflow():
 def test_active_campaign_detection():
     assert is_sending_campaign({"status": "Active"}) is True
     assert is_sending_campaign({"status": "Paused"}) is False
+
+
+def test_custom_field_readiness_splits_present_and_missing():
+    readiness = assess_custom_field_readiness(
+        [{"label": "Subject_Touch1"}, {"label": "Body_Touch1"}],
+        ["Subject_Touch1", "Body_Touch1", "Subject_Touch2", "Body_Touch2"],
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["present"] == ["Subject_Touch1", "Body_Touch1"]
+    assert readiness["missing"] == ["Subject_Touch2", "Body_Touch2"]
+
+
+def test_custom_field_readiness_ready_when_all_present():
+    readiness = assess_custom_field_readiness(
+        [{"label": "Subject_Touch1"}, {"label": "Body_Touch1"}],
+        ["Subject_Touch1", "Body_Touch1"],
+    )
+
+    assert readiness["ready"] is True
+    assert readiness["missing"] == []

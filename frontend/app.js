@@ -61,6 +61,17 @@
     const snovioRecipientStatus = document.getElementById("snovio-recipient-status");
     const snovioRecipientStatusBtn = document.getElementById("snovio-recipient-status-btn");
     const snovioReport = document.getElementById("snovio-report");
+    const snovioClientId = document.getElementById("snovio-client-id");
+    const snovioClientSecret = document.getElementById("snovio-client-secret");
+    const snovioConnectBtn = document.getElementById("snovio-connect-btn");
+    const snovioDisconnectBtn = document.getElementById("snovio-disconnect-btn");
+    const snovioSenderSelect = document.getElementById("snovio-sender-select");
+    const snovioJourneyTitle = document.getElementById("snovio-journey-title");
+    const snovioJourneyDelay = document.getElementById("snovio-journey-delay");
+    const snovioJourneyOpen = document.getElementById("snovio-journey-open");
+    const snovioJourneyClick = document.getElementById("snovio-journey-click");
+    const snovioJourneyPreviewBtn = document.getElementById("snovio-journey-preview-btn");
+    const snovioJourneyCreateBtn = document.getElementById("snovio-journey-create-btn");
 
     const errorMessage = document.getElementById("error-message");
     const retryBtn     = document.getElementById("retry-btn");
@@ -75,6 +86,7 @@
     let templateData = [];  // cached template list from API
     let snovioOptions = null;
     let snovioVerificationResults = [];
+    let snovioSessionId = sessionStorage.getItem("snovioSessionId") || null;
 
     // ── Load Templates ──
     async function loadTemplates() {
@@ -150,15 +162,35 @@
     }
 
     function setSnovioBusy(isBusy) {
-        [snovioRefreshBtn, snovioVerifyBtn, snovioDryRunBtn, snovioSyncBtn, snovioEnrichBtn, snovioAnalyticsBtn, snovioSuppressBtn, snovioRecipientStatusBtn].forEach((button) => {
-            button.disabled = isBusy;
+        [snovioRefreshBtn, snovioVerifyBtn, snovioDryRunBtn, snovioSyncBtn, snovioEnrichBtn, snovioAnalyticsBtn, snovioSuppressBtn, snovioRecipientStatusBtn, snovioConnectBtn, snovioDisconnectBtn, snovioJourneyPreviewBtn, snovioJourneyCreateBtn].forEach((button) => {
+            if (button) button.disabled = isBusy;
         });
+    }
+
+    function setSnovioConnected(connected) {
+        if (snovioDisconnectBtn) snovioDisconnectBtn.hidden = !connected;
+        if (snovioConnectBtn) snovioConnectBtn.textContent = connected ? "Reconnect" : "Connect";
     }
 
     function renderSnovioReport(title, payload) {
         snovioReport.hidden = false;
-        let summary = payload.summary || payload.estimate || payload.analytics || payload.balance || payload;
-        if (payload.summary) {
+        let summary;
+        if (payload.numTouches !== undefined || payload.customFieldReadiness) {
+            summary = {
+                campaignTitle: payload.campaignTitle,
+                numTouches: payload.numTouches,
+                delayDays: payload.delayDays,
+                campaignId: payload.campaignId,
+                status: payload.status,
+                customFieldReadiness: payload.customFieldReadiness,
+                plannedSteps: payload.plannedSteps,
+                stepContent: payload.stepContent,
+                syncSummary: payload.sync ? payload.sync.summary : undefined,
+                error: payload.error,
+                action: payload.action,
+                note: payload.note,
+            };
+        } else if (payload.summary) {
             summary = {
                 ...payload.summary,
                 listId: payload.listId || "",
@@ -166,6 +198,8 @@
                 listName: payload.listName || "",
                 plannedListCreation: !!payload.plannedListCreation,
             };
+        } else {
+            summary = payload.estimate || payload.analytics || payload.balance || payload;
         }
         snovioReport.innerHTML = "";
         const heading = document.createElement("h4");
@@ -194,7 +228,29 @@
         campaigns.forEach((item) => {
             snovioCampaignSelect.appendChild(new Option(`${item.campaign || "Campaign"} - ${item.status || "Unknown"}`, item.id));
         });
+
+        if (snovioSenderSelect) {
+            snovioSenderSelect.innerHTML = "";
+            const senders = options.senderAccounts || [];
+            if (!senders.length) {
+                snovioSenderSelect.appendChild(new Option("No sender accounts", ""));
+            } else {
+                senders.forEach((item) => {
+                    const label = `${item.email_from || item.sender_name || "Sender"}${item.valid === false ? " (invalid)" : ""}`;
+                    snovioSenderSelect.appendChild(new Option(label, item.id));
+                });
+            }
+        }
         applyCampaignListSelection();
+    }
+
+    const SNOVIO_SESSION_HEADER = "X-Snovio-Session";
+
+    function snovioFetch(url, options) {
+        const opts = options ? { ...options } : {};
+        opts.headers = { ...(opts.headers || {}) };
+        if (snovioSessionId) opts.headers[SNOVIO_SESSION_HEADER] = snovioSessionId;
+        return fetch(url, opts);
     }
 
     async function loadSnovioOptions() {
@@ -203,21 +259,23 @@
         snovioStatus.textContent = "Checking account...";
         try {
             const [statusResp, optionsResp, preflightResp] = await Promise.all([
-                fetch("/api/snovio/status"),
-                fetch("/api/snovio/options"),
-                currentJobId ? fetch(`/api/snovio/preflight?jobId=${encodeURIComponent(currentJobId)}&operation=full`) : Promise.resolve(null),
+                snovioFetch("/api/snovio/status"),
+                snovioFetch("/api/snovio/options"),
+                currentJobId ? snovioFetch(`/api/snovio/preflight?jobId=${encodeURIComponent(currentJobId)}&operation=full`) : Promise.resolve(null),
             ]);
             const status = await statusResp.json();
             const options = await optionsResp.json();
             const preflight = preflightResp ? await preflightResp.json() : null;
             snovioOptions = options;
             renderSnovioOptions(options);
+            setSnovioConnected(!!status.sessionActive);
             if (!status.configured) {
-                snovioStatus.textContent = "Not configured";
+                snovioStatus.textContent = status.sessionActive ? "Session error \u2014 reconnect" : "Not connected \u2014 enter your Snov.io API keys above.";
                 return;
             }
+            const source = status.credentialSource === "session" ? "your session" : "server config";
             const balance = preflight && preflight.balance && preflight.balance.data ? preflight.balance.data.balance : "ready";
-            snovioStatus.textContent = `Ready · balance ${balance}`;
+            snovioStatus.textContent = `Ready \u00b7 ${source} \u00b7 balance ${balance}`;
             if (preflight) renderSnovioReport("Preflight", preflight);
         } catch (err) {
             snovioStatus.textContent = "Unavailable";
@@ -227,7 +285,7 @@
     }
 
     async function postJson(url, payload) {
-        const response = await fetch(url, {
+        const response = await snovioFetch(url, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -312,8 +370,110 @@
         }
     }
 
+    function selectedSenderIds() {
+        if (!snovioSenderSelect) return [];
+        return Array.from(snovioSenderSelect.selectedOptions).map((option) => option.value).filter(Boolean);
+    }
+
+    async function connectSnovio() {
+        const clientId = snovioClientId.value.trim();
+        const clientSecret = snovioClientSecret.value.trim();
+        if (!clientId || !clientSecret) {
+            renderSnovioReport("Snov.io", { error: "Client ID and Client Secret are required." });
+            return;
+        }
+        setSnovioBusy(true);
+        try {
+            const response = await fetch("/api/snovio/session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ clientId, clientSecret }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Unable to connect to Snov.io.");
+            snovioSessionId = data.sessionId;
+            sessionStorage.setItem("snovioSessionId", snovioSessionId);
+            snovioClientSecret.value = "";
+            snovioClientId.value = "";
+            setSnovioConnected(true);
+            await loadSnovioOptions();
+        } catch (err) {
+            renderSnovioReport("Snov.io", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    }
+
+    async function disconnectSnovio() {
+        setSnovioBusy(true);
+        try {
+            await snovioFetch("/api/snovio/session", { method: "DELETE" });
+        } catch (err) {
+            // ignore network errors when closing a session
+        } finally {
+            snovioSessionId = null;
+            sessionStorage.removeItem("snovioSessionId");
+            setSnovioConnected(false);
+            setSnovioBusy(false);
+            await loadSnovioOptions();
+        }
+    }
+
+    async function runSnovioJourney(dryRun) {
+        if (!currentJobId) return;
+        const campaign = selectedCampaign();
+        const inferredListId = campaignListId(campaign);
+        const autoCreateList = snovioAutoCreateList.checked;
+        const senderIds = selectedSenderIds();
+        if (!dryRun && !senderIds.length) {
+            renderSnovioReport("Journey", { error: "Select at least one sender account to create a campaign." });
+            return;
+        }
+        if (!snovioListSelect.value && !inferredListId && !autoCreateList) {
+            renderSnovioReport("Journey", { error: "Select a list, select a campaign with a list, or enable automatic list creation." });
+            return;
+        }
+        setSnovioBusy(true);
+        try {
+            const payload = {
+                dryRun,
+                listId: snovioListSelect.value || inferredListId,
+                autoCreateList,
+                createListIfMissing: autoCreateList,
+                listName: defaultSnovioListName(),
+                campaignTitle: snovioJourneyTitle.value.trim(),
+                senderAccountIds: senderIds,
+                delayDays: Number(snovioJourneyDelay.value) || 0,
+                trackOpens: snovioJourneyOpen.checked,
+                trackClicks: snovioJourneyClick.checked,
+                templateId: templateSelect.value,
+                templateName: selectedTemplateName(),
+                sourceFileName: selectedFile ? selectedFile.name : "",
+                requireVerification: snovioRequireVerification.checked,
+                verificationResults: snovioVerificationResults,
+                includeGeneratedCustomFields: true,
+            };
+            const response = await snovioFetch(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/journey`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const report = await response.json();
+            if (!dryRun && response.ok) await loadSnovioOptions();
+            renderSnovioReport(dryRun ? "Journey Preview" : (response.ok ? "Journey Created" : "Journey"), report);
+        } catch (err) {
+            renderSnovioReport("Journey", { error: err.message });
+        } finally {
+            setSnovioBusy(false);
+        }
+    }
+
     snovioRefreshBtn.addEventListener("click", loadSnovioOptions);
     snovioCampaignSelect.addEventListener("change", applyCampaignListSelection);
+    if (snovioConnectBtn) snovioConnectBtn.addEventListener("click", connectSnovio);
+    if (snovioDisconnectBtn) snovioDisconnectBtn.addEventListener("click", disconnectSnovio);
+    if (snovioJourneyPreviewBtn) snovioJourneyPreviewBtn.addEventListener("click", () => runSnovioJourney(true));
+    if (snovioJourneyCreateBtn) snovioJourneyCreateBtn.addEventListener("click", () => runSnovioJourney(false));
     snovioVerifyBtn.addEventListener("click", async () => {
         if (!currentJobId) return;
         setSnovioBusy(true);
@@ -354,7 +514,7 @@
             const params = new URLSearchParams({ campaignId: snovioCampaignSelect.value });
             if (snovioDateFrom.value) params.set("dateFrom", snovioDateFrom.value);
             if (snovioDateTo.value) params.set("dateTo", snovioDateTo.value);
-            const response = await fetch(`/api/snovio/analytics?${params.toString()}`);
+            const response = await snovioFetch(`/api/snovio/analytics?${params.toString()}`);
             const data = await response.json();
             if (!response.ok) throw new Error(data.error || "Analytics unavailable.");
             renderSnovioReport("Analytics", data);

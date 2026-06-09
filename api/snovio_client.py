@@ -226,6 +226,74 @@ class SnovioClient:
     def get_profile_by_email(self, email: str) -> dict[str, Any]:
         return self._request("POST", "/v1/get-profile-by-email", data={"email": email})
 
+    # -- v2 sender accounts & schedules -------------------------------------
+    def get_sender_accounts(self) -> list[dict[str, Any]]:
+        """Return connected sender email accounts (required for email campaigns)."""
+        response = self._request("GET", "/v2/sender-accounts/emails")
+        if isinstance(response, dict):
+            data = response.get("data")
+            return data if isinstance(data, list) else []
+        return response if isinstance(response, list) else []
+
+    def get_campaign_schedules(self) -> list[dict[str, Any]]:
+        """Return campaign sending schedules."""
+        response = self._request("GET", "/v2/campaigns/schedules")
+        if isinstance(response, dict):
+            data = response.get("data")
+            return data if isinstance(data, list) else []
+        return response if isinstance(response, list) else []
+
+    # -- v2 campaigns -------------------------------------------------------
+    def create_campaign(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a multichannel campaign. Created in `new`/draft status."""
+        if not payload.get("title"):
+            raise ValueError("Campaign title is required.")
+        return self._request("POST", "/v2/campaigns/create", json_body=payload)
+
+    def get_campaign(self, campaign_id: str | int) -> dict[str, Any]:
+        if not campaign_id:
+            raise ValueError("campaign_id is required.")
+        return self._request("GET", f"/v2/campaigns/{campaign_id}")
+
+    def create_email_step_content(
+        self,
+        campaign_id: str | int,
+        step_id: str | int,
+        content_id: int,
+        subject: str,
+        body: str,
+        plain_text: bool = False,
+        usage: str = "active",
+    ) -> dict[str, Any]:
+        """Create or overwrite the content block of an email sequence step."""
+        if not campaign_id or not step_id:
+            raise ValueError("campaign_id and step_id are required.")
+        payload = {
+            "content_id": content_id,
+            "subject": subject,
+            "body": body,
+            "plain_text": plain_text,
+            "usage": usage,
+        }
+        return self._request(
+            "POST",
+            f"/v2/campaigns/{campaign_id}/steps/{step_id}/content/create",
+            json_body=payload,
+        )
+
+    def change_campaign_state(self, campaign_id: str | int, action: str) -> dict[str, Any]:
+        """Transition a campaign state: start, pause, resume, complete, archived."""
+        allowed = {"start", "pause", "resume", "complete", "archived"}
+        if action not in allowed:
+            raise ValueError(f"action must be one of {sorted(allowed)}.")
+        if not campaign_id:
+            raise ValueError("campaign_id is required.")
+        return self._request(
+            "POST",
+            f"/v2/campaigns/{campaign_id}/action",
+            json_body={"action": action},
+        )
+
     def _request(
         self,
         method: str,

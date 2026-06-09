@@ -246,18 +246,131 @@ class TestSnovioEndpoints:
         return req
 
     def test_status_returns_configuration_without_secrets(self):
-        response = asyncio.run(fa.get_snovio_status(MagicMock()))
+        response = asyncio.run(fa.get_snovio_status(self._request()))
         payload = json.loads(response.body)
 
         assert response.status_code == 200
-        assert payload == {
-            "configured": False,
-            "apiBaseUrl": "https://api.snov.io",
-            "rateLimitPerMinute": 60,
-            "allowUnknownVerification": False,
-            "webhookSecretConfigured": False,
-            "templateMappingsConfigured": False,
+        assert payload["configured"] is False
+        assert payload["credentialSource"] == "environment"
+        assert payload["sessionActive"] is False
+        assert payload["sessionClientIdMasked"] is None
+        assert payload["apiBaseUrl"] == "https://api.snov.io"
+        assert "clientSecret" not in payload
+
+    @patch.object(fa, "_store_snovio_session", return_value={"sessionId": "sess-1", "expiresAt": "2030-01-01T00:00:00+00:00", "clientIdMasked": "abcd\u2026wxyz"})
+    @patch.object(fa, "SnovioClient")
+    def test_session_create_validates_and_hides_secret(self, mock_client_cls, mock_store):
+        mock_probe = MagicMock()
+        mock_probe.get_balance.return_value = {"data": {"balance": "100"}}
+        mock_client_cls.return_value = mock_probe
+        req = self._request(body={"clientId": "client-id", "clientSecret": "client-secret"})
+
+        response = asyncio.run(fa.create_snovio_session(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 201
+        assert payload["sessionId"] == "sess-1"
+        assert payload["clientIdMasked"] == "abcd\u2026wxyz"
+        assert "clientSecret" not in json.dumps(payload)
+        mock_probe.get_access_token.assert_called_once()
+
+    def test_session_create_requires_both_fields(self):
+        req = self._request(body={"clientId": "only-id"})
+        response = asyncio.run(fa.create_snovio_session(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 400
+        assert "required" in payload["error"]
+
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/journey.json")
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company,Subject_Touch1,Body_Touch1\na@example.com,Ada,Lovelace,Contoso,S,B\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_journey_dry_run_plans_merge_fields(self, mock_configured, mock_client_factory, mock_download, mock_upload):
+        mock_client = MagicMock()
+        mock_client.get_user_campaigns.return_value = []
+        mock_client.get_custom_fields.return_value = [{"label": "Subject_Touch1"}, {"label": "Body_Touch1"}]
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"listId": "123", "dryRun": True, "requireVerification": False},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.create_snovio_journey(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["numTouches"] == 1
+        assert payload["dryRun"] is True
+        assert payload["customFieldReadiness"]["ready"] is True
+        assert payload["plannedSteps"][0]["subject"] == "{{Subject_Touch1}}"
+        assert payload["plannedSteps"][0]["body"] == "{{Body_Touch1}}"
+        mock_client.create_campaign.assert_not_called()
+
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company,Subject_Touch1,Body_Touch1\na@example.com,Ada,Lovelace,Contoso,S,B\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_journey_blocks_when_custom_fields_missing(self, mock_configured, mock_client_factory, mock_download):
+        mock_client = MagicMock()
+        mock_client.get_custom_fields.return_value = []
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"listId": "123", "dryRun": True, "requireVerification": False},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.create_snovio_journey(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 422
+        assert "Subject_Touch1" in payload["customFieldReadiness"]["missing"]
+        mock_client.create_campaign.assert_not_called()
+
+    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/journey.json")
+    @patch.object(
+        fa,
+        "build_campaign_sequence",
+        return_value=(
+            {"entry": "100", "steps": [
+                {"_ref": "100", "type": "email", "content_slots": 1, "next": "goal"},
+                {"_ref": "goal", "type": "goal", "goal_name": "end"},
+            ]},
+            ["100"],
+        ),
+    )
+    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company,Subject_Touch1,Body_Touch1\na@example.com,Ada,Lovelace,Contoso,S,B\n")
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_journey_create_builds_draft_campaign(self, mock_configured, mock_client_factory, mock_download, mock_seq, mock_upload):
+        mock_client = MagicMock()
+        mock_client.get_user_campaigns.return_value = []
+        mock_client.get_custom_fields.return_value = [{"label": "Subject_Touch1"}, {"label": "Body_Touch1"}]
+        mock_client.get_prospects_by_email.return_value = {"data": []}
+        mock_client.add_prospect_to_list.return_value = {"id": "p1", "added": True}
+        mock_client.create_campaign.return_value = {
+            "data": {
+                "id": 555,
+                "sequence": {"steps": [
+                    {"_ref": "100", "type": "email", "content": [{"id": 1000}]},
+                    {"_ref": "goal", "type": "goal"},
+                ]},
+            }
         }
+        mock_client_factory.return_value = mock_client
+        req = self._request(
+            body={"listId": "123", "dryRun": False, "requireVerification": False, "senderAccountIds": ["42"]},
+            route_params={"jobId": "job-1"},
+        )
+
+        response = asyncio.run(fa.create_snovio_journey(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 201
+        assert payload["campaignId"] == 555
+        assert payload["status"] == "draft"
+        assert payload["stepContent"][0]["status"] == "written"
+        mock_client.create_campaign.assert_called_once()
+        mock_client.create_email_step_content.assert_called_once()
 
     def test_balance_requires_credentials(self):
         response = asyncio.run(fa.get_snovio_balance(MagicMock()))
@@ -300,6 +413,8 @@ class TestSnovioEndpoints:
         mock_client = MagicMock()
         mock_client.get_user_lists.return_value = [{"id": 1, "name": "Prospects"}]
         mock_client.get_user_campaigns.return_value = [{"id": 2, "campaign": "Paused", "status": "Paused"}]
+        mock_client.get_sender_accounts.return_value = [{"id": 11, "email_from": "den@snov.io", "valid": True}]
+        mock_client.get_campaign_schedules.return_value = [{"id": 1074, "name": "UA Monday"}]
         mock_client.get_custom_fields.return_value = [{"label": "Subject_Touch1"}]
         mock_client_factory.return_value = mock_client
 
@@ -309,6 +424,8 @@ class TestSnovioEndpoints:
         assert response.status_code == 200
         assert payload["configured"] is True
         assert payload["lists"][0]["name"] == "Prospects"
+        assert payload["senderAccounts"][0]["email_from"] == "den@snov.io"
+        assert payload["schedules"][0]["name"] == "UA Monday"
         assert payload["customFields"][0]["label"] == "Subject_Touch1"
 
     @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Company\na@example.com,Ada,Contoso\n")

@@ -283,3 +283,29 @@ def summarize_report(rows: list[dict[str, Any]]) -> dict[str, int]:
         if status in summary:
             summary[status] += 1
     return summary
+
+
+def assess_custom_field_readiness(
+    available_custom_fields: list[dict[str, Any]] | None,
+    required_labels: list[str],
+) -> dict[str, Any]:
+    """Compare required per-touch field labels against the account's custom fields.
+
+    Snov.io only stores custom-field values for fields that already exist, so the
+    journey flow must confirm the ``Subject_Touch{n}`` / ``Body_Touch{n}`` fields are
+    present before syncing content. Returns the present/missing split and a ``ready``
+    flag.
+    """
+    existing = {
+        clean_value(field.get("label"))
+        for field in (available_custom_fields or [])
+        if clean_value(field.get("label"))
+    }
+    present = [label for label in required_labels if label in existing]
+    missing = [label for label in required_labels if label not in existing]
+    return {
+        "required": list(required_labels),
+        "present": present,
+        "missing": missing,
+        "ready": not missing,
+    }

@@ -104,6 +104,24 @@
                         <button id="snovio-refresh-btn" class="btn-icon" title="Refresh Snov.io data" type="button">&#8635;</button>
                     </div>
 
+                    <div id="snovio-connect" class="snovio-connect">
+                        <div class="snovio-grid">
+                            <div>
+                                <label for="snovio-client-id">Snov.io Client ID</label>
+                                <input id="snovio-client-id" type="text" autocomplete="off" placeholder="From app.snov.io/account/api">
+                            </div>
+                            <div>
+                                <label for="snovio-client-secret">Snov.io Client Secret</label>
+                                <input id="snovio-client-secret" type="password" autocomplete="off" placeholder="Validated, then held server-side">
+                            </div>
+                        </div>
+                        <div class="snovio-actions">
+                            <button id="snovio-connect-btn" class="btn btn-primary" type="button">Connect</button>
+                            <button id="snovio-disconnect-btn" class="btn btn-secondary" type="button" hidden>Disconnect</button>
+                        </div>
+                        <p class="snovio-connect-note">Your secret is validated, then held server-side for this session only — it is never stored in your browser.</p>
+                    </div>
+
                     <div class="snovio-grid">
                         <div>
                             <label for="snovio-list-select">List</label>
@@ -142,6 +160,33 @@
                     <div class="snovio-actions secondary-actions">
                         <button id="snovio-enrich-btn" class="btn btn-secondary" type="button">Enrichment Estimate</button>
                         <button id="snovio-analytics-btn" class="btn btn-secondary" type="button">Analytics</button>
+                    </div>
+
+                    <div class="snovio-journey">
+                        <h4>Customer Journey</h4>
+                        <p class="snovio-journey-note">Build a multi-touch Snov.io drip campaign from the drafted emails. Each touch is wired to per-lead merge fields and created as a draft for your review.</p>
+                        <div class="snovio-grid">
+                            <div>
+                                <label for="snovio-sender-select">Sender accounts</label>
+                                <select id="snovio-sender-select" multiple size="3"></select>
+                            </div>
+                            <div>
+                                <label for="snovio-journey-title">Campaign title</label>
+                                <input id="snovio-journey-title" type="text" autocomplete="off" placeholder="Auto-generated">
+                            </div>
+                            <div>
+                                <label for="snovio-journey-delay">Days between touches</label>
+                                <input id="snovio-journey-delay" type="number" min="0" max="30" value="3">
+                            </div>
+                        </div>
+                        <div class="snovio-checks">
+                            <label><input id="snovio-journey-open" type="checkbox" checked> Track opens</label>
+                            <label><input id="snovio-journey-click" type="checkbox" checked> Track link clicks</label>
+                        </div>
+                        <div class="snovio-actions">
+                            <button id="snovio-journey-preview-btn" class="btn btn-secondary" type="button">Preview Journey</button>
+                            <button id="snovio-journey-create-btn" class="btn btn-primary" type="button">Create Journey (Draft)</button>
+                        </div>
                     </div>
 
                     <div class="snovio-grid snovio-admin-grid">

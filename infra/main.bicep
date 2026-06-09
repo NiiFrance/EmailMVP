@@ -57,6 +57,22 @@ param snovioAllowUnknownVerification string = 'false'
 @description('Minimum credit buffer before warning/blocking Snov.io workflows')
 param snovioLowCreditThreshold string = '0'
 
+@description('Fernet key for encrypting per-session Snov.io credentials at rest. Leave blank to rely on storage encryption only.')
+@secure()
+param snovioSessionEncryptionKey string = ''
+
+@description('Lifetime in seconds of a user-supplied Snov.io credential session')
+param snovioSessionTtlSeconds string = '3600'
+
+@description('Default number of days between Snov.io journey campaign touches')
+param snovioDefaultDelayDays string = '3'
+
+@description('Default Snov.io campaign timezone (IANA name, e.g. America/New_York). Blank uses the Snov.io account default.')
+param snovioCampaignTimezone string = ''
+
+@description('Months after which Snov.io journey campaigns auto-archive')
+param snovioCampaignArchiveMonths string = '3'
+
 // -----------------------------------------------------------------------
 // Variables
 // -----------------------------------------------------------------------
@@ -75,6 +91,7 @@ var azureOpenAiEndpointSetting = '@Microsoft.KeyVault(VaultName=${azureOpenAiKey
 var azureOpenAiApiKeySetting = '@Microsoft.KeyVault(VaultName=${azureOpenAiKeyVaultName};SecretName=AzureOpenAIApiKey)'
 var snovioEnabled = !empty(snovioClientId) && !empty(snovioClientSecret)
 var snovioWebhookEnabled = !empty(snovioWebhookSecret)
+var snovioSessionEncryptionEnabled = !empty(snovioSessionEncryptionKey)
 var snovioCredentialAppSettings = snovioEnabled ? [
   { name: 'SNOVIO_CLIENT_ID', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioClientId)' }
   { name: 'SNOVIO_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioClientSecret)' }
@@ -82,13 +99,20 @@ var snovioCredentialAppSettings = snovioEnabled ? [
 var snovioWebhookAppSettings = snovioWebhookEnabled ? [
   { name: 'SNOVIO_WEBHOOK_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioWebhookSecret)' }
 ] : []
+var snovioSessionEncryptionAppSettings = snovioSessionEncryptionEnabled ? [
+  { name: 'SNOVIO_SESSION_ENCRYPTION_KEY', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioSessionEncryptionKey)' }
+] : []
 var snovioAppSettings = concat([
   { name: 'SNOVIO_API_BASE_URL', value: snovioApiBaseUrl }
   { name: 'SNOVIO_REQUESTS_PER_MINUTE', value: snovioRequestsPerMinute }
   { name: 'SNOVIO_TEMPLATE_MAPPINGS', value: snovioTemplateMappings }
   { name: 'SNOVIO_ALLOW_UNKNOWN_VERIFICATION', value: snovioAllowUnknownVerification }
   { name: 'SNOVIO_LOW_CREDIT_THRESHOLD', value: snovioLowCreditThreshold }
-], snovioCredentialAppSettings, snovioWebhookAppSettings)
+  { name: 'SNOVIO_SESSION_TTL_SECONDS', value: snovioSessionTtlSeconds }
+  { name: 'SNOVIO_DEFAULT_DELAY_DAYS', value: snovioDefaultDelayDays }
+  { name: 'SNOVIO_CAMPAIGN_TIMEZONE', value: snovioCampaignTimezone }
+  { name: 'SNOVIO_CAMPAIGN_ARCHIVE_MONTHS', value: snovioCampaignArchiveMonths }
+], snovioCredentialAppSettings, snovioWebhookAppSettings, snovioSessionEncryptionAppSettings)
 
 // -----------------------------------------------------------------------
 // User-Assigned Managed Identity
@@ -283,6 +307,15 @@ resource snovioWebhookSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01
   name: 'SnovioWebhookSecret'
   properties: {
     value: snovioWebhookSecret
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioSessionEncryptionKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioSessionEncryptionEnabled) {
+  parent: keyVault
+  name: 'SnovioSessionEncryptionKey'
+  properties: {
+    value: snovioSessionEncryptionKey
   }
   dependsOn: [kvSecretsOfficerRole]
 }

@@ -39,6 +39,7 @@ from csv_processor import (
 from column_mapper import resolve_columns
 from snovio_client import SnovioAPIError, SnovioClient, SnovioConfigError
 from snovio_workflows import (
+    assess_custom_field_readiness,
     build_job_rows,
     build_prospect_payload,
     classify_verification,
@@ -48,6 +49,14 @@ from snovio_workflows import (
     is_suppressed,
     summarize_report,
     verification_lookup,
+)
+from snovio_campaigns import (
+    build_campaign_payload,
+    build_campaign_sequence,
+    build_touch_content,
+    detect_touch_count,
+    map_email_step_contents,
+    touch_field_labels,
 )
 
 app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
@@ -72,6 +81,12 @@ SNOVIO_WEBHOOK_SECRET = os.environ.get("SNOVIO_WEBHOOK_SECRET", "")
 SNOVIO_TEMPLATE_MAPPINGS = os.environ.get("SNOVIO_TEMPLATE_MAPPINGS", "{}")
 SNOVIO_ALLOW_UNKNOWN_VERIFICATION = os.environ.get("SNOVIO_ALLOW_UNKNOWN_VERIFICATION", "false").lower() == "true"
 SNOVIO_LOW_CREDIT_THRESHOLD = int(os.environ.get("SNOVIO_LOW_CREDIT_THRESHOLD", "0"))
+SNOVIO_SESSION_TTL_SECONDS = int(os.environ.get("SNOVIO_SESSION_TTL_SECONDS", "3600"))
+SNOVIO_SESSION_ENCRYPTION_KEY = os.environ.get("SNOVIO_SESSION_ENCRYPTION_KEY", "")
+SNOVIO_SESSION_CONTAINER = os.environ.get("SNOVIO_SESSION_CONTAINER", "snovio-sessions")
+SNOVIO_DEFAULT_DELAY_DAYS = int(os.environ.get("SNOVIO_DEFAULT_DELAY_DAYS", "3"))
+SNOVIO_CAMPAIGN_TIMEZONE = os.environ.get("SNOVIO_CAMPAIGN_TIMEZONE", "")
+SNOVIO_CAMPAIGN_ARCHIVE_MONTHS = int(os.environ.get("SNOVIO_CAMPAIGN_ARCHIVE_MONTHS", "3"))
 MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 
 logger = logging.getLogger("emailmvp")
@@ -155,23 +170,148 @@ def _upload_snovio_report(job_id: str, report_name: str, payload: dict) -> str:
     return blob_name
 
 
-def _snovio_configured() -> bool:
-    return bool(SNOVIO_CLIENT_ID and SNOVIO_CLIENT_SECRET)
+def _snovio_configured(req: func.HttpRequest | None = None) -> bool:
+    client_id, client_secret, _ = _resolve_snovio_credentials(req)
+    return bool(client_id and client_secret)
 
 
-def _snovio_required_response() -> func.HttpResponse | None:
-    if _snovio_configured():
+def _snovio_required_response(req: func.HttpRequest | None = None) -> func.HttpResponse | None:
+    if _snovio_configured(req):
         return None
     return _json_response({"configured": False, "error": "Snov.io credentials are not configured."}, 503)
 
 
-def _snovio_client() -> SnovioClient:
+def _snovio_client(req: func.HttpRequest | None = None) -> SnovioClient:
+    client_id, client_secret, _ = _resolve_snovio_credentials(req)
     return SnovioClient(
-        client_id=SNOVIO_CLIENT_ID,
-        client_secret=SNOVIO_CLIENT_SECRET,
+        client_id=client_id,
+        client_secret=client_secret,
         base_url=SNOVIO_API_BASE_URL,
         requests_per_minute=SNOVIO_REQUESTS_PER_MINUTE,
     )
+
+
+# ---------------------------------------------------------------------------
+# Helper — Snov.io session credentials (secure bring-your-own-key)
+# ---------------------------------------------------------------------------
+SNOVIO_SESSION_HEADER = "x-snovio-session"
+
+
+def _snovio_session_blob_name(session_id: str) -> str:
+    return f"{session_id}.json"
+
+
+def _get_session_cipher():
+    """Return a Fernet cipher when an encryption key is configured, else None."""
+    if not SNOVIO_SESSION_ENCRYPTION_KEY:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+
+        return Fernet(SNOVIO_SESSION_ENCRYPTION_KEY.encode("utf-8"))
+    except Exception:
+        logger.warning("Invalid SNOVIO_SESSION_ENCRYPTION_KEY; relying on storage encryption at rest only.")
+        return None
+
+
+def _encrypt_session_secret(value: str) -> tuple[str, bool]:
+    cipher = _get_session_cipher()
+    if not cipher:
+        return value, False
+    return cipher.encrypt(value.encode("utf-8")).decode("utf-8"), True
+
+
+def _decrypt_session_secret(value: str, encrypted: bool) -> str:
+    if not encrypted:
+        return value
+    cipher = _get_session_cipher()
+    if not cipher:
+        raise SnovioConfigError("Session secret is encrypted but no decryption key is configured.")
+    return cipher.decrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def _mask_client_id(client_id: str) -> str:
+    if len(client_id) <= 8:
+        return "****"
+    return f"{client_id[:4]}\u2026{client_id[-4:]}"
+
+
+def _store_snovio_session(client_id: str, client_secret: str) -> dict:
+    session_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=SNOVIO_SESSION_TTL_SECONDS)
+    encrypted_secret, secret_encrypted = _encrypt_session_secret(client_secret)
+    record = {
+        "clientId": client_id,
+        "clientSecret": encrypted_secret,
+        "secretEncrypted": secret_encrypted,
+        "createdAt": now.isoformat(),
+        "expiresAt": expires_at.isoformat(),
+    }
+    _upload_blob(SNOVIO_SESSION_CONTAINER, _snovio_session_blob_name(session_id), json.dumps(record).encode("utf-8"))
+    return {
+        "sessionId": session_id,
+        "expiresAt": record["expiresAt"],
+        "clientIdMasked": _mask_client_id(client_id),
+    }
+
+
+def _load_snovio_session(session_id: str) -> dict | None:
+    if not session_id:
+        return None
+    try:
+        raw = _download_blob(SNOVIO_SESSION_CONTAINER, _snovio_session_blob_name(session_id))
+    except Exception:
+        return None
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    expires_at = record.get("expiresAt")
+    if expires_at:
+        try:
+            if datetime.now(timezone.utc) >= datetime.fromisoformat(expires_at):
+                _delete_snovio_session(session_id)
+                return None
+        except ValueError:
+            return None
+    return record
+
+
+def _delete_snovio_session(session_id: str) -> None:
+    if not session_id:
+        return
+    try:
+        client = _blob_service().get_blob_client(SNOVIO_SESSION_CONTAINER, _snovio_session_blob_name(session_id))
+        client.delete_blob()
+    except Exception:
+        pass
+
+
+def _session_id_from_request(req: func.HttpRequest | None) -> str:
+    if req is None:
+        return ""
+    headers = getattr(req, "headers", {}) or {}
+    return str(headers.get(SNOVIO_SESSION_HEADER, "") or "").strip()
+
+
+def _resolve_snovio_credentials(req: func.HttpRequest | None) -> tuple[str, str, str]:
+    """Resolve Snov.io credentials for a request: session override first, else env."""
+    session_id = _session_id_from_request(req)
+    if session_id:
+        record = _load_snovio_session(session_id)
+        if record:
+            client_id = str(record.get("clientId", ""))
+            try:
+                client_secret = _decrypt_session_secret(
+                    str(record.get("clientSecret", "")), bool(record.get("secretEncrypted"))
+                )
+            except Exception:
+                logger.exception("Failed to decrypt Snov.io session secret.")
+                client_secret = ""
+            if client_id and client_secret:
+                return client_id, client_secret, "session"
+    return SNOVIO_CLIENT_ID, SNOVIO_CLIENT_SECRET, "environment"
 
 
 def _snovio_campaign_list_id(campaign: dict | None) -> str:
@@ -527,8 +667,15 @@ async def get_templates(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/status", methods=["GET"])
 async def get_snovio_status(req: func.HttpRequest) -> func.HttpResponse:
     """Return Snov.io integration status without exposing secrets."""
+    _, _, source = _resolve_snovio_credentials(req)
+    session_record = _load_snovio_session(_session_id_from_request(req))
     return _json_response({
-        "configured": _snovio_configured(),
+        "configured": _snovio_configured(req),
+        "credentialSource": source,
+        "sessionActive": bool(session_record),
+        "sessionExpiresAt": session_record.get("expiresAt") if session_record else None,
+        "sessionClientIdMasked": _mask_client_id(str(session_record.get("clientId", ""))) if session_record else None,
+        "environmentConfigured": bool(SNOVIO_CLIENT_ID and SNOVIO_CLIENT_SECRET),
         "apiBaseUrl": SNOVIO_API_BASE_URL,
         "rateLimitPerMinute": SNOVIO_REQUESTS_PER_MINUTE,
         "allowUnknownVerification": SNOVIO_ALLOW_UNKNOWN_VERIFICATION,
@@ -537,15 +684,65 @@ async def get_snovio_status(req: func.HttpRequest) -> func.HttpResponse:
     })
 
 
+@app.route(route="snovio/session", methods=["POST"])
+async def create_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
+    """Validate user-supplied Snov.io credentials and open a secure server-side session.
+
+    The client_id/client_secret are validated against Snov.io, then stored server-side
+    (encrypted at rest) under an opaque session id. The secret is never returned to the
+    browser and never logged. The caller receives only the opaque session id, which it
+    sends back via the X-Snovio-Session header on subsequent requests.
+    """
+    payload = _request_json(req)
+    client_id = str(payload.get("clientId") or payload.get("client_id") or "").strip()
+    client_secret = str(payload.get("clientSecret") or payload.get("client_secret") or "").strip()
+    if not client_id or not client_secret:
+        return _json_response({"error": "clientId and clientSecret are required."}, 400)
+
+    probe = SnovioClient(
+        client_id=client_id,
+        client_secret=client_secret,
+        base_url=SNOVIO_API_BASE_URL,
+        requests_per_minute=SNOVIO_REQUESTS_PER_MINUTE,
+    )
+    try:
+        probe.get_access_token()
+        balance = probe.get_balance()
+    except SnovioConfigError as error:
+        return _json_response({"error": str(error)}, 400)
+    except SnovioAPIError as error:
+        return _json_response({"error": "Snov.io rejected the supplied credentials.", "statusCode": error.status_code}, 401)
+    except Exception:
+        logger.exception("Snov.io session validation failed.")
+        return _json_response({"error": "Unable to validate Snov.io credentials."}, 502)
+
+    session = _store_snovio_session(client_id, client_secret)
+    return _json_response({
+        "configured": True,
+        "sessionId": session["sessionId"],
+        "expiresAt": session["expiresAt"],
+        "clientIdMasked": session["clientIdMasked"],
+        "balance": balance,
+    }, 201)
+
+
+@app.route(route="snovio/session", methods=["DELETE"])
+async def delete_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
+    """Close a Snov.io session and delete the stored credentials."""
+    session_id = _session_id_from_request(req)
+    _delete_snovio_session(session_id)
+    return _json_response({"closed": True})
+
+
 @app.route(route="snovio/balance", methods=["GET"])
 async def get_snovio_balance(req: func.HttpRequest) -> func.HttpResponse:
     """Return Snov.io account balance as a preflight check."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
 
     try:
-        balance = _snovio_client().get_balance()
+        balance = _snovio_client(req).get_balance()
         return _json_response({"configured": True, "balance": balance})
     except SnovioConfigError as error:
         return _json_response({"configured": False, "error": str(error)}, 503)
@@ -556,23 +753,27 @@ async def get_snovio_balance(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/options", methods=["GET"])
 async def get_snovio_options(req: func.HttpRequest) -> func.HttpResponse:
-    """Return Snov.io lists, campaigns, custom fields, and template mappings."""
-    missing = _snovio_required_response()
+    """Return Snov.io lists, campaigns, sender accounts, schedules, and custom fields."""
+    missing = _snovio_required_response(req)
     if missing:
         return _json_response({
             "configured": False,
             "lists": [],
             "campaigns": [],
+            "senderAccounts": [],
+            "schedules": [],
             "customFields": [],
             "templateMappings": _parse_template_mappings(),
         })
 
     try:
-        client = _snovio_client()
+        client = _snovio_client(req)
         return _json_response({
             "configured": True,
             "lists": client.get_user_lists(),
             "campaigns": client.get_user_campaigns(),
+            "senderAccounts": client.get_sender_accounts(),
+            "schedules": client.get_campaign_schedules(),
             "customFields": client.get_custom_fields(),
             "templateMappings": _parse_template_mappings(),
             "templates": list_templates(),
@@ -598,11 +799,11 @@ async def get_snovio_preflight(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"error": f"Unable to calculate preflight: {str(error)}"}, 400)
 
     estimate = estimate_usage(lead_count, operation)
-    response = {"configured": _snovio_configured(), "estimate": estimate, "rateLimitPerMinute": SNOVIO_REQUESTS_PER_MINUTE}
+    response = {"configured": _snovio_configured(req), "estimate": estimate, "rateLimitPerMinute": SNOVIO_REQUESTS_PER_MINUTE}
 
-    if _snovio_configured():
+    if _snovio_configured(req):
         try:
-            balance = _snovio_client().get_balance()
+            balance = _snovio_client(req).get_balance()
             balance_value = float((balance.get("data") or {}).get("balance", 0))
             response["balance"] = balance
             response["lowCredit"] = balance_value < estimate["estimatedCredits"] + SNOVIO_LOW_CREDIT_THRESHOLD
@@ -615,7 +816,7 @@ async def get_snovio_preflight(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="jobs/{jobId}/snovio/verify", methods=["POST"])
 async def verify_job_emails(req: func.HttpRequest) -> func.HttpResponse:
     """Start Snov.io email verification for a generated job."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
 
@@ -644,7 +845,7 @@ async def verify_job_emails(req: func.HttpRequest) -> func.HttpResponse:
             report["summary"] = summarize_report(report["results"])
             return _json_response(report)
 
-        client = _snovio_client()
+        client = _snovio_client(req)
         for start in range(0, len(emails), 10):
             batch = emails[start:start + 10]
             task = client.start_email_verification(batch, webhook_url=webhook_url)
@@ -670,7 +871,7 @@ async def verify_job_emails(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/verification-result", methods=["POST"])
 async def get_snovio_verification_result(req: func.HttpRequest) -> func.HttpResponse:
     """Fetch and classify a Snov.io email verification task result."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     payload = _request_json(req)
@@ -679,22 +880,20 @@ async def get_snovio_verification_result(req: func.HttpRequest) -> func.HttpResp
     if not task_hash:
         return _json_response({"error": "taskHash is required."}, 400)
     try:
-        result = _snovio_client().get_email_verification_result(task_hash)
+        result = _snovio_client(req).get_email_verification_result(task_hash)
         classified = [classify_verification(item, allow_unknown=allow_unknown) for item in result.get("data", [])]
         return _json_response({"taskHash": task_hash, "status": result.get("status"), "results": classified, "raw": result})
     except SnovioAPIError as error:
         return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
 
 
-@app.route(route="jobs/{jobId}/snovio/sync", methods=["POST"])
-async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
-    """Dry-run or execute post-generation prospect sync into a Snov.io list."""
-    missing = _snovio_required_response()
-    if missing:
-        return missing
+def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tuple[dict, func.HttpResponse | None]:
+    """Resolve the target list, evaluate eligibility, and sync prospects.
 
-    job_id = req.route_params.get("jobId", "")
-    payload = _request_json(req)
+    Shared by the sync and journey routes. Returns ``(report, error_response)``; when
+    ``error_response`` is not None the caller must return it directly. On success the
+    report's ``listId`` holds the resolved Snov.io list id (created when requested).
+    """
     list_id = str(payload.get("listId") or payload.get("list_id") or "").strip()
     campaign_id = str(payload.get("campaignId") or payload.get("campaign_id") or "").strip()
     dry_run = _parse_bool(payload.get("dryRun"), default=True)
@@ -705,113 +904,128 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
     suppressed_emails = {str(item).strip().lower() for item in payload.get("suppressedEmails", [])}
     suppressed_domains = {str(item).strip().lower() for item in payload.get("suppressedDomains", [])}
 
-    try:
-        client = _snovio_client()
-        campaigns = client.get_user_campaigns() if campaign_id else []
-        campaign = find_campaign(campaigns, campaign_id) if campaign_id else None
-        campaign_list_id = _snovio_campaign_list_id(campaign)
-        list_source = "selected" if list_id else ""
-        if not list_id and campaign_list_id:
-            list_id = campaign_list_id
-            list_source = "campaign"
+    campaigns = client.get_user_campaigns() if campaign_id else []
+    campaign = find_campaign(campaigns, campaign_id) if campaign_id else None
+    campaign_list_id = _snovio_campaign_list_id(campaign)
+    list_source = "selected" if list_id else ""
+    if not list_id and campaign_list_id:
+        list_id = campaign_list_id
+        list_source = "campaign"
 
-        list_name = _snovio_list_name(payload, job_id)
-        planned_list_creation = not list_id and auto_create_list
-        created_list = None
+    list_name = _snovio_list_name(payload, job_id)
+    planned_list_creation = not list_id and auto_create_list
+    created_list = None
 
-        if not list_id and not auto_create_list:
-            return _json_response({
-                "error": "listId is required unless autoCreateList=true or the selected campaign includes list_id.",
-                "campaign": campaign,
-            }, 400)
-
-        active_campaign = is_sending_campaign(campaign)
-        if active_campaign and not dry_run and not confirm_active_campaign:
-            return _json_response({
-                "error": "Active campaign sync requires confirmActiveCampaign=true.",
-                "campaign": campaign,
-                "dryRunRecommended": True,
-            }, 409)
-
-        if planned_list_creation:
-            list_source = "planned_create"
-
-        dataframe = parse_csv(_download_job_csv(job_id))
-        rows, columns = build_job_rows(dataframe)
-        custom_fields = client.get_custom_fields() if payload.get("includeGeneratedCustomFields", True) else []
-        verification = verification_lookup(payload.get("verificationResults", []), allow_unknown=allow_unknown)
-        report_rows = []
-        sync_candidates = []
-
-        for row_info in rows:
-            row_index = row_info["rowIndex"]
-            email = row_info.get("email", "")
-            blocked_reason = is_suppressed(email, suppressed_emails, suppressed_domains)
-            verification_result = verification.get(email.lower()) if email else None
-            if not blocked_reason and require_verification and not verification_result:
-                blocked_reason = "verification_required"
-            if not blocked_reason and verification_result and not verification_result.get("eligible"):
-                blocked_reason = verification_result.get("blockedReason") or "verification_blocked"
-
-            row_report = {
-                "rowIndex": row_index,
-                "email": email,
-                "eligible": not bool(blocked_reason),
-                "blockedReason": blocked_reason,
-                "verification": verification_result,
-                "status": "skipped" if blocked_reason or dry_run else "pending",
-            }
-
-            if row_report["eligible"] and not dry_run:
-                sync_candidates.append((row_info, row_report))
-
-            report_rows.append(row_report)
-
-        if planned_list_creation and sync_candidates:
-            created_list = client.create_prospect_list(list_name)
-            list_id = _snovio_created_list_id(created_list)
-            if not list_id:
-                return _json_response({"error": "Snov.io list was created but no list ID was returned.", "createdList": created_list}, 502)
-            list_source = "created"
-
-        for row_info, row_report in sync_candidates:
-            row_index = row_info["rowIndex"]
-            email = row_info.get("email", "")
-            if row_report["eligible"]:
-                try:
-                    duplicate = client.get_prospects_by_email(email) if email else {"data": []}
-                    existing_in_target = any(
-                        str(item.get("id")) == list_id
-                        for prospect in duplicate.get("data", [])
-                        for item in prospect.get("lists", [])
-                    )
-                    if existing_in_target:
-                        row_report.update({"eligible": False, "blockedReason": "duplicate_in_target_list", "status": "skipped"})
-                    else:
-                        prospect_payload = build_prospect_payload(dataframe.iloc[row_index], columns, list_id, custom_fields)
-                        response = client.add_prospect_to_list(list_id, prospect_payload)
-                        row_report["response"] = response
-                        row_report["snovioProspectId"] = response.get("id")
-                        row_report["status"] = "updated" if response.get("updated") else "added" if response.get("added") else "failed"
-                except Exception as error:
-                    row_report.update({"status": "failed", "error": str(error)})
-
-        report = {
-            "jobId": job_id,
-            "listId": list_id,
-            "listSource": list_source,
-            "listName": list_name if planned_list_creation or list_source == "created" else "",
-            "plannedListCreation": planned_list_creation and not created_list,
-            "createdList": created_list,
-            "campaignId": campaign_id,
+    if not list_id and not auto_create_list:
+        return {}, _json_response({
+            "error": "listId is required unless autoCreateList=true or the selected campaign includes list_id.",
             "campaign": campaign,
-            "activeCampaign": active_campaign,
-            "dryRun": dry_run,
-            "requireVerification": require_verification,
-            "columns": columns,
-            "summary": summarize_report(report_rows),
-            "rows": report_rows,
+        }, 400)
+
+    active_campaign = is_sending_campaign(campaign)
+    if active_campaign and not dry_run and not confirm_active_campaign:
+        return {}, _json_response({
+            "error": "Active campaign sync requires confirmActiveCampaign=true.",
+            "campaign": campaign,
+            "dryRunRecommended": True,
+        }, 409)
+
+    if planned_list_creation:
+        list_source = "planned_create"
+
+    dataframe = parse_csv(_download_job_csv(job_id))
+    rows, columns = build_job_rows(dataframe)
+    custom_fields = client.get_custom_fields() if payload.get("includeGeneratedCustomFields", True) else []
+    verification = verification_lookup(payload.get("verificationResults", []), allow_unknown=allow_unknown)
+    report_rows = []
+    sync_candidates = []
+
+    for row_info in rows:
+        row_index = row_info["rowIndex"]
+        email = row_info.get("email", "")
+        blocked_reason = is_suppressed(email, suppressed_emails, suppressed_domains)
+        verification_result = verification.get(email.lower()) if email else None
+        if not blocked_reason and require_verification and not verification_result:
+            blocked_reason = "verification_required"
+        if not blocked_reason and verification_result and not verification_result.get("eligible"):
+            blocked_reason = verification_result.get("blockedReason") or "verification_blocked"
+
+        row_report = {
+            "rowIndex": row_index,
+            "email": email,
+            "eligible": not bool(blocked_reason),
+            "blockedReason": blocked_reason,
+            "verification": verification_result,
+            "status": "skipped" if blocked_reason or dry_run else "pending",
         }
+
+        if row_report["eligible"] and not dry_run:
+            sync_candidates.append((row_info, row_report))
+
+        report_rows.append(row_report)
+
+    if planned_list_creation and sync_candidates:
+        created_list = client.create_prospect_list(list_name)
+        list_id = _snovio_created_list_id(created_list)
+        if not list_id:
+            return {}, _json_response({"error": "Snov.io list was created but no list ID was returned.", "createdList": created_list}, 502)
+        list_source = "created"
+
+    for row_info, row_report in sync_candidates:
+        row_index = row_info["rowIndex"]
+        email = row_info.get("email", "")
+        if row_report["eligible"]:
+            try:
+                duplicate = client.get_prospects_by_email(email) if email else {"data": []}
+                existing_in_target = any(
+                    str(item.get("id")) == list_id
+                    for prospect in duplicate.get("data", [])
+                    for item in prospect.get("lists", [])
+                )
+                if existing_in_target:
+                    row_report.update({"eligible": False, "blockedReason": "duplicate_in_target_list", "status": "skipped"})
+                else:
+                    prospect_payload = build_prospect_payload(dataframe.iloc[row_index], columns, list_id, custom_fields)
+                    response = client.add_prospect_to_list(list_id, prospect_payload)
+                    row_report["response"] = response
+                    row_report["snovioProspectId"] = response.get("id")
+                    row_report["status"] = "updated" if response.get("updated") else "added" if response.get("added") else "failed"
+            except Exception as error:
+                row_report.update({"status": "failed", "error": str(error)})
+
+    report = {
+        "jobId": job_id,
+        "listId": list_id,
+        "listSource": list_source,
+        "listName": list_name if planned_list_creation or list_source == "created" else "",
+        "plannedListCreation": planned_list_creation and not created_list,
+        "createdList": created_list,
+        "campaignId": campaign_id,
+        "campaign": campaign,
+        "activeCampaign": active_campaign,
+        "dryRun": dry_run,
+        "requireVerification": require_verification,
+        "columns": columns,
+        "summary": summarize_report(report_rows),
+        "rows": report_rows,
+    }
+    return report, None
+
+
+@app.route(route="jobs/{jobId}/snovio/sync", methods=["POST"])
+async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
+    """Dry-run or execute post-generation prospect sync into a Snov.io list."""
+    missing = _snovio_required_response(req)
+    if missing:
+        return missing
+
+    job_id = req.route_params.get("jobId", "")
+    payload = _request_json(req)
+    try:
+        client = _snovio_client(req)
+        report, error = _run_prospect_sync(client, job_id, payload)
+        if error:
+            return error
         report["reportBlob"] = _upload_snovio_report(job_id, "sync", report)
         return _json_response(report)
     except SnovioAPIError as error:
@@ -821,10 +1035,155 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"error": f"Snov.io sync failed: {str(error)}"}, 500)
 
 
+@app.route(route="jobs/{jobId}/snovio/journey", methods=["POST"])
+async def create_snovio_journey(req: func.HttpRequest) -> func.HttpResponse:
+    """Sync prospects and build a multi-touch Snov.io drip campaign ("customer journey").
+
+    Each generated touch is synced as a prospect custom field and referenced from the
+    matching email step via a merge variable, so every recipient receives their own
+    drafted content. The campaign is created in draft state for human review and launch;
+    this endpoint never starts a campaign.
+    """
+    missing = _snovio_required_response(req)
+    if missing:
+        return missing
+
+    job_id = req.route_params.get("jobId", "")
+    payload = _request_json(req)
+    dry_run = _parse_bool(payload.get("dryRun"), default=True)
+    try:
+        delay_days = int(payload.get("delayDays", SNOVIO_DEFAULT_DELAY_DAYS) or 0)
+    except (TypeError, ValueError):
+        delay_days = SNOVIO_DEFAULT_DELAY_DAYS
+    sender_account_ids = [str(s).strip() for s in payload.get("senderAccountIds", []) if str(s).strip()]
+    campaign_title = str(payload.get("campaignTitle") or "").strip()
+    track_opens = _parse_bool(payload.get("trackOpens"), default=True)
+    track_clicks = _parse_bool(payload.get("trackClicks"), default=True)
+    schedule_id = payload.get("scheduleId")
+    timezone_name = str(payload.get("timezone") or SNOVIO_CAMPAIGN_TIMEZONE or "").strip()
+
+    try:
+        client = _snovio_client(req)
+
+        # Derive the touch count from the generated output CSV headers.
+        output_df = parse_csv(_download_job_csv(job_id))
+        num_touches = detect_touch_count([str(column) for column in output_df.columns])
+        if num_touches < 1:
+            return _json_response({"error": "No generated Subject_Touch/Body_Touch columns found for this job."}, 400)
+
+        # Snov.io only stores values for custom fields that already exist, so confirm the
+        # per-touch fields are present before syncing or building the campaign.
+        required_labels = touch_field_labels(num_touches)
+        custom_fields = client.get_custom_fields()
+        readiness = assess_custom_field_readiness(custom_fields, required_labels)
+
+        sequence, email_refs = build_campaign_sequence(num_touches, delay_days=delay_days)
+        touch_content = build_touch_content(num_touches)
+        title = campaign_title or _snovio_list_name(payload, job_id)
+
+        plan: dict[str, Any] = {
+            "jobId": job_id,
+            "numTouches": num_touches,
+            "delayDays": delay_days,
+            "campaignTitle": title,
+            "senderAccountIds": sender_account_ids,
+            "customFieldReadiness": readiness,
+            "plannedSteps": [
+                {"touch": content["touch"], "subject": content["subject"], "body": content["body"]}
+                for content in touch_content
+            ],
+            "estimate": estimate_usage(len(output_df), "sync"),
+        }
+
+        if not readiness["ready"]:
+            plan["error"] = "Required Snov.io custom fields are missing."
+            plan["action"] = (
+                "Create the listed custom fields in Snov.io (Prospects \u2192 custom fields), "
+                "then retry. They carry each lead's drafted subject and body into the campaign."
+            )
+            return _json_response(plan, 422)
+
+        if not dry_run and not sender_account_ids:
+            plan["error"] = "senderAccountIds is required to create a campaign."
+            return _json_response(plan, 400)
+
+        # Sync prospects; their per-touch content lands as custom-field values.
+        report, error = _run_prospect_sync(client, job_id, payload)
+        if error:
+            return error
+        plan["sync"] = report
+
+        if dry_run:
+            plan["dryRun"] = True
+            return _json_response(plan)
+
+        list_id = report.get("listId")
+        if not list_id:
+            plan["error"] = "No Snov.io list id was resolved for the campaign."
+            return _json_response(plan, 400)
+
+        # Create the campaign in draft state.
+        campaign_payload = build_campaign_payload(
+            title=title,
+            email_account_ids=sender_account_ids,
+            list_id=list_id,
+            sequence=sequence,
+            track_opens=track_opens,
+            track_clicks=track_clicks,
+            schedule_id=int(schedule_id) if schedule_id else None,
+            timezone=timezone_name or None,
+            archive_in_months=SNOVIO_CAMPAIGN_ARCHIVE_MONTHS,
+        )
+        campaign_response = client.create_campaign(campaign_payload)
+        campaign_data = campaign_response.get("data", campaign_response) if isinstance(campaign_response, dict) else {}
+        campaign_id = campaign_data.get("id")
+        plan["campaignId"] = campaign_id
+        plan["campaign"] = campaign_data
+
+        # Attach each touch's merge-variable content to its email step.
+        step_map = map_email_step_contents(campaign_response, email_refs)
+        content_results = []
+        for entry, content in zip(step_map, touch_content):
+            step_id = entry.get("stepId")
+            content_id = entry.get("contentId")
+            result = {"touch": content["touch"], "stepId": step_id, "contentId": content_id}
+            if step_id is None or content_id is None:
+                result["status"] = "skipped"
+                result["error"] = "Snov.io did not return a step or content id for this touch."
+            else:
+                try:
+                    client.create_email_step_content(
+                        campaign_id,
+                        step_id,
+                        int(content_id),
+                        subject=content["subject"],
+                        body=content["body"],
+                        plain_text=content["plain_text"],
+                    )
+                    result["status"] = "written"
+                except Exception as content_error:
+                    result["status"] = "failed"
+                    result["error"] = str(content_error)
+            content_results.append(result)
+
+        plan["stepContent"] = content_results
+        plan["status"] = "draft"
+        plan["note"] = "Campaign created in draft. Review and launch it in Snov.io when ready."
+        plan["reportBlob"] = _upload_snovio_report(job_id, "journey", plan)
+        return _json_response(plan, 201)
+    except SnovioAPIError as error:
+        return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
+    except (ValueError, SnovioConfigError) as error:
+        return _json_response({"error": str(error)}, 400)
+    except Exception as error:
+        logger.exception("Snov.io journey creation failed for %s", job_id)
+        return _json_response({"error": f"Snov.io journey creation failed: {str(error)}"}, 500)
+
+
 @app.route(route="jobs/{jobId}/snovio/enrich", methods=["POST"])
 async def enrich_job_with_snovio(req: func.HttpRequest) -> func.HttpResponse:
     """Dry-run or start optional Snov.io enrichment tasks for a job."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
 
@@ -859,7 +1218,7 @@ async def enrich_job_with_snovio(req: func.HttpRequest) -> func.HttpResponse:
         if dry_run:
             return _json_response(report)
 
-        client = _snovio_client()
+        client = _snovio_client(req)
         if "company_domain" in operations:
             for start in range(0, len(company_names), 10):
                 batch = company_names[start:start + 10]
@@ -887,7 +1246,7 @@ async def enrich_job_with_snovio(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/enrichment-result", methods=["POST"])
 async def get_snovio_enrichment_result(req: func.HttpRequest) -> func.HttpResponse:
     """Fetch a Snov.io enrichment task result."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     payload = _request_json(req)
@@ -895,7 +1254,7 @@ async def get_snovio_enrichment_result(req: func.HttpRequest) -> func.HttpRespon
     task_hash = payload.get("taskHash") or payload.get("task_hash")
     if not kind or not task_hash:
         return _json_response({"error": "kind and taskHash are required."}, 400)
-    client = _snovio_client()
+    client = _snovio_client(req)
     try:
         if kind == "company_domain":
             result = client.get_company_domain_by_name_result(task_hash)
@@ -913,7 +1272,7 @@ async def get_snovio_enrichment_result(req: func.HttpRequest) -> func.HttpRespon
 @app.route(route="snovio/analytics", methods=["GET"])
 async def get_snovio_analytics(req: func.HttpRequest) -> func.HttpResponse:
     """Proxy campaign analytics without exposing Snov.io credentials."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     params = _query_params(req)
@@ -926,7 +1285,7 @@ async def get_snovio_analytics(req: func.HttpRequest) -> func.HttpResponse:
     if params.get("dateTo"):
         filters["date_to"] = params.get("dateTo")
     try:
-        client = _snovio_client()
+        client = _snovio_client(req)
         response = {"analytics": client.get_campaign_analytics(filters)}
         if campaign_id:
             response["progress"] = client.get_campaign_progress(campaign_id)
@@ -943,7 +1302,7 @@ async def get_snovio_analytics(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/suppressions", methods=["POST"])
 async def add_snovio_suppressions(req: func.HttpRequest) -> func.HttpResponse:
     """Add emails or domains to a Snov.io Do-not-email list."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     payload = _request_json(req)
@@ -952,7 +1311,7 @@ async def add_snovio_suppressions(req: func.HttpRequest) -> func.HttpResponse:
     if not list_id or not items:
         return _json_response({"error": "listId and at least one item are required."}, 400)
     try:
-        response = _snovio_client().add_do_not_email(list_id, items)
+        response = _snovio_client(req).add_do_not_email(list_id, items)
         audit = {"listId": list_id, "items": items, "response": response, "createdAt": datetime.now(timezone.utc).isoformat()}
         _upload_blob(OUTPUT_CONTAINER, f"snovio-audit/suppressions/{uuid.uuid4()}.json", json.dumps(audit, indent=2).encode("utf-8"))
         return _json_response(audit)
@@ -963,12 +1322,12 @@ async def add_snovio_suppressions(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/recipient-status", methods=["POST"])
 async def change_snovio_recipient_status(req: func.HttpRequest) -> func.HttpResponse:
     """Pause, activate, or unsubscribe a Snov.io campaign recipient."""
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     payload = _request_json(req)
     try:
-        response = _snovio_client().change_recipient_status(
+        response = _snovio_client(req).change_recipient_status(
             email=payload.get("email", ""),
             campaign_id=str(payload.get("campaignId") or payload.get("campaign_id") or ""),
             status=payload.get("status", ""),
@@ -999,23 +1358,23 @@ async def receive_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks", methods=["GET"])
 async def list_snovio_webhooks(req: func.HttpRequest) -> func.HttpResponse:
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     try:
-        return _json_response(_snovio_client().list_webhooks())
+        return _json_response(_snovio_client(req).list_webhooks())
     except SnovioAPIError as error:
         return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
 
 
 @app.route(route="snovio/webhooks", methods=["POST"])
 async def create_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     payload = _request_json(req)
     try:
-        response = _snovio_client().create_webhook(payload.get("eventObject", ""), payload.get("eventAction", ""), payload.get("endpointUrl", ""))
+        response = _snovio_client(req).create_webhook(payload.get("eventObject", ""), payload.get("eventAction", ""), payload.get("endpointUrl", ""))
         return _json_response(response)
     except SnovioAPIError as error:
         return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
@@ -1023,12 +1382,12 @@ async def create_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks/{webhookId}", methods=["PUT"])
 async def update_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     payload = _request_json(req)
     try:
-        response = _snovio_client().update_webhook(req.route_params.get("webhookId", ""), payload.get("status", ""))
+        response = _snovio_client(req).update_webhook(req.route_params.get("webhookId", ""), payload.get("status", ""))
         return _json_response(response)
     except SnovioAPIError as error:
         return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
@@ -1036,11 +1395,11 @@ async def update_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks/{webhookId}", methods=["DELETE"])
 async def delete_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
-    missing = _snovio_required_response()
+    missing = _snovio_required_response(req)
     if missing:
         return missing
     try:
-        response = _snovio_client().delete_webhook(req.route_params.get("webhookId", ""))
+        response = _snovio_client(req).delete_webhook(req.route_params.get("webhookId", ""))
         return _json_response(response)
     except SnovioAPIError as error:
         return _json_response({"error": str(error), "statusCode": error.status_code}, 502)

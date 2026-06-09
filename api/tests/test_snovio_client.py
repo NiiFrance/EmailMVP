@@ -122,3 +122,64 @@ def test_create_prospect_list_requires_name():
 
     with pytest.raises(ValueError):
         client.create_prospect_list("  ")
+
+
+@patch("snovio_client.urlopen")
+def test_get_sender_accounts_unwraps_data(mock_urlopen):
+    mock_urlopen.side_effect = [
+        FakeResponse({"access_token": "token-1", "expires_in": 3600}),
+        FakeResponse({"data": [{"id": 11, "email_from": "den@snov.io", "valid": True}]}),
+    ]
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    accounts = client.get_sender_accounts()
+
+    assert accounts[0]["email_from"] == "den@snov.io"
+
+
+@patch("snovio_client.urlopen")
+def test_create_campaign_posts_json_body(mock_urlopen):
+    mock_urlopen.side_effect = [
+        FakeResponse({"access_token": "token-1", "expires_in": 3600}),
+        FakeResponse({"success": True, "data": {"id": 555, "status": "new"}}),
+    ]
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    result = client.create_campaign({"title": "Journey", "recipients": {"list_id": 1}})
+
+    request = mock_urlopen.call_args_list[1].args[0]
+    assert result["data"]["id"] == 555
+    assert request.full_url == "https://api.snov.io/v2/campaigns/create"
+    assert request.get_header("Content-type") == "application/json"
+    assert json.loads(request.data.decode("utf-8"))["title"] == "Journey"
+
+
+def test_create_campaign_requires_title():
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    with pytest.raises(ValueError, match="title"):
+        client.create_campaign({"recipients": {"list_id": 1}})
+
+
+@patch("snovio_client.urlopen")
+def test_create_email_step_content_targets_step_path(mock_urlopen):
+    mock_urlopen.side_effect = [
+        FakeResponse({"access_token": "token-1", "expires_in": 3600}),
+        FakeResponse({"success": True, "data": {"id": 1000}}),
+    ]
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    client.create_email_step_content(555, 100, 1000, subject="{{Subject_Touch1}}", body="{{Body_Touch1}}", plain_text=True)
+
+    request = mock_urlopen.call_args_list[1].args[0]
+    assert request.full_url == "https://api.snov.io/v2/campaigns/555/steps/100/content/create"
+    body = json.loads(request.data.decode("utf-8"))
+    assert body["subject"] == "{{Subject_Touch1}}"
+    assert body["plain_text"] is True
+
+
+def test_change_campaign_state_validates_action():
+    client = SnovioClient(client_id="id", client_secret="secret")
+
+    with pytest.raises(ValueError):
+        client.change_campaign_state(555, "launch")

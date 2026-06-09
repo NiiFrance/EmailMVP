@@ -360,6 +360,41 @@ body {
     margin-top: 0.75rem;
 }
 
+.snovio-connect {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+    background: #f8f9fb;
+}
+
+.snovio-connect-note,
+.snovio-journey-note {
+    color: #666;
+    font-size: 0.75rem;
+    margin-top: 0.5rem;
+}
+
+.snovio-connect .snovio-actions,
+.snovio-journey .snovio-actions {
+    grid-template-columns: 1fr 1fr;
+}
+
+.snovio-journey {
+    border-top: 1px solid #e2e8f0;
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+}
+
+.snovio-journey h4 {
+    font-size: 0.9375rem;
+    margin-bottom: 0.25rem;
+}
+
+.snovio-journey select[multiple] {
+    min-height: 72px;
+}
+
 .snovio-report {
     margin-top: 0.75rem;
     background: #f8f9fb;
