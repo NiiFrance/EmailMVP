@@ -45,6 +45,8 @@
     let selectedFile = null;
     let currentJobId = null;
     let totalLeads = 0;
+    let uploadColumns = [];
+    let uploadDetection = null;
     let pollTimer = null;
     let startTime = null;
     let elapsedTimer = null;
@@ -77,6 +79,10 @@
     const colsBadge = document.getElementById("cols-badge");
     const colsTable = document.getElementById("cols-table");
     const step2Back = document.getElementById("step2-back");
+    const mappingCard = document.getElementById("mapping-card");
+    const mapRows = document.getElementById("map-rows");
+    const mapHint = document.getElementById("map-hint");
+    const generateBtn = document.getElementById("generate-btn");
 
     const progressFill = document.getElementById("progress-fill");
     const progressStatus = document.getElementById("progress-status");
@@ -265,6 +271,7 @@
         dropEmpty.hidden = true;
         fileInfo.hidden = false;
         uploadBtn.disabled = false;
+        if (typeof resetMappingPanel === "function") resetMappingPanel();
         hideUploadError();
         if (name.endsWith(".csv")) previewColumns(file);
         else columnsCard.hidden = true;
@@ -278,6 +285,7 @@
         fileInfo.hidden = true;
         columnsCard.hidden = true;
         uploadBtn.disabled = true;
+        if (typeof resetMappingPanel === "function") resetMappingPanel();
     }
 
     // minimal CSV parser (handles quotes, commas, newlines)
@@ -333,7 +341,7 @@
         return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
 
-    // ── Upload ──
+    // ── Upload (phase 1: store + detect columns) ──
     async function doUpload() {
         if (!selectedFile) return;
         uploadBtn.disabled = true;
@@ -351,26 +359,133 @@
             }
             currentJobId = data.jobId;
             totalLeads = data.totalLeads || 0;
-            // step 3: generating
-            showView("step3");
-            generatingBlock.hidden = false;
-            reviewBlock.hidden = true;
-            jobIdDisplay.textContent = currentJobId;
-            totalLeadsDisp.textContent = totalLeads;
-            genLeads.textContent = totalLeads;
-            const t = selectedTemplate();
-            genEmails.textContent = t ? totalLeads * (t.num_emails || 1) : totalLeads;
-            startTime = Date.now();
-            startTimeDisp.textContent = new Date(startTime).toLocaleTimeString();
-            progressFill.style.width = "0%";
-            progressPercent.textContent = "0%";
-            progressStatus.textContent = "Starting orchestration…";
-            startElapsedTimer();
-            startPolling();
+            uploadColumns = data.columns || [];
+            uploadDetection = data.detection || null;
+            if (uploadDetection && uploadDetection.fields && uploadDetection.fields.length) {
+                // Show the mapping review step; generation starts on confirm.
+                renderMappingPanel();
+                mappingCard.hidden = false;
+                uploadBtn.hidden = true;
+                generateBtn.hidden = false;
+                generateBtn.disabled = false;
+                mappingCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+            } else {
+                // Custom template with no required columns — generate directly.
+                doGenerate();
+            }
         } catch (err) {
             showUploadError("Network error. Please check your connection.");
             uploadBtn.disabled = false;
         }
+    }
+
+    // Build the field → column dropdowns for the mapping review.
+    function renderMappingPanel() {
+        mapRows.innerHTML = "";
+        const cols = uploadColumns;
+        const fullIdx = uploadDetection.fullNameIndex;
+        const optionLabel = (c) => {
+            const header = c.header && c.header.trim() ? c.header : `(column ${c.index + 1})`;
+            return c.sample ? `${header} — e.g. ${c.sample}` : header;
+        };
+        (uploadDetection.fields || []).forEach((f) => {
+            const isName = f.field === "first_name" || f.field === "last_name";
+            const row = document.createElement("div");
+            row.className = "map-row";
+            const label = document.createElement("label");
+            label.className = "map-label";
+            label.textContent = f.label;
+            const sel = document.createElement("select");
+            sel.className = "map-select";
+            sel.dataset.field = f.field;
+            // "Not in file" option
+            sel.appendChild(new Option("— Not in my file —", ""));
+            // Full-name split option for name fields
+            if (isName && fullIdx !== null && fullIdx !== undefined) {
+                const fnCol = cols[fullIdx];
+                const fnLabel = fnCol ? (fnCol.header || `column ${fullIdx + 1}`) : `column ${fullIdx + 1}`;
+                sel.appendChild(new Option(`Split from “${fnLabel}”`, `full:${fullIdx}`));
+            }
+            cols.forEach((c) => sel.appendChild(new Option(optionLabel(c), String(c.index))));
+            // Pre-select detection
+            if (f.derivedFromFullName && fullIdx !== null && fullIdx !== undefined) {
+                sel.value = `full:${fullIdx}`;
+            } else if (f.index !== null && f.index !== undefined) {
+                sel.value = String(f.index);
+            } else {
+                sel.value = "";
+            }
+            if (sel.value === "") row.classList.add("map-row-missing");
+            sel.addEventListener("change", () => {
+                row.classList.toggle("map-row-missing", sel.value === "");
+            });
+            row.appendChild(label);
+            row.appendChild(sel);
+            mapRows.appendChild(row);
+        });
+        const unresolved = (uploadDetection.unresolved || []).length;
+        if (unresolved) {
+            mapHint.textContent = "Tip: a column can still be picked even if its header is blank — use the example values to spot the right one (e.g. the email column).";
+            mapHint.hidden = false;
+        } else {
+            mapHint.hidden = true;
+        }
+    }
+
+    // ── Generate (phase 2: confirm mapping + start generation) ──
+    async function doGenerate() {
+        if (!currentJobId) return;
+        generateBtn.disabled = true;
+        uploadBtn.disabled = true;
+        hideUploadError();
+        const columnMap = {};
+        mapRows.querySelectorAll("select.map-select").forEach((sel) => {
+            if (sel.value !== "") columnMap[sel.dataset.field] = sel.value.startsWith("full:") ? sel.value : Number(sel.value);
+        });
+        try {
+            const resp = await fetch("/api/generate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ jobId: currentJobId, promptId: templateSelect.value, columnMap, totalLeads }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                showUploadError(data.error || "Could not start generation.");
+                generateBtn.disabled = false;
+                return;
+            }
+            startGenerationView();
+        } catch (err) {
+            showUploadError("Network error. Please check your connection.");
+            generateBtn.disabled = false;
+        }
+    }
+
+    function startGenerationView() {
+        showView("step3");
+        generatingBlock.hidden = false;
+        reviewBlock.hidden = true;
+        jobIdDisplay.textContent = currentJobId;
+        totalLeadsDisp.textContent = totalLeads;
+        genLeads.textContent = totalLeads;
+        const t = selectedTemplate();
+        genEmails.textContent = t ? totalLeads * (t.num_emails || 1) : totalLeads;
+        startTime = Date.now();
+        startTimeDisp.textContent = new Date(startTime).toLocaleTimeString();
+        progressFill.style.width = "0%";
+        progressPercent.textContent = "0%";
+        progressStatus.textContent = "Starting orchestration…";
+        startElapsedTimer();
+        startPolling();
+    }
+
+    function resetMappingPanel() {
+        mappingCard.hidden = true;
+        mapRows.innerHTML = "";
+        generateBtn.hidden = true;
+        uploadBtn.hidden = false;
+        uploadDetection = null;
+        uploadColumns = [];
     }
 
     // ── Timers + polling ──
@@ -1002,7 +1117,7 @@
         step2CampaignCount.textContent = t ? `${t.num_emails} ${t.num_emails === 1 ? "email" : "emails"}` : "";
         showView("step2");
     });
-    step2Back.addEventListener("click", () => showView("step1"));
+    step2Back.addEventListener("click", () => { resetMappingPanel(); uploadBtn.disabled = !selectedFile; showView("step1"); });
     step3Back.addEventListener("click", () => showView("step2"));
     step3Continue.addEventListener("click", () => { showView("step4"); loadSnovioOptions(); });
     step4Back.addEventListener("click", () => showView("step3"));
@@ -1028,6 +1143,7 @@
     fileInput.addEventListener("change", () => { if (fileInput.files.length) selectFile(fileInput.files[0]); });
     clearFileBtn.addEventListener("click", clearFile);
     uploadBtn.addEventListener("click", doUpload);
+    generateBtn.addEventListener("click", doGenerate);
     downloadBtn.addEventListener("click", doDownload);
 
     // Snov.io bindings

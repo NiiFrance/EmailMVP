@@ -188,11 +188,22 @@
                         </div>
                     </div>
 
+                    <!-- column mapping review (after upload, before generation) -->
+                    <div id="mapping-card" class="map-card" hidden>
+                        <div class="map-head">
+                            <div class="map-title">Confirm your columns</div>
+                            <p class="map-sub">We matched your file to the fields this campaign needs. Change any that look wrong — then generate.</p>
+                        </div>
+                        <div id="map-rows" class="map-rows"></div>
+                        <p id="map-hint" class="map-hint" hidden></p>
+                    </div>
+
                     <div id="upload-error" class="error" hidden></div>
 
                     <div class="view-split">
                         <button id="step2-back" class="btn btn-secondary" type="button">&larr; Back</button>
                         <button id="upload-btn" class="btn btn-primary" type="button" disabled>Generate Emails</button>
+                        <button id="generate-btn" class="btn btn-primary" type="button" hidden>Generate emails &rarr;</button>
                     </div>
                 </section>
 

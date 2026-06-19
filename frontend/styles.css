@@ -219,6 +219,21 @@ body {
 .cols-table td { padding: 11px 16px; color: var(--ink-soft); white-space: nowrap; border-bottom: 1px solid var(--line-softer); }
 .cols-table tr:last-child td { border-bottom: none; }
 
+/* ============ COLUMN MAPPING REVIEW ============ */
+.map-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; margin-top: 22px; padding: 20px 22px; }
+.map-head { margin-bottom: 14px; }
+.map-title { font-weight: 700; font-size: 15.5px; }
+.map-sub { font-size: 13px; color: var(--muted); margin: 4px 0 0; line-height: 1.5; }
+.map-rows { display: flex; flex-direction: column; gap: 12px; }
+.map-row { display: grid; grid-template-columns: 200px 1fr; align-items: center; gap: 14px; }
+.map-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.map-select { width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; font-size: 13.5px; background: #fff; color: var(--ink); cursor: pointer; }
+.map-select:focus { outline: none; border-color: var(--red); }
+.map-row-missing .map-select { border-color: var(--red); background: var(--red-soft); }
+.map-row-missing .map-label::after { content: " — pick one"; color: var(--red); font-weight: 500; font-size: 12px; }
+.map-hint { font-size: 12.5px; color: var(--muted); margin: 14px 0 0; line-height: 1.5; }
+@media (max-width: 560px) { .map-row { grid-template-columns: 1fr; gap: 5px; } }
+
 /* ============ STEP 3: GENERATING + REVIEW ============ */
 .generating-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 60vh; text-align: center; }
 .spinner { width: 52px; height: 52px; border: 4px solid #EDEAE5; border-top-color: var(--red); border-radius: 50%; animation: cw-spin .8s linear infinite; margin-bottom: 24px; }

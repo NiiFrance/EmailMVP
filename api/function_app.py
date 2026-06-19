@@ -10,6 +10,7 @@ Endpoints:
 import json
 import logging
 import os
+import re
 import uuid
 import hashlib
 import hmac
@@ -36,7 +37,7 @@ from csv_processor import (
     extract_all_leads,
     assemble_enriched_csv,
 )
-from column_mapper import resolve_columns
+from column_mapper import resolve_columns, detect_columns, _friendly_field
 from snovio_client import SnovioAPIError, SnovioClient, SnovioConfigError
 from snovio_workflows import (
     assess_custom_field_readiness,
@@ -115,6 +116,13 @@ def _upload_blob(container: str, blob_name: str, data: bytes) -> None:
 def _download_blob(container: str, blob_name: str) -> bytes:
     client = _blob_service().get_blob_client(container, blob_name)
     return client.download_blob().readall()
+
+
+def _blob_exists(container: str, blob_name: str) -> bool:
+    try:
+        return _blob_service().get_blob_client(container, blob_name).exists()
+    except Exception:
+        return False
 
 
 def _json_response(payload: dict | list, status_code: int = 200) -> func.HttpResponse:
@@ -405,35 +413,34 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                 mimetype="application/json",
             )
 
-        # Smart column detection — skip for custom templates (no required_fields)
-        column_map = None
+        # Smart column detection (non-fatal). The user reviews and corrects the
+        # mapping on the next screen before generation actually starts.
+        headers = [str(h) for h in df_check.columns.tolist()]
         required_fields = template.get("required_fields")
+        detection = None
         if required_fields:
-            headers = df_check.columns.tolist()
             try:
                 openai_client = AzureOpenAI(
                     api_key=AZURE_OPENAI_API_KEY,
                     azure_endpoint=AZURE_OPENAI_ENDPOINT,
                     api_version="2024-12-01-preview",
                 )
-                column_map = resolve_columns(
+                detection = detect_columns(
                     headers,
                     client=openai_client,
                     deployment=AZURE_OPENAI_DEPLOYMENT,
                     required_fields=required_fields,
                 )
-            except ValueError as e:
-                message = str(e)
-                # Suggest campaigns whose required columns this file CAN satisfy, so
-                # the user can switch instead of reformatting their file.
-                compatible = _compatible_template_names(headers, exclude_id=template.get("id"))
-                if compatible:
-                    message += " Campaigns that fit this file: " + ", ".join(compatible) + "."
-                return func.HttpResponse(
-                    json.dumps({"error": message}),
-                    status_code=400,
-                    mimetype="application/json",
-                )
+            except Exception as e:
+                logger.warning("Column detection failed, returning empty mapping: %s", e)
+                detection = {
+                    "fields": [
+                        {"field": f, "label": _friendly_field(f), "index": None, "derivedFromFullName": False}
+                        for f in required_fields
+                    ],
+                    "unresolved": list(required_fields),
+                    "fullNameIndex": None,
+                }
 
         # Always store as CSV in blob storage (convert Excel if needed)
         if filename.lower().endswith(".xlsx"):
@@ -445,18 +452,22 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
         blob_name = f"{job_id}.csv"
 
         _upload_blob(INPUT_CONTAINER, blob_name, csv_bytes)
-        logger.info("Uploaded %s (%d leads) as %s [template=%s]", filename, total_leads, blob_name, template["id"])
+        logger.info("Stored %s (%d leads) as %s [template=%s]", filename, total_leads, blob_name, template["id"])
 
-        # Store template config for use by activities
-        template_config = {"id": prompt_id}
-
-        # Start orchestration
-        orchestrator_input = {
-            "job_id": job_id,
-            "column_map": column_map,
-            "template_config": template_config,
-        }
-        instance_id = await client.start_new("orchestrate_emails", client_input=orchestrator_input, instance_id=job_id)
+        # Build a lightweight column preview: header + first non-empty sample value,
+        # so the user can identify columns even when a header is blank/Unnamed.
+        columns_preview = []
+        for i in range(len(headers)):
+            sample = ""
+            try:
+                for v in df_check.iloc[:, i].tolist():
+                    sv = str(v).strip()
+                    if sv and sv.lower() != "nan":
+                        sample = sv
+                        break
+            except Exception:
+                sample = ""
+            columns_preview.append({"index": i, "header": headers[i], "sample": sample[:60]})
 
         return func.HttpResponse(
             json.dumps({
@@ -464,10 +475,13 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                 "totalLeads": total_leads,
                 "templateId": template["id"],
                 "templateName": template["name"],
+                "columns": columns_preview,
+                "detection": detection,
+                "needsReview": bool(detection and detection.get("unresolved")),
                 "statusUrl": f"/api/status/{job_id}",
                 "downloadUrl": f"/api/download/{job_id}",
             }),
-            status_code=202,
+            status_code=200,
             mimetype="application/json",
         )
 
@@ -477,6 +491,135 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
             json.dumps({"error": f"Upload failed: {str(e)}"}),
             status_code=500,
             mimetype="application/json",
+        )
+
+
+def _build_column_map(raw_map: dict, required_fields: dict) -> tuple[dict | None, list]:
+    """Turn the frontend's chosen mapping into a column_map for extraction.
+
+    Accepts per-field column indices, or the string ``"full:<idx>"`` to derive a
+    name field from a Full Name column. Returns ``(column_map, missing_labels)``;
+    when ``missing_labels`` is non-empty the caller should reject the request.
+    """
+    column_map: dict = {}
+    full_name_idx = None
+
+    def _as_index(value):
+        if isinstance(value, str) and value.startswith("full:"):
+            return None  # handled separately
+        try:
+            idx = int(value)
+        except (TypeError, ValueError):
+            return None
+        return idx if idx >= 0 else None
+
+    for field in required_fields:
+        value = raw_map.get(field)
+        if isinstance(value, str) and value.startswith("full:"):
+            try:
+                full_name_idx = int(value.split(":", 1)[1])
+            except (ValueError, IndexError):
+                pass
+            continue
+        idx = _as_index(value)
+        if idx is not None:
+            column_map[field] = idx
+
+    # Explicit full_name override (e.g., both name fields share one column).
+    explicit_full = _as_index(raw_map.get("full_name"))
+    if full_name_idx is None and explicit_full is not None:
+        full_name_idx = explicit_full
+
+    # Same column chosen for both first and last name => it's a Full Name column.
+    if (
+        column_map.get("first_name") is not None
+        and column_map.get("first_name") == column_map.get("last_name")
+    ):
+        full_name_idx = column_map.pop("first_name")
+        column_map.pop("last_name", None)
+
+    if full_name_idx is not None:
+        column_map["full_name"] = full_name_idx
+
+    missing = []
+    for field in required_fields:
+        if field in column_map:
+            continue
+        if field in ("first_name", "last_name") and "full_name" in column_map:
+            continue
+        missing.append(_friendly_field(field))
+
+    return (column_map or None), missing
+
+
+@app.route(route="generate", methods=["POST"])
+@app.durable_client_input(client_name="client")
+async def generate_emails(req: func.HttpRequest, client) -> func.HttpResponse:
+    """Start generation for an already-uploaded job using a confirmed column mapping."""
+    try:
+        try:
+            body = req.get_json()
+        except ValueError:
+            return func.HttpResponse(
+                json.dumps({"error": "Invalid JSON body."}), status_code=400, mimetype="application/json"
+            )
+
+        job_id = str(body.get("jobId") or "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+            return func.HttpResponse(
+                json.dumps({"error": "A valid jobId from /api/upload is required."}),
+                status_code=400, mimetype="application/json",
+            )
+
+        prompt_id = body.get("promptId") or body.get("prompt_id") or "cold_email"
+        try:
+            template = get_template(prompt_id)
+        except KeyError:
+            return func.HttpResponse(
+                json.dumps({"error": f"Unknown template: {prompt_id}."}),
+                status_code=400, mimetype="application/json",
+            )
+
+        # Confirm the uploaded file still exists before starting work.
+        if not _blob_exists(INPUT_CONTAINER, f"{job_id}.csv"):
+            return func.HttpResponse(
+                json.dumps({"error": "Uploaded file not found — please upload again."}),
+                status_code=404, mimetype="application/json",
+            )
+
+        column_map = None
+        required_fields = template.get("required_fields")
+        if required_fields:
+            column_map, missing = _build_column_map(body.get("columnMap") or {}, required_fields)
+            if missing:
+                return func.HttpResponse(
+                    json.dumps({"error": "Please choose a column for: " + ", ".join(missing) + "."}),
+                    status_code=400, mimetype="application/json",
+                )
+
+        orchestrator_input = {
+            "job_id": job_id,
+            "column_map": column_map,
+            "template_config": {"id": prompt_id},
+        }
+        await client.start_new("orchestrate_emails", client_input=orchestrator_input, instance_id=job_id)
+        logger.info("Started generation for %s [template=%s, map=%s]", job_id, template["id"], column_map)
+
+        return func.HttpResponse(
+            json.dumps({
+                "jobId": job_id,
+                "totalLeads": body.get("totalLeads"),
+                "statusUrl": f"/api/status/{job_id}",
+                "downloadUrl": f"/api/download/{job_id}",
+            }),
+            status_code=202,
+            mimetype="application/json",
+        )
+    except Exception as e:
+        logger.exception("Generate failed")
+        return func.HttpResponse(
+            json.dumps({"error": f"Could not start generation: {str(e)}"}),
+            status_code=500, mimetype="application/json",
         )
 
 
