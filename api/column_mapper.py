@@ -26,6 +26,45 @@ _DISQUALIFY = {
     "email_address": ["campaign", "id", "status", "type", "template", "sent", "open", "click", "bounce", "opt"],
 }
 
+# Keywords that identify a single combined "Full Name" column. Used as a fallback to
+# derive first/last name when those dedicated columns are absent.
+_FULL_NAME_KEYWORDS = ["full name", "fullname", "contact name", "prospect name", "lead name", "contact"]
+
+# Human-friendly labels for required fields, used in error messages.
+_FRIENDLY_FIELD = {
+    "first_name": "First Name",
+    "last_name": "Last Name",
+    "organization": "Company / Organization",
+    "organisation_name": "Company / Organization",
+    "email_address": "Email",
+    "license_renewal": "License or Renewal info",
+    "engagement_objectives": "Engagement objective",
+}
+
+
+def _friendly_field(field: str) -> str:
+    return _FRIENDLY_FIELD.get(field, field.replace("_", " ").title())
+
+
+def find_full_name_column(headers: list[str], used_indices: set[int]) -> int | None:
+    """Find a single combined full-name column, skipping first/last/company columns."""
+    for idx, header in enumerate(headers):
+        if idx in used_indices:
+            continue
+        norm = _normalize(header)
+        if any(skip in norm for skip in ("first", "last", "surname", "given", "company", "organi", "user")):
+            continue
+        if any(kw in norm for kw in _FULL_NAME_KEYWORDS):
+            return idx
+    # Accept a bare "name" column only if nothing more specific matched.
+    for idx, header in enumerate(headers):
+        if idx in used_indices:
+            continue
+        if _normalize(header) == "name":
+            return idx
+    return None
+
+
 
 def _normalize(header: str) -> str:
     """Lowercase, strip, collapse whitespace and remove common punctuation."""
@@ -170,14 +209,30 @@ def resolve_columns(
             if idx is not None:
                 matched[field] = idx
 
+    result = {f: idx for f, idx in matched.items() if idx is not None}
+
+    # Full-name fallback: if first_name and/or last_name are required but still
+    # unmatched, derive them from a single "Full Name" column (split at extraction
+    # time) instead of rejecting the upload. extract_lead_data handles the split.
+    missing_name_fields = [f for f in fields if f in ("first_name", "last_name") and matched.get(f) is None]
+    if missing_name_fields:
+        full_idx = find_full_name_column(headers, set(result.values()))
+        if full_idx is not None:
+            result["full_name"] = full_idx
+            for f in missing_name_fields:
+                matched[f] = full_idx  # mark satisfied (value derived from full name)
+
     # Check for any still-unresolved fields
     still_missing = [f for f, idx in matched.items() if idx is None]
     if still_missing:
+        missing_labels = ", ".join(_friendly_field(f) for f in still_missing)
+        all_labels = ", ".join(_friendly_field(f) for f in fields)
         raise ValueError(
-            f"Could not detect required columns: {', '.join(still_missing)}. "
-            f"Please ensure your file has columns for: "
-            f"{', '.join(fields.keys())}"
+            f"Could not find a column for: {missing_labels}. "
+            f"This campaign needs columns for: {all_labels}. "
+            f"Tip: a single \u201cFull Name\u201d column can stand in for First/Last Name."
         )
 
-    # At this point every value is an int (not None)
-    return {f: idx for f, idx in matched.items() if idx is not None}
+    # full_name (when present) is returned so extraction can split it; the dedicated
+    # first_name/last_name keys are omitted when derived from it.
+    return result

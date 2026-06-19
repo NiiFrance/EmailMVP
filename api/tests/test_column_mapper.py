@@ -190,7 +190,7 @@ class TestResolveColumns:
 
     def test_raises_when_fields_missing_no_client(self):
         headers = ["Column A", "Column B"]
-        with pytest.raises(ValueError, match="Could not detect required columns"):
+        with pytest.raises(ValueError, match="Could not find a column for"):
             resolve_columns(headers)
 
     def test_llm_fallback_fills_gaps(self):
@@ -213,7 +213,7 @@ class TestResolveColumns:
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("fail")
 
-        with pytest.raises(ValueError, match="Could not detect required columns"):
+        with pytest.raises(ValueError, match="Could not find a column for"):
             resolve_columns(headers, client=mock_client, deployment="test-deployment")
 
     def test_returns_int_values_only(self):
@@ -254,8 +254,8 @@ class TestCustomRequiredFields:
         assert result["email_address"] == 3
 
     def test_resolve_raises_for_missing_custom_field(self):
-        headers = ["Name", "Phone"]
-        with pytest.raises(ValueError, match="Could not detect"):
+        headers = ["Phone", "Status"]
+        with pytest.raises(ValueError, match="Could not find a column for"):
             resolve_columns(headers, required_fields=self.E_INVOICE_FIELDS)
 
     def test_none_required_fields_falls_back_to_default(self):

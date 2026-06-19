@@ -423,8 +423,14 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                     required_fields=required_fields,
                 )
             except ValueError as e:
+                message = str(e)
+                # Suggest campaigns whose required columns this file CAN satisfy, so
+                # the user can switch instead of reformatting their file.
+                compatible = _compatible_template_names(headers, exclude_id=template.get("id"))
+                if compatible:
+                    message += " Campaigns that fit this file: " + ", ".join(compatible) + "."
                 return func.HttpResponse(
-                    json.dumps({"error": str(e)}),
+                    json.dumps({"error": message}),
                     status_code=400,
                     mimetype="application/json",
                 )
@@ -549,6 +555,29 @@ def extract_leads_activity(extractInput: dict) -> list:
 
 
 # ===========================================================================
+# Helper — Suggest campaigns whose required columns a file can satisfy
+# ===========================================================================
+def _compatible_template_names(headers: list, exclude_id: str | None = None) -> list:
+    """Return names of templates whose required columns resolve from these headers.
+
+    Uses fuzzy + full-name matching only (no LLM) so it is fast and side-effect free.
+    """
+    names = []
+    for tpl in PROMPT_REGISTRY.values():
+        if tpl.get("id") == exclude_id:
+            continue
+        required = tpl.get("required_fields")
+        if not required:
+            continue
+        try:
+            resolve_columns(headers, client=None, deployment="", required_fields=required)
+            names.append(tpl["name"])
+        except ValueError:
+            continue
+    return names
+
+
+# ===========================================================================
 # Helper — Resolve template from config
 # ===========================================================================
 def _resolve_template(template_config: dict) -> dict:
@@ -635,7 +664,12 @@ def process_lead_activity(leadInput: dict) -> dict:
                 logger.warning("Lead %d attempt %d parse failed: %s", row_index, attempt, str(parse_error))
 
         # All attempts exhausted.
-        message = str(last_error) if last_error else "Generation failed after multiple attempts."
+        if isinstance(last_error, json.JSONDecodeError):
+            message = f"Invalid JSON from model: {last_error}"
+        elif last_error is not None:
+            message = str(last_error)
+        else:
+            message = "Generation failed after multiple attempts."
         logger.error("Lead %d failed after %d attempts: %s", row_index, max_attempts, message)
         return {"row_index": row_index, "error": message}
 
