@@ -1,43 +1,126 @@
 /**
- * Email Campaign Generator — Frontend Logic
- * Handles: CSV upload, progress polling, CSV download.
+ * Cloudware Email Campaign Generator — SPA
+ * Home dashboard + 4-step wizard (Choose → Upload → Review → Sync).
+ * All /api and /api/snovio wiring preserved.
  */
-
 (function () {
     "use strict";
 
-    // ── DOM References ──
-    const uploadSection   = document.getElementById("upload-section");
-    const progressSection = document.getElementById("progress-section");
-    const downloadSection = document.getElementById("download-section");
-    const errorSection    = document.getElementById("error-section");
+    // ── View routing ──
+    const views = {
+        home: document.getElementById("view-home"),
+        step1: document.getElementById("view-step1"),
+        step2: document.getElementById("view-step2"),
+        step3: document.getElementById("view-step3"),
+        step4: document.getElementById("view-step4"),
+        error: document.getElementById("view-error"),
+    };
+    const navHome = document.getElementById("nav-home");
+    const railWrap = document.getElementById("rail-wrap");
+    const sidebarSnovDot = document.getElementById("sidebar-snov-dot");
+    const sidebarSnovText = document.getElementById("sidebar-snov-text");
 
-    const dropZone      = document.getElementById("drop-zone");
-    const fileInput     = document.getElementById("file-input");
-    const fileInfo      = document.getElementById("file-info");
-    const fileName      = document.getElementById("file-name");
-    const clearFileBtn  = document.getElementById("clear-file");
-    const uploadBtn     = document.getElementById("upload-btn");
-    const uploadError   = document.getElementById("upload-error");
+    const STEP_OF = { step1: 1, step2: 2, step3: 3, step4: 4 };
 
-    const templateSelect   = document.getElementById("template-select");
-    const templateDesc     = document.getElementById("template-description");
+    function showView(name) {
+        Object.values(views).forEach((v) => { if (v) v.hidden = true; });
+        if (views[name]) views[name].hidden = false;
 
-    const progressFill    = document.getElementById("progress-fill");
-    const progressStatus  = document.getElementById("progress-status");
+        const inWizard = name in STEP_OF;
+        railWrap.hidden = !inWizard;
+        navHome.classList.toggle("active", name === "home");
+
+        const step = STEP_OF[name] || 0;
+        document.querySelectorAll("#step-rail .step-row").forEach((row) => {
+            const n = parseInt(row.getAttribute("data-step"), 10);
+            row.classList.remove("active", "done");
+            if (!step) return;
+            if (n < step) row.classList.add("done");
+            else if (n === step) row.classList.add("active");
+        });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    // ── State ──
+    let selectedFile = null;
+    let currentJobId = null;
+    let totalLeads = 0;
+    let pollTimer = null;
+    let startTime = null;
+    let elapsedTimer = null;
+    let templateData = [];
+    let snovioOptions = null;
+    let snovioVerificationResults = [];
+    let snovioSessionId = sessionStorage.getItem("snovioSessionId") || null;
+    let reviewLeads = [];
+    let activeLeadIdx = 0;
+    let activeTouchIdx = 0;
+    let lastElapsed = "—";
+
+    // ── Element refs ──
+    const templateSelect = document.getElementById("template-select");
+    const templateGroups = document.getElementById("template-groups");
+    const step1Continue = document.getElementById("step1-continue");
+
+    const step2CampaignName = document.getElementById("step2-campaign-name");
+    const step2CampaignCount = document.getElementById("step2-campaign-count");
+    const dropZone = document.getElementById("drop-zone");
+    const dropEmpty = document.getElementById("drop-empty");
+    const fileInput = document.getElementById("file-input");
+    const fileInfo = document.getElementById("file-info");
+    const fileName = document.getElementById("file-name");
+    const fileDetail = document.getElementById("file-detail");
+    const clearFileBtn = document.getElementById("clear-file");
+    const uploadBtn = document.getElementById("upload-btn");
+    const uploadError = document.getElementById("upload-error");
+    const columnsCard = document.getElementById("columns-card");
+    const colsBadge = document.getElementById("cols-badge");
+    const colsTable = document.getElementById("cols-table");
+    const step2Back = document.getElementById("step2-back");
+
+    const progressFill = document.getElementById("progress-fill");
+    const progressStatus = document.getElementById("progress-status");
     const progressPercent = document.getElementById("progress-percent");
-    const jobIdDisplay    = document.getElementById("job-id-display");
-    const totalLeadsDisp  = document.getElementById("total-leads-display");
-    const startTimeDisp   = document.getElementById("start-time-display");
-    const elapsedDisp     = document.getElementById("elapsed-display");
+    const jobIdDisplay = document.getElementById("job-id-display");
+    const totalLeadsDisp = document.getElementById("total-leads-display");
+    const startTimeDisp = document.getElementById("start-time-display");
+    const elapsedDisp = document.getElementById("elapsed-display");
+    const genEmails = document.getElementById("gen-emails");
+    const genLeads = document.getElementById("gen-leads");
+    const generatingBlock = document.getElementById("generating-block");
+    const reviewBlock = document.getElementById("review-block");
 
     const completedLeads = document.getElementById("completed-leads");
-    const summaryLeads   = document.getElementById("summary-leads");
+    const reviewEmails = document.getElementById("review-emails");
     const summaryElapsed = document.getElementById("summary-elapsed");
-    const summaryJobId   = document.getElementById("summary-job-id");
-    const downloadBtn    = document.getElementById("download-btn");
-    const newJobBtn      = document.getElementById("new-job-btn");
+    const summaryLeads = document.getElementById("summary-leads");
+    const summaryJobId = document.getElementById("summary-job-id");
+    const reviewLeadList = document.getElementById("review-lead-list");
+    const reviewTouchTabs = document.getElementById("review-touch-tabs");
+    const reviewCurrentName = document.getElementById("review-current-name");
+    const reviewCurrentMeta = document.getElementById("review-current-meta");
+    const editSubject = document.getElementById("edit-subject");
+    const editBody = document.getElementById("edit-body");
+    const downloadBtn = document.getElementById("download-btn");
+    const step3Back = document.getElementById("step3-back");
+    const step3Continue = document.getElementById("step3-continue");
 
+    const newJobBtn = document.getElementById("new-job-btn");
+    const step4Back = document.getElementById("step4-back");
+    const retryBtn = document.getElementById("retry-btn");
+    const errorMessage = document.getElementById("error-message");
+
+    // Home
+    const homeNewCampaign = document.getElementById("home-new-campaign");
+    const homeSnovPill = document.getElementById("home-snov-pill");
+    const homeSnovText = document.getElementById("home-snov-text");
+    const statCampaigns = document.getElementById("stat-campaigns");
+    const statEmails = document.getElementById("stat-emails");
+    const statLeads = document.getElementById("stat-leads");
+    const recentList = document.getElementById("recent-list");
+    const recentEmpty = document.getElementById("recent-empty");
+
+    // Snov.io
     const snovioPanel = document.getElementById("snovio-panel");
     const snovioStatus = document.getElementById("snovio-status");
     const snovioRefreshBtn = document.getElementById("snovio-refresh-btn");
@@ -73,186 +156,697 @@
     const snovioJourneyPreviewBtn = document.getElementById("snovio-journey-preview-btn");
     const snovioJourneyCreateBtn = document.getElementById("snovio-journey-create-btn");
 
-    const errorMessage = document.getElementById("error-message");
-    const retryBtn     = document.getElementById("retry-btn");
+    // ── Helpers ──
+    function formatElapsed(ms) {
+        const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
+        if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
+        if (m > 0) return `${m}m ${s % 60}s`;
+        return `${s}s`;
+    }
+    function showUploadError(msg) { uploadError.textContent = msg; uploadError.hidden = false; }
+    function hideUploadError() { uploadError.hidden = true; }
+    function showError(msg) { errorMessage.textContent = msg; showView("error"); }
 
-    // ── State ──
-    let selectedFile = null;
-    let currentJobId = null;
-    let totalLeads   = 0;
-    let pollTimer    = null;
-    let startTime    = null;
-    let elapsedTimer = null;
-    let templateData = [];  // cached template list from API
-    let snovioOptions = null;
-    let snovioVerificationResults = [];
-    let snovioSessionId = sessionStorage.getItem("snovioSessionId") || null;
+    function setSidebarSnov(state, text) {
+        sidebarSnovDot.classList.remove("connected", "disconnected");
+        if (state) sidebarSnovDot.classList.add(state);
+        sidebarSnovText.textContent = text;
+        if (homeSnovPill) {
+            homeSnovPill.classList.remove("connected", "disconnected");
+            if (state) homeSnovPill.classList.add(state);
+            homeSnovPill.textContent = state === "connected" ? "Connected" : (state === "disconnected" ? "Not connected" : "—");
+        }
+    }
 
-    // ── Load Templates ──
+    // ── Templates (Step 1) ──
     async function loadTemplates() {
         try {
             const resp = await fetch("/api/templates");
             if (!resp.ok) return;
             const data = await resp.json();
             templateData = data.templates || [];
-
-            // Group templates by their group field, preserving order
-            const groupOrder = [];
-            const groups = {};
-            templateData.forEach((t) => {
-                if (!groups[t.group]) {
-                    groups[t.group] = [];
-                    groupOrder.push(t.group);
-                }
-                groups[t.group].push(t);
-            });
-
-            // Build <optgroup> structure
+            renderTemplateCards();
+            // keep hidden select in sync for downstream logic
             templateSelect.innerHTML = "";
-            groupOrder.forEach((groupName) => {
-                const optgroup = document.createElement("optgroup");
-                optgroup.label = groupName;
-                groups[groupName].forEach((t) => {
-                    const opt = document.createElement("option");
-                    opt.value = t.id;
-                    opt.textContent = `${t.name} (${t.num_emails} emails)`;
-                    optgroup.appendChild(opt);
-                });
-                templateSelect.appendChild(optgroup);
+            templateData.forEach((t) => {
+                templateSelect.appendChild(new Option(`${t.name} (${t.num_emails} emails)`, t.id));
             });
-
-            // Set initial description
-            updateTemplateDescription();
-        } catch (err) {
-            // Fallback: keep the static cold_email option
-        }
+            if (templateData.length) selectTemplate(templateData[0].id);
+        } catch (err) { /* keep static fallback */ }
     }
 
-    function updateTemplateDescription() {
-        const selected = templateSelect.value;
-        const tmpl = templateData.find((t) => t.id === selected);
-        templateDesc.textContent = tmpl ? tmpl.description : "";
-
-        // Update button text with email count
-        if (tmpl) {
-            uploadBtn.textContent = `Generate ${tmpl.num_emails} Emails per Lead`;
-        }
-    }
-
-    templateSelect.addEventListener("change", updateTemplateDescription);
-
-    // Load templates on page load
-    loadTemplates();
-
-    // ── Helpers ──
-    function showSection(section) {
-        [uploadSection, progressSection, downloadSection, errorSection].forEach(
-            (s) => { s.hidden = true; }
-        );
-        section.hidden = false;
-    }
-
-    function formatElapsed(ms) {
-        const s = Math.floor(ms / 1000);
-        const m = Math.floor(s / 60);
-        const h = Math.floor(m / 60);
-        if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
-        if (m > 0) return `${m}m ${s % 60}s`;
-        return `${s}s`;
-    }
-
-    function setSnovioBusy(isBusy) {
-        [snovioRefreshBtn, snovioVerifyBtn, snovioDryRunBtn, snovioSyncBtn, snovioEnrichBtn, snovioAnalyticsBtn, snovioSuppressBtn, snovioRecipientStatusBtn, snovioConnectBtn, snovioDisconnectBtn, snovioJourneyPreviewBtn, snovioJourneyCreateBtn].forEach((button) => {
-            if (button) button.disabled = isBusy;
+    function renderTemplateCards() {
+        const groupOrder = [];
+        const groups = {};
+        templateData.forEach((t) => {
+            const g = t.group || "Templates";
+            if (!groups[g]) { groups[g] = []; groupOrder.push(g); }
+            groups[g].push(t);
+        });
+        templateGroups.innerHTML = "";
+        groupOrder.forEach((groupName) => {
+            const wrap = document.createElement("div");
+            wrap.className = "tpl-group";
+            const h = document.createElement("div");
+            h.className = "tpl-group-name";
+            h.textContent = groupName;
+            const cards = document.createElement("div");
+            cards.className = "tpl-cards";
+            groups[groupName].forEach((t) => {
+                const card = document.createElement("div");
+                card.className = "tpl-card";
+                card.setAttribute("data-id", t.id);
+                card.innerHTML =
+                    `<div class="tpl-card-top"><div class="tpl-card-name"></div>` +
+                    `<div class="tpl-card-badge"></div></div>` +
+                    `<div class="tpl-card-desc"></div>`;
+                card.querySelector(".tpl-card-name").textContent = t.name;
+                card.querySelector(".tpl-card-badge").textContent =
+                    `${t.num_emails} ${t.num_emails === 1 ? "email" : "emails"}`;
+                card.querySelector(".tpl-card-desc").textContent = t.description || "";
+                card.addEventListener("click", () => selectTemplate(t.id));
+                cards.appendChild(card);
+            });
+            wrap.appendChild(h); wrap.appendChild(cards);
+            templateGroups.appendChild(wrap);
         });
     }
 
+    function selectTemplate(id) {
+        templateSelect.value = id;
+        document.querySelectorAll(".tpl-card").forEach((c) => {
+            c.classList.toggle("selected", c.getAttribute("data-id") === id);
+        });
+        step1Continue.disabled = false;
+    }
+
+    function selectedTemplate() {
+        return templateData.find((t) => t.id === templateSelect.value) || null;
+    }
+
+    function selectedTemplateName() {
+        const t = selectedTemplate();
+        if (t) return t.name;
+        const opt = templateSelect.options[templateSelect.selectedIndex];
+        return opt ? opt.textContent.replace(/\s*\([^)]*emails?\)\s*$/i, "").trim() : "Generated Leads";
+    }
+
+    // ── File selection + column preview (Step 2) ──
+    function selectFile(file) {
+        if (!file) return;
+        const name = file.name.toLowerCase();
+        if (!name.endsWith(".csv") && !name.endsWith(".xlsx")) {
+            showUploadError("Please select a .csv or .xlsx file.");
+            return;
+        }
+        selectedFile = file;
+        fileName.textContent = file.name;
+        fileDetail.textContent = `${(file.size / 1024).toFixed(1)} KB`;
+        dropEmpty.hidden = true;
+        fileInfo.hidden = false;
+        uploadBtn.disabled = false;
+        hideUploadError();
+        if (name.endsWith(".csv")) previewColumns(file);
+        else columnsCard.hidden = true;
+    }
+
+    function clearFile(e) {
+        if (e) e.stopPropagation();
+        selectedFile = null;
+        fileInput.value = "";
+        dropEmpty.hidden = false;
+        fileInfo.hidden = true;
+        columnsCard.hidden = true;
+        uploadBtn.disabled = true;
+    }
+
+    // minimal CSV parser (handles quotes, commas, newlines)
+    function parseCSV(text) {
+        const rows = [];
+        let row = [], field = "", inQuotes = false;
+        for (let i = 0; i < text.length; i++) {
+            const c = text[i];
+            if (inQuotes) {
+                if (c === '"') {
+                    if (text[i + 1] === '"') { field += '"'; i++; }
+                    else inQuotes = false;
+                } else field += c;
+            } else {
+                if (c === '"') inQuotes = true;
+                else if (c === ",") { row.push(field); field = ""; }
+                else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+                else if (c === "\r") { /* skip */ }
+                else field += c;
+            }
+        }
+        if (field.length || row.length) { row.push(field); rows.push(row); }
+        return rows.filter((r) => r.length && !(r.length === 1 && r[0] === ""));
+    }
+
+    function previewColumns(file) {
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const rows = parseCSV(String(reader.result));
+                if (!rows.length) { columnsCard.hidden = true; return; }
+                const headers = rows[0];
+                const sample = rows.slice(1, 4);
+                let html = "<thead><tr>";
+                headers.forEach((h) => { html += `<th>${escapeHtml(h)}</th>`; });
+                html += "</tr></thead><tbody>";
+                sample.forEach((r) => {
+                    html += "<tr>";
+                    headers.forEach((_, ci) => { html += `<td>${escapeHtml(r[ci] || "")}</td>`; });
+                    html += "</tr>";
+                });
+                html += "</tbody>";
+                colsTable.innerHTML = html;
+                colsBadge.textContent = `${headers.length} columns detected`;
+                fileDetail.textContent = `${(file.size / 1024).toFixed(1)} KB · ${rows.length - 1} rows · ${headers.length} columns`;
+                columnsCard.hidden = false;
+            } catch (e) { columnsCard.hidden = true; }
+        };
+        reader.readAsText(file);
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    // ── Upload ──
+    async function doUpload() {
+        if (!selectedFile) return;
+        uploadBtn.disabled = true;
+        hideUploadError();
+        const formData = new FormData();
+        formData.append("file", selectedFile);
+        formData.append("prompt_id", templateSelect.value);
+        try {
+            const resp = await fetch("/api/upload", { method: "POST", body: formData });
+            const data = await resp.json();
+            if (!resp.ok) {
+                showUploadError(data.error || "Upload failed.");
+                uploadBtn.disabled = false;
+                return;
+            }
+            currentJobId = data.jobId;
+            totalLeads = data.totalLeads || 0;
+            // step 3: generating
+            showView("step3");
+            generatingBlock.hidden = false;
+            reviewBlock.hidden = true;
+            jobIdDisplay.textContent = currentJobId;
+            totalLeadsDisp.textContent = totalLeads;
+            genLeads.textContent = totalLeads;
+            const t = selectedTemplate();
+            genEmails.textContent = t ? totalLeads * (t.num_emails || 1) : totalLeads;
+            startTime = Date.now();
+            startTimeDisp.textContent = new Date(startTime).toLocaleTimeString();
+            progressFill.style.width = "0%";
+            progressPercent.textContent = "0%";
+            progressStatus.textContent = "Starting orchestration…";
+            startElapsedTimer();
+            startPolling();
+        } catch (err) {
+            showUploadError("Network error. Please check your connection.");
+            uploadBtn.disabled = false;
+        }
+    }
+
+    // ── Timers + polling ──
+    function startElapsedTimer() {
+        elapsedTimer = setInterval(() => {
+            if (startTime) elapsedDisp.textContent = formatElapsed(Date.now() - startTime);
+        }, 1000);
+    }
+    function stopElapsedTimer() { if (elapsedTimer) clearInterval(elapsedTimer); elapsedTimer = null; }
+    function startPolling() { pollTimer = setInterval(pollStatus, 5000); pollStatus(); }
+    function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+
+    async function pollStatus() {
+        if (!currentJobId) return;
+        try {
+            const resp = await fetch(`/api/status/${encodeURIComponent(currentJobId)}`);
+            const data = await resp.json();
+            if (!resp.ok) { progressStatus.textContent = "Checking status…"; return; }
+            const status = data.status;
+            if (status === "Running" || status === "Pending") {
+                const processed = data.processedLeads || 0;
+                const total = data.totalLeads || totalLeads || 1;
+                const phase = data.phase || "processing";
+                if (phase === "assembling") progressStatus.textContent = "Assembling output CSV…";
+                else if (processed > 0) progressStatus.textContent = `Processed ${processed} of ${total} leads…`;
+                else progressStatus.textContent = "Preparing leads…";
+                const pct = processed > 0 ? Math.min(phase === "assembling" ? 98 : 95, Math.floor((processed / total) * 100)) : 0;
+                progressFill.style.width = pct + "%";
+                progressPercent.textContent = pct + "%";
+            } else if (status === "Completed") {
+                stopPolling(); stopElapsedTimer();
+                progressFill.style.width = "100%";
+                progressPercent.textContent = "100%";
+                progressStatus.textContent = "Complete!";
+                lastElapsed = startTime ? formatElapsed(Date.now() - startTime) : "—";
+                const leadCount = data.totalLeads || totalLeads;
+                setTimeout(() => enterReview(leadCount), 600);
+            } else if (status === "Failed") {
+                stopPolling(); stopElapsedTimer();
+                showError(data.error || "The job failed. Please try again.");
+            } else {
+                progressStatus.textContent = `Status: ${status}`;
+            }
+        } catch (err) {
+            progressStatus.textContent = "Connection issue, retrying…";
+        }
+    }
+
+    // ── Review (Step 3) ──
+    async function enterReview(leadCount) {
+        completedLeads.textContent = leadCount;
+        summaryLeads.textContent = leadCount;
+        summaryElapsed.textContent = lastElapsed;
+        summaryJobId.textContent = currentJobId;
+        generatingBlock.hidden = true;
+        reviewBlock.hidden = false;
+        await loadDrafts();
+        loadSnovioOptions();
+    }
+
+    async function loadDrafts() {
+        reviewLeads = [];
+        try {
+            const resp = await fetch(`/api/download/${encodeURIComponent(currentJobId)}`);
+            if (resp.ok) {
+                const text = await resp.text();
+                reviewLeads = csvToLeads(text);
+            }
+        } catch (e) { /* ignore */ }
+        const totalEmails = reviewLeads.reduce((n, l) => n + l.touches.length, 0);
+        reviewEmails.textContent = totalEmails || "—";
+        activeLeadIdx = 0; activeTouchIdx = 0;
+        renderLeadList();
+        renderEditor();
+        recordRecent(reviewLeads.length, totalEmails);
+    }
+
+    function csvToLeads(text) {
+        const rows = parseCSV(text);
+        if (rows.length < 2) return [];
+        const headers = rows[0];
+        const idx = (name) => headers.findIndex((h) => h.trim().toLowerCase() === name);
+        const fi = idx("first_name"), li = idx("last_name"), oi = idx("organization"), ei = idx("email");
+        const touchCols = [];
+        headers.forEach((h, i) => {
+            const m = h.match(/^Subject_Touch(\d+)$/i);
+            if (m) {
+                const bi = headers.findIndex((x) => x.toLowerCase() === `body_touch${m[1]}`.toLowerCase());
+                touchCols.push({ n: parseInt(m[1], 10), si: i, bi });
+            }
+        });
+        touchCols.sort((a, b) => a.n - b.n);
+        const leads = [];
+        for (let r = 1; r < rows.length; r++) {
+            const row = rows[r];
+            const first = fi >= 0 ? row[fi] : "";
+            const last = li >= 0 ? row[li] : "";
+            const org = oi >= 0 ? row[oi] : "";
+            const email = ei >= 0 ? row[ei] : "";
+            const touches = touchCols.map((tc) => ({
+                label: `Touch ${tc.n}`,
+                subject: row[tc.si] || "",
+                body: tc.bi >= 0 ? (row[tc.bi] || "") : "",
+            }));
+            leads.push({
+                first, last, org, email,
+                name: [first, last].filter(Boolean).join(" ") || email || `Lead ${r}`,
+                touches,
+            });
+        }
+        return leads;
+    }
+
+    function renderLeadList() {
+        reviewLeadList.innerHTML = "";
+        reviewLeads.forEach((lead, i) => {
+            const row = document.createElement("div");
+            row.className = "review-lead" + (i === activeLeadIdx ? " active" : "");
+            const initial = (lead.org || lead.name || "?").trim().charAt(0).toUpperCase();
+            row.innerHTML =
+                `<div class="avatar">${escapeHtml(initial)}</div>` +
+                `<div style="min-width:0;"><div class="rl-company"></div><div class="rl-contact"></div></div>`;
+            row.querySelector(".rl-company").textContent = lead.org || lead.name;
+            row.querySelector(".rl-contact").textContent = lead.name;
+            row.addEventListener("click", () => { activeLeadIdx = i; activeTouchIdx = 0; renderLeadList(); renderEditor(); });
+            reviewLeadList.appendChild(row);
+        });
+    }
+
+    function renderEditor() {
+        const lead = reviewLeads[activeLeadIdx];
+        if (!lead) {
+            reviewCurrentName.textContent = "No drafts";
+            reviewCurrentMeta.textContent = "";
+            reviewTouchTabs.innerHTML = "";
+            editSubject.value = ""; editBody.value = "";
+            return;
+        }
+        reviewCurrentName.textContent = `${lead.name} · ${lead.org || ""}`.replace(/ · $/, "");
+        reviewCurrentMeta.textContent = [lead.email].filter(Boolean).join(" · ");
+        reviewTouchTabs.innerHTML = "";
+        lead.touches.forEach((t, i) => {
+            const tab = document.createElement("button");
+            tab.type = "button";
+            tab.className = "touch-tab" + (i === activeTouchIdx ? " active" : "");
+            tab.textContent = t.label;
+            tab.addEventListener("click", () => { activeTouchIdx = i; renderEditor(); });
+            reviewTouchTabs.appendChild(tab);
+        });
+        const touch = lead.touches[activeTouchIdx] || { subject: "", body: "" };
+        editSubject.value = touch.subject;
+        editBody.value = touch.body;
+    }
+
+    editSubject.addEventListener("input", () => {
+        const lead = reviewLeads[activeLeadIdx];
+        if (lead && lead.touches[activeTouchIdx]) lead.touches[activeTouchIdx].subject = editSubject.value;
+    });
+    editBody.addEventListener("input", () => {
+        const lead = reviewLeads[activeLeadIdx];
+        if (lead && lead.touches[activeTouchIdx]) lead.touches[activeTouchIdx].body = editBody.value;
+    });
+
+    // ── Recent (session history, localStorage) ──
+    function recordRecent(leads, emails) {
+        try {
+            const list = JSON.parse(localStorage.getItem("cw_recent") || "[]");
+            list.unshift({
+                name: (selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : "Campaign"),
+                tpl: selectedTemplateName(),
+                date: new Date().toLocaleDateString(),
+                leads, emails, status: "Drafted",
+            });
+            localStorage.setItem("cw_recent", JSON.stringify(list.slice(0, 12)));
+        } catch (e) { /* ignore */ }
+    }
+
+    function renderHome() {
+        let list = [];
+        try { list = JSON.parse(localStorage.getItem("cw_recent") || "[]"); } catch (e) { list = []; }
+        statCampaigns.textContent = list.length;
+        statEmails.textContent = list.reduce((n, r) => n + (r.emails || 0), 0).toLocaleString();
+        statLeads.textContent = list.reduce((n, r) => n + (r.leads || 0), 0).toLocaleString();
+        recentList.innerHTML = "";
+        if (!list.length) { recentEmpty.hidden = false; return; }
+        recentEmpty.hidden = true;
+        list.forEach((r) => {
+            const row = document.createElement("div");
+            row.className = "recent-row";
+            row.innerHTML =
+                `<div style="min-width:0;"><div class="recent-name"></div><div class="recent-tpl"></div></div>` +
+                `<div class="recent-num"><div class="n">${r.leads || 0}</div><div class="u">leads</div></div>` +
+                `<div class="recent-num"><div class="n">${r.emails || 0}</div><div class="u">emails</div></div>` +
+                `<div class="recent-num"><div class="n" style="color:#15803D;">${escapeHtml(r.status || "—")}</div></div>`;
+            row.querySelector(".recent-name").textContent = r.name;
+            row.querySelector(".recent-tpl").textContent = `${r.tpl} · ${r.date}`;
+            recentList.appendChild(row);
+        });
+    }
+
+    // ── Download ──
+    async function doDownload() {
+        if (!currentJobId) return;
+        downloadBtn.disabled = true;
+        const label = downloadBtn.textContent;
+        downloadBtn.textContent = "Downloading…";
+        try {
+            const resp = await fetch(`/api/download/${encodeURIComponent(currentJobId)}`);
+            if (!resp.ok) { const d = await resp.json(); showError(d.error || "Download failed."); return; }
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url; a.download = `emails_${currentJobId.substring(0, 8)}.csv`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (err) { showError("Download failed. Please try again."); }
+        finally { downloadBtn.disabled = false; downloadBtn.textContent = label; }
+    }
+
+    // ── Reset ──
+    function resetAll() {
+        stopPolling(); stopElapsedTimer();
+        currentJobId = null; totalLeads = 0; startTime = null;
+        snovioVerificationResults = []; reviewLeads = [];
+        snovioReport.hidden = true;
+        clearFile();
+        showView("step1");
+    }
+
+    // ============================================================
+    //  Snov.io (logic preserved)
+    // ============================================================
+    function setSnovioBusy(isBusy) {
+        [snovioRefreshBtn, snovioVerifyBtn, snovioDryRunBtn, snovioSyncBtn, snovioEnrichBtn, snovioAnalyticsBtn, snovioSuppressBtn, snovioRecipientStatusBtn, snovioConnectBtn, snovioDisconnectBtn, snovioJourneyPreviewBtn, snovioJourneyCreateBtn].forEach((b) => { if (b) b.disabled = isBusy; });
+    }
     function setSnovioConnected(connected) {
         if (snovioDisconnectBtn) snovioDisconnectBtn.hidden = !connected;
-        if (snovioConnectBtn) snovioConnectBtn.textContent = connected ? "Reconnect" : "Connect";
+        if (snovioConnectBtn) snovioConnectBtn.textContent = connected ? "Reconnect" : "Connect account";
     }
-
     function renderSnovioReport(title, payload) {
         snovioReport.hidden = false;
-        let summary;
-        if (payload.numTouches !== undefined || payload.customFieldReadiness) {
-            summary = {
-                campaignTitle: payload.campaignTitle,
-                numTouches: payload.numTouches,
-                delayDays: payload.delayDays,
-                campaignId: payload.campaignId,
-                status: payload.status,
-                customFieldReadiness: payload.customFieldReadiness,
-                plannedSteps: payload.plannedSteps,
-                stepContent: payload.stepContent,
-                syncSummary: payload.sync ? payload.sync.summary : undefined,
-                error: payload.error,
-                action: payload.action,
-                note: payload.note,
-            };
-        } else if (payload.summary) {
-            summary = {
-                ...payload.summary,
-                listId: payload.listId || "",
-                listSource: payload.listSource || "",
-                listName: payload.listName || "",
-                plannedListCreation: !!payload.plannedListCreation,
-            };
-        } else {
-            summary = payload.estimate || payload.analytics || payload.balance || payload;
-        }
         snovioReport.innerHTML = "";
-        const heading = document.createElement("h4");
-        heading.textContent = title;
-        const pre = document.createElement("pre");
-        pre.textContent = JSON.stringify(summary, null, 2);
-        snovioReport.appendChild(heading);
-        snovioReport.appendChild(pre);
+        snovioReport.appendChild(buildFriendlyResult(title, payload || {}));
     }
 
+    // Turn any Snov.io API payload into a plain-English result card (no raw JSON).
+    function buildFriendlyResult(title, payload) {
+        const wrap = document.createElement("div");
+
+        const heading = (tone, text, sub) => {
+            const h = document.createElement("div");
+            h.className = "sr-head sr-" + tone;
+            const dot = document.createElement("span");
+            dot.className = "sr-dot";
+            dot.textContent = tone === "ok" ? "\u2713" : tone === "warn" ? "!" : tone === "error" ? "\u00d7" : "\u2139";
+            const t = document.createElement("div");
+            const strong = document.createElement("div");
+            strong.className = "sr-title";
+            strong.textContent = text;
+            t.appendChild(strong);
+            if (sub) {
+                const s = document.createElement("div");
+                s.className = "sr-sub";
+                s.textContent = sub;
+                t.appendChild(s);
+            }
+            h.appendChild(dot);
+            h.appendChild(t);
+            return h;
+        };
+        const stat = (label, value) => {
+            const row = document.createElement("div");
+            row.className = "sr-stat";
+            const l = document.createElement("span");
+            l.className = "sr-stat-l";
+            l.textContent = label;
+            const v = document.createElement("span");
+            v.className = "sr-stat-v";
+            v.textContent = value;
+            row.appendChild(l);
+            row.appendChild(v);
+            return row;
+        };
+        const note = (text) => {
+            const p = document.createElement("p");
+            p.className = "sr-note";
+            p.textContent = text;
+            return p;
+        };
+        const bullets = (items) => {
+            const ul = document.createElement("ul");
+            ul.className = "sr-list";
+            items.forEach((it) => {
+                const li = document.createElement("li");
+                li.textContent = it;
+                ul.appendChild(li);
+            });
+            return ul;
+        };
+
+        // 1) Plain error
+        if (payload.error && !payload.customFieldReadiness && payload.numTouches === undefined) {
+            wrap.appendChild(heading("error", "Couldn't complete this", payload.error));
+            if (payload.action) wrap.appendChild(note(payload.action));
+            return wrap;
+        }
+
+        // 2) Journey / campaign result (has numTouches or customFieldReadiness)
+        if (payload.numTouches !== undefined || payload.customFieldReadiness) {
+            const readiness = payload.customFieldReadiness || {};
+            if (readiness.missing && readiness.missing.length) {
+                wrap.appendChild(heading("warn", "One-time Snov.io setup needed",
+                    "To carry each lead's personalised emails into a drip campaign, Snov.io needs these custom fields created once."));
+                wrap.appendChild(note("In Snov.io: open Prospects \u2192 Custom fields, and add a field (type: Text) for each name below. Then come back and click \u201cCreate new campaign\u201d again."));
+                wrap.appendChild(bullets(readiness.missing));
+                return wrap;
+            }
+            if (payload.error) {
+                wrap.appendChild(heading("error", "Couldn't create the campaign", payload.error));
+                if (payload.action) wrap.appendChild(note(payload.action));
+                return wrap;
+            }
+            if (payload.dryRun) {
+                wrap.appendChild(heading("info", "Campaign preview",
+                    `${payload.numTouches} touches over ${payload.delayDays} day(s) between each.`));
+                if (payload.sync && payload.sync.summary) wrap.appendChild(renderSyncSummary(payload.sync, stat, note));
+                return wrap;
+            }
+            wrap.appendChild(heading("ok", "Campaign created as a draft",
+                "It's waiting in Snov.io for your review — nothing has been sent."));
+            if (payload.campaignTitle) wrap.appendChild(stat("Campaign", payload.campaignTitle));
+            wrap.appendChild(stat("Touches", String(payload.numTouches)));
+            if (payload.sync && payload.sync.summary) {
+                const s = payload.sync.summary;
+                wrap.appendChild(stat("Leads added", String((s.added || 0) + (s.updated || 0))));
+            }
+            const failed = (payload.stepContent || []).filter((c) => c.status === "failed").length;
+            if (failed) wrap.appendChild(note(`${failed} email step(s) couldn't be filled in automatically — you can edit them in Snov.io.`));
+            wrap.appendChild(note("Open Snov.io \u2192 Campaigns to review and launch when ready."));
+            return wrap;
+        }
+
+        // 3) Prospect sync / dry-run (has summary)
+        if (payload.summary) {
+            wrap.appendChild(renderSyncSummary(payload, stat, note, true));
+            return wrap;
+        }
+
+        // 4) Verification
+        if (Array.isArray(payload.results) && title.toLowerCase().includes("verif")) {
+            const total = payload.results.length;
+            const eligible = payload.results.filter((r) => r.eligible).length;
+            wrap.appendChild(heading(eligible ? "ok" : "warn", "Email check complete",
+                `${eligible} of ${total} look safe to send to.`));
+            wrap.appendChild(note("Safe-to-send emails will be included; risky ones are skipped automatically."));
+            return wrap;
+        }
+
+        // 5) Enrichment estimate
+        if (payload.estimate) {
+            const e = payload.estimate;
+            wrap.appendChild(heading("info", "Enrichment estimate",
+                `About ${e.estimatedCredits || 0} Snov.io credit(s) for ${e.leadCount || 0} lead(s).`));
+            return wrap;
+        }
+
+        // 6) Analytics
+        if (payload.total_contacted !== undefined || payload.emails_sent !== undefined) {
+            wrap.appendChild(heading("info", "Campaign analytics", ""));
+            if (payload.emails_sent !== undefined) wrap.appendChild(stat("Emails sent", String(payload.emails_sent)));
+            if (payload.delivered !== undefined) wrap.appendChild(stat("Delivered", String(payload.delivered)));
+            if (payload.email_opens !== undefined) wrap.appendChild(stat("Opened", String(payload.email_opens)));
+            if (payload.email_replies !== undefined) wrap.appendChild(stat("Replied", String(payload.email_replies)));
+            return wrap;
+        }
+
+        // 7) Balance / preflight or anything else — show a soft confirmation
+        if (payload.balance && payload.balance.data) {
+            wrap.appendChild(heading("ok", "Connected to Snov.io",
+                `Credit balance: ${payload.balance.data.balance}.`));
+            return wrap;
+        }
+
+        wrap.appendChild(heading("ok", title || "Done", "Action completed."));
+        return wrap;
+    }
+
+    function renderSyncSummary(payload, stat, note, withHeading) {
+        const frag = document.createDocumentFragment();
+        const s = payload.summary || {};
+        const added = s.added || 0;
+        const updated = s.updated || 0;
+        const skipped = s.skipped || 0;
+        const blocked = s.blocked || 0;
+        const failed = s.failed || 0;
+        const synced = added + updated;
+        if (withHeading) {
+            const h = document.createElement("div");
+            const tone = failed ? "warn" : synced ? "ok" : "warn";
+            h.className = "sr-head sr-" + tone;
+            const dot = document.createElement("span");
+            dot.className = "sr-dot";
+            dot.textContent = tone === "ok" ? "\u2713" : "!";
+            const t = document.createElement("div");
+            const strong = document.createElement("div");
+            strong.className = "sr-title";
+            strong.textContent = payload.dryRun
+                ? "Preview — nothing sent yet"
+                : synced ? "Leads synced to Snov.io" : "No new leads were synced";
+            const sub = document.createElement("div");
+            sub.className = "sr-sub";
+            sub.textContent = payload.dryRun
+                ? `${s.eligible || 0} of ${s.total || 0} lead(s) are ready to sync.`
+                : `${synced} lead(s) are now in your Snov.io list.`;
+            t.appendChild(strong);
+            t.appendChild(sub);
+            h.appendChild(dot);
+            h.appendChild(t);
+            frag.appendChild(h);
+        }
+        if (payload.listName) frag.appendChild(stat("List", payload.listName));
+        if (added) frag.appendChild(stat("Added", String(added)));
+        if (updated) frag.appendChild(stat("Updated", String(updated)));
+        if (skipped) frag.appendChild(stat("Skipped (already there)", String(skipped)));
+        if (blocked) frag.appendChild(stat("Skipped (risky/invalid email)", String(blocked)));
+        if (failed) frag.appendChild(stat("Failed", String(failed)));
+        if (failed) {
+            const reasons = [];
+            (payload.rows || []).forEach((r) => {
+                if (r && r.status === "failed") {
+                    const msg = (r.error || "Snov.io rejected this lead.").replace(/^Snov\.io request failed:\s*/i, "").trim();
+                    if (msg && !reasons.includes(msg)) reasons.push(msg);
+                }
+            });
+            if (reasons.length) {
+                const wrapEl = document.createElement("div");
+                wrapEl.className = "sr-note sr-warn";
+                const lead = document.createElement("div");
+                lead.textContent = reasons.length === 1 ? "Why it failed:" : "Why they failed:";
+                const ul = document.createElement("ul");
+                ul.className = "sr-list";
+                reasons.slice(0, 5).forEach((m) => { const li = document.createElement("li"); li.textContent = m; ul.appendChild(li); });
+                wrapEl.appendChild(lead);
+                wrapEl.appendChild(ul);
+                frag.appendChild(wrapEl);
+            }
+        }
+        if (!synced && !payload.dryRun && (blocked || skipped)) {
+            frag.appendChild(note("Tip: if emails were skipped as risky, turn off \u201cOnly sync verified emails\u201d under Advanced, or run Verify first."));
+        }
+        return frag;
+    }
     function renderSnovioOptions(options) {
         const lists = options.lists || [];
         const campaigns = options.campaigns || [];
-
         snovioListSelect.innerHTML = "";
-        if (!lists.length) {
-            snovioListSelect.appendChild(new Option("No lists found", ""));
-        } else {
-            lists.filter((item) => !item.isDeleted).forEach((item) => {
-                snovioListSelect.appendChild(new Option(`${item.name || "List"} (${item.contacts || 0})`, item.id));
-            });
-        }
-
+        if (!lists.length) snovioListSelect.appendChild(new Option("No lists found", ""));
+        else lists.filter((i) => !i.isDeleted).forEach((i) => snovioListSelect.appendChild(new Option(`${i.name || "List"} (${i.contacts || 0})`, i.id)));
         snovioCampaignSelect.innerHTML = "";
         snovioCampaignSelect.appendChild(new Option("No campaign", ""));
-        campaigns.forEach((item) => {
-            snovioCampaignSelect.appendChild(new Option(`${item.campaign || "Campaign"} - ${item.status || "Unknown"}`, item.id));
-        });
-
+        campaigns.forEach((i) => snovioCampaignSelect.appendChild(new Option(`${i.campaign || "Campaign"} - ${i.status || "Unknown"}`, i.id)));
         if (snovioSenderSelect) {
             snovioSenderSelect.innerHTML = "";
             const senders = options.senderAccounts || [];
-            if (!senders.length) {
-                snovioSenderSelect.appendChild(new Option("No sender accounts", ""));
-            } else {
-                senders.forEach((item) => {
-                    const label = `${item.email_from || item.sender_name || "Sender"}${item.valid === false ? " (invalid)" : ""}`;
-                    snovioSenderSelect.appendChild(new Option(label, item.id));
-                });
-            }
+            if (!senders.length) snovioSenderSelect.appendChild(new Option("No sender accounts", ""));
+            else senders.forEach((i) => snovioSenderSelect.appendChild(new Option(`${i.email_from || i.sender_name || "Sender"}${i.valid === false ? " (invalid)" : ""}`, i.id)));
         }
         applyCampaignListSelection();
     }
-
     const SNOVIO_SESSION_HEADER = "X-Snovio-Session";
-
     function snovioFetch(url, options) {
         const opts = options ? { ...options } : {};
         opts.headers = { ...(opts.headers || {}) };
         if (snovioSessionId) opts.headers[SNOVIO_SESSION_HEADER] = snovioSessionId;
         return fetch(url, opts);
     }
-
     async function loadSnovioOptions() {
         if (!snovioPanel) return;
         setSnovioBusy(true);
@@ -270,58 +864,49 @@
             renderSnovioOptions(options);
             setSnovioConnected(!!status.sessionActive);
             if (!status.configured) {
-                snovioStatus.textContent = status.sessionActive ? "Session error \u2014 reconnect" : "Not connected \u2014 enter your Snov.io API keys above.";
+                const msg = status.sessionActive ? "Session error \u2014 reconnect" : "Not connected \u2014 enter your Snov.io API keys above.";
+                snovioStatus.textContent = msg;
+                if (homeSnovText) homeSnovText.textContent = "Not connected yet — connect during the final step.";
+                setSidebarSnov("disconnected", "Snov.io — not connected");
                 return;
             }
             const source = status.credentialSource === "session" ? "your session" : "server config";
             const balance = preflight && preflight.balance && preflight.balance.data ? preflight.balance.data.balance : "ready";
             snovioStatus.textContent = `Ready \u00b7 ${source} \u00b7 balance ${balance}`;
+            if (homeSnovText) homeSnovText.textContent = `Connected via ${source}. Balance ${balance}.`;
+            setSidebarSnov("connected", "Snov.io — connected");
             if (preflight) renderSnovioReport("Preflight", preflight);
         } catch (err) {
             snovioStatus.textContent = "Unavailable";
+            if (homeSnovText) homeSnovText.textContent = "Snov.io status unavailable.";
+            setSidebarSnov("disconnected", "Snov.io — unavailable");
         } finally {
             setSnovioBusy(false);
         }
     }
-
     async function postJson(url, payload) {
-        const response = await snovioFetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
+        const response = await snovioFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Snov.io request failed.");
         return data;
     }
-
     function selectedCampaign() {
         const campaignId = snovioCampaignSelect.value;
         if (!campaignId || !snovioOptions) return null;
-        return (snovioOptions.campaigns || []).find((item) => String(item.id) === String(campaignId)) || null;
+        return (snovioOptions.campaigns || []).find((i) => String(i.id) === String(campaignId)) || null;
     }
-
     function campaignListId(campaign) {
         if (!campaign) return "";
         return String(campaign.list_id || campaign.listId || "").trim();
     }
-
     function applyCampaignListSelection() {
         const campaign = selectedCampaign();
         const inferredListId = campaignListId(campaign);
         if (!inferredListId) return;
-        const existingOption = Array.from(snovioListSelect.options).find((option) => String(option.value) === inferredListId);
-        if (!existingOption) {
-            snovioListSelect.appendChild(new Option(`Campaign list ${inferredListId}`, inferredListId));
-        }
+        const existing = Array.from(snovioListSelect.options).find((o) => String(o.value) === inferredListId);
+        if (!existing) snovioListSelect.appendChild(new Option(`Campaign list ${inferredListId}`, inferredListId));
         snovioListSelect.value = inferredListId;
     }
-
-    function selectedTemplateName() {
-        const selected = templateSelect.options[templateSelect.selectedIndex];
-        return selected ? selected.textContent.replace(/\s*\([^)]*emails?\)\s*$/i, "").trim() : "Generated Leads";
-    }
-
     function defaultSnovioListName() {
         const customName = snovioListName.value.trim();
         if (customName) return customName;
@@ -329,88 +914,56 @@
         const fileBase = selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : "";
         return ["Cloudware", selectedTemplateName(), fileBase, date].filter(Boolean).join(" - ");
     }
-
     async function runSnovioSync(dryRun) {
         if (!currentJobId) return;
         const campaign = selectedCampaign();
         const inferredListId = campaignListId(campaign);
-        const autoCreateList = snovioAutoCreateList.checked;
-        if (!snovioListSelect.value && !inferredListId && !autoCreateList) {
-            renderSnovioReport("Snov.io", { error: "Select a list, select a campaign with a list, or enable automatic list creation." });
+        // A typed "New list name" means the user wants a brand-new list created with that
+        // exact name. Honour that intent over the dropdown's auto-selected existing list,
+        // otherwise the selected list silently wins and the named list is never created.
+        const wantsNewList = !!snovioListName.value.trim();
+        const autoCreateList = wantsNewList ? true : snovioAutoCreateList.checked;
+        const listId = wantsNewList ? "" : (snovioListSelect.value || inferredListId);
+        if (!listId && !autoCreateList) {
+            renderSnovioReport("Snov.io", { error: "Select a list, type a new list name, or enable automatic list creation." });
             return;
         }
         setSnovioBusy(true);
         try {
-            const payload = {
-                dryRun,
-                listId: snovioListSelect.value || inferredListId,
-                campaignId: snovioCampaignSelect.value,
-                campaignStatus: campaign ? campaign.status : "",
-                autoCreateList,
-                createListIfMissing: autoCreateList,
-                listName: defaultSnovioListName(),
-                templateId: templateSelect.value,
-                templateName: selectedTemplateName(),
-                sourceFileName: selectedFile ? selectedFile.name : "",
-                confirmActiveCampaign: snovioConfirmActive.checked,
-                requireVerification: snovioRequireVerification.checked,
-                verificationResults: snovioVerificationResults,
-                includeGeneratedCustomFields: true,
-            };
+            const payload = { dryRun, listId, campaignId: snovioCampaignSelect.value, campaignStatus: campaign ? campaign.status : "", autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", confirmActiveCampaign: snovioConfirmActive.checked, requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
             const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
-            if (!dryRun && report.createdList) {
-                await loadSnovioOptions();
-                if (report.listId) snovioListSelect.value = report.listId;
-            }
+            if (!dryRun && report.createdList) { await loadSnovioOptions(); if (report.listId) snovioListSelect.value = report.listId; }
             renderSnovioReport(dryRun ? "Dry Run" : "Sync Report", report);
         } catch (err) {
             renderSnovioReport("Snov.io", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        } finally { setSnovioBusy(false); }
     }
-
     function selectedSenderIds() {
         if (!snovioSenderSelect) return [];
-        return Array.from(snovioSenderSelect.selectedOptions).map((option) => option.value).filter(Boolean);
+        return Array.from(snovioSenderSelect.selectedOptions).map((o) => o.value).filter(Boolean);
     }
-
     async function connectSnovio() {
         const clientId = snovioClientId.value.trim();
         const clientSecret = snovioClientSecret.value.trim();
-        if (!clientId || !clientSecret) {
-            renderSnovioReport("Snov.io", { error: "Client ID and Client Secret are required." });
-            return;
-        }
+        if (!clientId || !clientSecret) { renderSnovioReport("Snov.io", { error: "Client ID and Client Secret are required." }); return; }
         setSnovioBusy(true);
         try {
-            const response = await fetch("/api/snovio/session", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ clientId, clientSecret }),
-            });
+            const response = await fetch("/api/snovio/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, clientSecret }) });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error || "Unable to connect to Snov.io.");
             snovioSessionId = data.sessionId;
             sessionStorage.setItem("snovioSessionId", snovioSessionId);
-            snovioClientSecret.value = "";
-            snovioClientId.value = "";
+            snovioClientSecret.value = ""; snovioClientId.value = "";
             setSnovioConnected(true);
             await loadSnovioOptions();
-        } catch (err) {
-            renderSnovioReport("Snov.io", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        } catch (err) { renderSnovioReport("Snov.io", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     }
-
     async function disconnectSnovio() {
         setSnovioBusy(true);
-        try {
-            await snovioFetch("/api/snovio/session", { method: "DELETE" });
-        } catch (err) {
-            // ignore network errors when closing a session
-        } finally {
+        try { await snovioFetch("/api/snovio/session", { method: "DELETE" }); }
+        catch (err) { /* ignore */ }
+        finally {
             snovioSessionId = null;
             sessionStorage.removeItem("snovioSessionId");
             setSnovioConnected(false);
@@ -418,56 +971,66 @@
             await loadSnovioOptions();
         }
     }
-
     async function runSnovioJourney(dryRun) {
         if (!currentJobId) return;
         const campaign = selectedCampaign();
         const inferredListId = campaignListId(campaign);
-        const autoCreateList = snovioAutoCreateList.checked;
+        const wantsNewList = !!snovioListName.value.trim();
+        const autoCreateList = wantsNewList ? true : snovioAutoCreateList.checked;
+        const listId = wantsNewList ? "" : (snovioListSelect.value || inferredListId);
         const senderIds = selectedSenderIds();
-        if (!dryRun && !senderIds.length) {
-            renderSnovioReport("Journey", { error: "Select at least one sender account to create a campaign." });
-            return;
-        }
-        if (!snovioListSelect.value && !inferredListId && !autoCreateList) {
-            renderSnovioReport("Journey", { error: "Select a list, select a campaign with a list, or enable automatic list creation." });
-            return;
-        }
+        if (!dryRun && !senderIds.length) { renderSnovioReport("Campaign", { error: "Select at least one sender account to create a campaign." }); return; }
+        if (!listId && !autoCreateList) { renderSnovioReport("Campaign", { error: "Select a list, type a new list name, or enable automatic list creation." }); return; }
         setSnovioBusy(true);
         try {
-            const payload = {
-                dryRun,
-                listId: snovioListSelect.value || inferredListId,
-                autoCreateList,
-                createListIfMissing: autoCreateList,
-                listName: defaultSnovioListName(),
-                campaignTitle: snovioJourneyTitle.value.trim(),
-                senderAccountIds: senderIds,
-                delayDays: Number(snovioJourneyDelay.value) || 0,
-                trackOpens: snovioJourneyOpen.checked,
-                trackClicks: snovioJourneyClick.checked,
-                templateId: templateSelect.value,
-                templateName: selectedTemplateName(),
-                sourceFileName: selectedFile ? selectedFile.name : "",
-                requireVerification: snovioRequireVerification.checked,
-                verificationResults: snovioVerificationResults,
-                includeGeneratedCustomFields: true,
-            };
-            const response = await snovioFetch(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/journey`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
+            const payload = { dryRun, listId, autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), campaignTitle: snovioJourneyTitle.value.trim(), senderAccountIds: senderIds, delayDays: Number(snovioJourneyDelay.value) || 0, trackOpens: snovioJourneyOpen.checked, trackClicks: snovioJourneyClick.checked, templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
+            const response = await snovioFetch(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/journey`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
             const report = await response.json();
             if (!dryRun && response.ok) await loadSnovioOptions();
-            renderSnovioReport(dryRun ? "Journey Preview" : (response.ok ? "Journey Created" : "Journey"), report);
-        } catch (err) {
-            renderSnovioReport("Journey", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+            renderSnovioReport(dryRun ? "Campaign Preview" : (response.ok ? "Campaign Created" : "Campaign"), report);
+        } catch (err) { renderSnovioReport("Campaign", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     }
 
+    // ── Event bindings ──
+    // Navigation
+    navHome.addEventListener("click", () => { renderHome(); showView("home"); });
+    homeNewCampaign.addEventListener("click", () => showView("step1"));
+    step1Continue.addEventListener("click", () => {
+        const t = selectedTemplate();
+        step2CampaignName.textContent = selectedTemplateName();
+        step2CampaignCount.textContent = t ? `${t.num_emails} ${t.num_emails === 1 ? "email" : "emails"}` : "";
+        showView("step2");
+    });
+    step2Back.addEventListener("click", () => showView("step1"));
+    step3Back.addEventListener("click", () => showView("step2"));
+    step3Continue.addEventListener("click", () => { showView("step4"); loadSnovioOptions(); });
+    step4Back.addEventListener("click", () => showView("step3"));
+    newJobBtn.addEventListener("click", resetAll);
+    retryBtn.addEventListener("click", resetAll);
+
+    // Sidebar step rail clicks (allow going back to completed steps)
+    document.querySelectorAll("#step-rail .step-row").forEach((row) => {
+        row.addEventListener("click", () => {
+            const n = parseInt(row.getAttribute("data-step"), 10);
+            if (n === 1) showView("step1");
+            else if (n === 2 && selectedTemplate()) showView("step2");
+            else if (n === 3 && currentJobId && !reviewBlock.hidden) showView("step3");
+            else if (n === 4 && currentJobId && !reviewBlock.hidden) { showView("step4"); }
+        });
+    });
+
+    // Upload interactions
+    dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", (e) => { e.preventDefault(); dropZone.classList.remove("dragover"); if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]); });
+    dropZone.addEventListener("click", (e) => { if (e.target.closest("label") || e.target === fileInput || e.target.closest(".btn-clear")) return; if (!selectedFile) fileInput.click(); });
+    fileInput.addEventListener("change", () => { if (fileInput.files.length) selectFile(fileInput.files[0]); });
+    clearFileBtn.addEventListener("click", clearFile);
+    uploadBtn.addEventListener("click", doUpload);
+    downloadBtn.addEventListener("click", doDownload);
+
+    // Snov.io bindings
     snovioRefreshBtn.addEventListener("click", loadSnovioOptions);
     snovioCampaignSelect.addEventListener("change", applyCampaignListSelection);
     if (snovioConnectBtn) snovioConnectBtn.addEventListener("click", connectSnovio);
@@ -478,37 +1041,23 @@
         if (!currentJobId) return;
         setSnovioBusy(true);
         try {
-            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/verify`, {
-                dryRun: false,
-                poll: true,
-            });
+            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/verify`, { dryRun: false, poll: true });
             snovioVerificationResults = report.results || [];
             renderSnovioReport("Verification", report);
-        } catch (err) {
-            renderSnovioReport("Verification", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        } catch (err) { renderSnovioReport("Verification", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     });
     snovioDryRunBtn.addEventListener("click", () => runSnovioSync(true));
     snovioSyncBtn.addEventListener("click", () => runSnovioSync(false));
     snovioEnrichBtn.addEventListener("click", async () => {
         if (!currentJobId) return;
         setSnovioBusy(true);
-        try {
-            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/enrich`, { dryRun: true });
-            renderSnovioReport("Enrichment", report);
-        } catch (err) {
-            renderSnovioReport("Enrichment", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        try { renderSnovioReport("Enrichment", await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/enrich`, { dryRun: true })); }
+        catch (err) { renderSnovioReport("Enrichment", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     });
     snovioAnalyticsBtn.addEventListener("click", async () => {
-        if (!snovioCampaignSelect.value) {
-            renderSnovioReport("Analytics", { error: "Select a campaign first." });
-            return;
-        }
+        if (!snovioCampaignSelect.value) { renderSnovioReport("Analytics", { error: "Select a campaign first." }); return; }
         setSnovioBusy(true);
         try {
             const params = new URLSearchParams({ campaignId: snovioCampaignSelect.value });
@@ -518,314 +1067,27 @@
             const data = await response.json();
             if (!response.ok) throw new Error(data.error || "Analytics unavailable.");
             renderSnovioReport("Analytics", data);
-        } catch (err) {
-            renderSnovioReport("Analytics", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        } catch (err) { renderSnovioReport("Analytics", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     });
     snovioSuppressBtn.addEventListener("click", async () => {
-        const items = snovioSuppressionItems.value.split(",").map((item) => item.trim()).filter(Boolean);
-        if (!snovioSuppressionListId.value || !items.length) {
-            renderSnovioReport("Suppression", { error: "List ID and at least one item are required." });
-            return;
-        }
+        const items = snovioSuppressionItems.value.split(",").map((i) => i.trim()).filter(Boolean);
+        if (!snovioSuppressionListId.value || !items.length) { renderSnovioReport("Suppression", { error: "List ID and at least one item are required." }); return; }
         setSnovioBusy(true);
-        try {
-            const report = await postJson("/api/snovio/suppressions", {
-                listId: snovioSuppressionListId.value,
-                items,
-            });
-            renderSnovioReport("Suppression", report);
-        } catch (err) {
-            renderSnovioReport("Suppression", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        try { renderSnovioReport("Suppression", await postJson("/api/snovio/suppressions", { listId: snovioSuppressionListId.value, items })); }
+        catch (err) { renderSnovioReport("Suppression", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     });
     snovioRecipientStatusBtn.addEventListener("click", async () => {
-        if (!snovioCampaignSelect.value || !snovioRecipientEmail.value) {
-            renderSnovioReport("Recipient", { error: "Campaign and recipient email are required." });
-            return;
-        }
+        if (!snovioCampaignSelect.value || !snovioRecipientEmail.value) { renderSnovioReport("Recipient", { error: "Campaign and recipient email are required." }); return; }
         setSnovioBusy(true);
-        try {
-            const report = await postJson("/api/snovio/recipient-status", {
-                campaignId: snovioCampaignSelect.value,
-                email: snovioRecipientEmail.value,
-                status: snovioRecipientStatus.value,
-            });
-            renderSnovioReport("Recipient", report);
-        } catch (err) {
-            renderSnovioReport("Recipient", { error: err.message });
-        } finally {
-            setSnovioBusy(false);
-        }
+        try { renderSnovioReport("Recipient", await postJson("/api/snovio/recipient-status", { campaignId: snovioCampaignSelect.value, email: snovioRecipientEmail.value, status: snovioRecipientStatus.value })); }
+        catch (err) { renderSnovioReport("Recipient", { error: err.message }); }
+        finally { setSnovioBusy(false); }
     });
 
-    // ── File Selection ──
-    function selectFile(file) {
-        if (!file) return;
-        const name = file.name.toLowerCase();
-        if (!name.endsWith(".csv") && !name.endsWith(".xlsx")) {
-            showUploadError("Please select a .csv or .xlsx file.");
-            return;
-        }
-        selectedFile = file;
-        fileName.textContent = `${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
-        fileInfo.hidden = false;
-        uploadBtn.disabled = false;
-        hideUploadError();
-    }
-
-    function clearFile() {
-        selectedFile = null;
-        fileInput.value = "";
-        fileInfo.hidden = true;
-        uploadBtn.disabled = true;
-    }
-
-    function showUploadError(msg) {
-        uploadError.textContent = msg;
-        uploadError.hidden = false;
-    }
-
-    function hideUploadError() {
-        uploadError.hidden = true;
-    }
-
-    // ── Drag & Drop ──
-    dropZone.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        dropZone.classList.add("dragover");
-    });
-    dropZone.addEventListener("dragleave", () => {
-        dropZone.classList.remove("dragover");
-    });
-    dropZone.addEventListener("drop", (e) => {
-        e.preventDefault();
-        dropZone.classList.remove("dragover");
-        if (e.dataTransfer.files.length) selectFile(e.dataTransfer.files[0]);
-    });
-    dropZone.addEventListener("click", (e) => {
-        // Don't trigger if click came from the label or file input (they handle it natively)
-        if (e.target.closest("label") || e.target === fileInput) return;
-        fileInput.click();
-    });
-
-    fileInput.addEventListener("change", () => {
-        if (fileInput.files.length) selectFile(fileInput.files[0]);
-    });
-
-    clearFileBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        clearFile();
-    });
-
-    // ── Upload ──
-    uploadBtn.addEventListener("click", async () => {
-        if (!selectedFile) return;
-
-        uploadBtn.disabled = true;
-        uploadBtn.classList.add("loading");
-        hideUploadError();
-
-        const formData = new FormData();
-        formData.append("file", selectedFile);
-        formData.append("prompt_id", templateSelect.value);
-
-        try {
-            const resp = await fetch("/api/upload", {
-                method: "POST",
-                body: formData,
-            });
-
-            const data = await resp.json();
-
-            if (!resp.ok) {
-                showUploadError(data.error || "Upload failed.");
-                uploadBtn.disabled = false;
-                uploadBtn.classList.remove("loading");
-                return;
-            }
-
-            currentJobId = data.jobId;
-            totalLeads = data.totalLeads || 0;
-
-            // Switch to progress view
-            showSection(progressSection);
-            jobIdDisplay.textContent = currentJobId;
-            totalLeadsDisp.textContent = totalLeads;
-            const templateName = data.templateName || "Cold Email Sequences";
-            progressStatus.textContent = `Starting ${templateName}...`;
-            startTime = Date.now();
-            startTimeDisp.textContent = new Date(startTime).toLocaleTimeString();
-            progressFill.style.width = "0%";
-            progressPercent.textContent = "0%";
-            progressStatus.textContent = "Starting orchestration...";
-
-            startElapsedTimer();
-            startPolling();
-
-        } catch (err) {
-            showUploadError("Network error. Please check your connection.");
-            uploadBtn.disabled = false;
-            uploadBtn.classList.remove("loading");
-        }
-    });
-
-    // ── Elapsed Timer ──
-    function startElapsedTimer() {
-        elapsedTimer = setInterval(() => {
-            if (startTime) {
-                elapsedDisp.textContent = formatElapsed(Date.now() - startTime);
-            }
-        }, 1000);
-    }
-
-    function stopElapsedTimer() {
-        if (elapsedTimer) clearInterval(elapsedTimer);
-        elapsedTimer = null;
-    }
-
-    // ── Polling ──
-    function startPolling() {
-        pollTimer = setInterval(pollStatus, 5000);
-        // Also poll immediately
-        pollStatus();
-    }
-
-    function stopPolling() {
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = null;
-    }
-
-    async function pollStatus() {
-        if (!currentJobId) return;
-
-        try {
-            const resp = await fetch(`/api/status/${encodeURIComponent(currentJobId)}`);
-            const data = await resp.json();
-
-            if (!resp.ok) {
-                progressStatus.textContent = "Checking status...";
-                return;
-            }
-
-            const status = data.status;
-
-            if (status === "Running" || status === "Pending") {
-                const processed = data.processedLeads || 0;
-                const total = data.totalLeads || totalLeads || 1;
-                const phase = data.phase || "processing";
-
-                if (phase === "assembling") {
-                    progressFill.classList.remove("pulse");
-                    progressStatus.textContent = "Assembling output CSV...";
-                } else if (processed > 0) {
-                    progressFill.classList.remove("pulse");
-                    progressStatus.textContent = `Processed ${processed} of ${total} leads...`;
-                } else {
-                    // No progress yet — show pulse animation
-                    progressFill.classList.add("pulse");
-                    progressStatus.textContent = "Preparing leads...";
-                }
-
-                // Use real progress from orchestrator; cap at 98% during assembly
-                const pct = processed > 0
-                    ? Math.min(phase === "assembling" ? 98 : 95, Math.floor((processed / total) * 100))
-                    : 0;
-                progressFill.style.width = pct + "%";
-                progressPercent.textContent = pct + "%";
-            } else if (status === "Completed") {
-                stopPolling();
-                stopElapsedTimer();
-
-                progressFill.classList.remove("pulse");
-                progressFill.style.width = "100%";
-                progressPercent.textContent = "100%";
-                progressStatus.textContent = "Complete!";
-
-                // Capture final elapsed time before switching sections
-                const finalElapsed = startTime ? formatElapsed(Date.now() - startTime) : "—";
-
-                // Move to download view after a brief pause
-                setTimeout(() => {
-                    const leadCount = data.totalLeads || totalLeads;
-                    completedLeads.textContent = leadCount;
-                    summaryLeads.textContent = leadCount;
-                    summaryElapsed.textContent = finalElapsed;
-                    summaryJobId.textContent = currentJobId;
-                    showSection(downloadSection);
-                    loadSnovioOptions();
-                }, 800);
-            } else if (status === "Failed") {
-                stopPolling();
-                stopElapsedTimer();
-                showError(data.error || "The job failed. Please try again.");
-            } else {
-                progressStatus.textContent = `Status: ${status}`;
-            }
-
-        } catch (err) {
-            // Network hiccup — keep polling
-            progressStatus.textContent = "Connection issue, retrying...";
-        }
-    }
-
-    // ── Download ──
-    downloadBtn.addEventListener("click", async () => {
-        if (!currentJobId) return;
-        downloadBtn.disabled = true;
-        downloadBtn.textContent = "Downloading...";
-
-        try {
-            const resp = await fetch(`/api/download/${encodeURIComponent(currentJobId)}`);
-
-            if (!resp.ok) {
-                const data = await resp.json();
-                showError(data.error || "Download failed.");
-                return;
-            }
-
-            const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `emails_${currentJobId.substring(0, 8)}.csv`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-
-        } catch (err) {
-            showError("Download failed. Please try again.");
-        } finally {
-            downloadBtn.disabled = false;
-            downloadBtn.textContent = "Download Enriched CSV";
-        }
-    });
-
-    // ── New Job / Retry ──
-    function resetUI() {
-        stopPolling();
-        stopElapsedTimer();
-        currentJobId = null;
-        totalLeads = 0;
-        startTime = null;
-        snovioVerificationResults = [];
-        snovioReport.hidden = true;
-        clearFile();
-        uploadBtn.classList.remove("loading");
-        showSection(uploadSection);
-    }
-
-    newJobBtn.addEventListener("click", resetUI);
-    retryBtn.addEventListener("click", resetUI);
-
-    // ── Error Display ──
-    function showError(msg) {
-        errorMessage.textContent = msg;
-        showSection(errorSection);
-    }
+    // ── Init ──
+    loadTemplates();
+    renderHome();
+    showView("home");
 })();

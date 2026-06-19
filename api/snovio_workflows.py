@@ -11,6 +11,11 @@ import pandas as pd
 
 EMAIL_RE = re.compile(r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 
+# Snov.io rejects the whole prospect if companySite isn't a clean domain, so any
+# value that isn't a valid hostname (e.g. a company name, "N/A", text with spaces)
+# must be normalized to a bare domain or dropped entirely.
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.[A-Za-z0-9-]{1,63})*\.[A-Za-z]{2,}$")
+
 EMAIL_HEADERS = ["email", "email address", "work email", "business email", "mail"]
 FIRST_NAME_HEADERS = ["first name", "firstname", "given name", "prenom"]
 LAST_NAME_HEADERS = ["last name", "lastname", "surname", "family name", "nom"]
@@ -82,6 +87,25 @@ def row_value(row: pd.Series, column_name: str | None) -> str:
     return clean_value(row[column_name])
 
 
+def normalize_domain(value: Any) -> str:
+    """Reduce a raw cell value to a bare, valid domain or return "" if it isn't one.
+
+    Strips protocol, ``www.``, any path/query, and surrounding whitespace, then
+    validates the result. Snov.io rejects prospects whose companySite is not a clean
+    domain, so anything that fails validation is dropped (companySite is optional).
+    """
+    text = clean_value(value).lower()
+    if not text:
+        return ""
+    text = re.sub(r"^[a-z]+://", "", text)  # strip scheme
+    text = text.split("/", 1)[0]            # drop path/query
+    text = text.split("@")[-1]              # in case an email slipped in
+    text = text.strip().strip(".")
+    if text.startswith("www."):
+        text = text[4:]
+    return text if DOMAIN_RE.match(text) else ""
+
+
 def extract_email(row: pd.Series, columns: dict[str, str | None]) -> str:
     direct = row_value(row, columns.get("email"))
     if direct and EMAIL_RE.fullmatch(direct):
@@ -94,13 +118,12 @@ def extract_email(row: pd.Series, columns: dict[str, str | None]) -> str:
 
 
 def extract_domain(row: pd.Series, columns: dict[str, str | None]) -> str:
-    domain = row_value(row, columns.get("domain"))
-    domain = re.sub(r"^https?://", "", domain, flags=re.IGNORECASE).strip("/")
+    domain = normalize_domain(row_value(row, columns.get("domain")))
     if domain:
         return domain
     email = extract_email(row, columns)
     if "@" in email:
-        return email.split("@", 1)[1]
+        return normalize_domain(email.split("@", 1)[1])
     return ""
 
 

@@ -584,25 +584,60 @@ def process_lead_activity(leadInput: dict) -> dict:
 
         user_prompt_builder = template["build_user_prompt"]
         user_prompt = user_prompt_builder(lead_data)
-
-        completion = client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT,
-            messages=[
-                {"role": "system", "content": template["system_prompt"]},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_completion_tokens=8192,
-        )
-
-        response_text = completion.choices[0].message.content or ""
-
-        # Parse using template's parser
         parse_response = template["parse_response"]
-        parsed = parse_response(response_text)
 
-        logger.info("Successfully generated content for lead %d [template=%s]", row_index, template["id"])
+        # gpt-5.x "mini" deployments are reasoning models: hidden reasoning tokens
+        # count against max_completion_tokens, so a low cap can truncate output and
+        # yield too few emails ("Expected N emails, got M"). Use a generous budget and
+        # retry a few times, since occasional non-compliance is expected from the model.
+        messages = [
+            {"role": "system", "content": template["system_prompt"]},
+            {"role": "user", "content": user_prompt},
+        ]
+        max_attempts = 3
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            attempt_messages = list(messages)
+            if attempt > 1 and last_error is not None:
+                # Nudge the model to fix the exact problem from the previous attempt.
+                attempt_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Your previous response was not valid: {str(last_error)[:300]}. "
+                        "Return ONLY a JSON array containing exactly the required number of "
+                        "email objects, each with a \"subject\" and \"body\" key. "
+                        "No prose, no markdown fences."
+                    ),
+                })
 
-        return {"row_index": row_index, "parsed": parsed}
+            completion = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                messages=attempt_messages,
+                max_completion_tokens=32768,
+            )
+            choice = completion.choices[0]
+            response_text = choice.message.content or ""
+            finish_reason = getattr(choice, "finish_reason", None)
+
+            if finish_reason == "length" and not response_text.strip():
+                last_error = ValueError("Model output was truncated before any content was returned.")
+                logger.warning("Lead %d attempt %d truncated (finish_reason=length)", row_index, attempt)
+                continue
+
+            try:
+                parsed = parse_response(response_text)
+                if attempt > 1:
+                    logger.info("Lead %d recovered on attempt %d", row_index, attempt)
+                logger.info("Successfully generated content for lead %d [template=%s]", row_index, template["id"])
+                return {"row_index": row_index, "parsed": parsed}
+            except (ValueError, json.JSONDecodeError) as parse_error:
+                last_error = parse_error
+                logger.warning("Lead %d attempt %d parse failed: %s", row_index, attempt, str(parse_error))
+
+        # All attempts exhausted.
+        message = str(last_error) if last_error else "Generation failed after multiple attempts."
+        logger.error("Lead %d failed after %d attempts: %s", row_index, max_attempts, message)
+        return {"row_index": row_index, "error": message}
 
     except json.JSONDecodeError as e:
         logger.error("JSON parse error for lead %d: %s", row_index, str(e))
@@ -897,8 +932,11 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
     list_id = str(payload.get("listId") or payload.get("list_id") or "").strip()
     campaign_id = str(payload.get("campaignId") or payload.get("campaign_id") or "").strip()
     dry_run = _parse_bool(payload.get("dryRun"), default=True)
-    auto_create_list = _parse_bool(payload.get("createListIfMissing", payload.get("autoCreateList")), default=False)
-    require_verification = _parse_bool(payload.get("requireVerification"), default=True)
+    auto_create_list = _parse_bool(payload.get("createListIfMissing", payload.get("autoCreateList")), default=True)
+    # Verification is opt-in. Requiring it by default silently blocked every lead
+    # (status "verification_required") whenever the user hadn't run the separate,
+    # credit-costing Verify step first — which read as "sync does nothing / keeps failing".
+    require_verification = _parse_bool(payload.get("requireVerification"), default=False)
     confirm_active_campaign = _parse_bool(payload.get("confirmActiveCampaign"), default=False)
     allow_unknown = _parse_bool(payload.get("allowUnknown"), SNOVIO_ALLOW_UNKNOWN_VERIFICATION)
     suppressed_emails = {str(item).strip().lower() for item in payload.get("suppressedEmails", [])}
@@ -986,12 +1024,39 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
                     row_report.update({"eligible": False, "blockedReason": "duplicate_in_target_list", "status": "skipped"})
                 else:
                     prospect_payload = build_prospect_payload(dataframe.iloc[row_index], columns, list_id, custom_fields)
-                    response = client.add_prospect_to_list(list_id, prospect_payload)
+                    try:
+                        response = client.add_prospect_to_list(list_id, prospect_payload)
+                    except SnovioAPIError as add_error:
+                        # Snov.io rejects the whole prospect if companySite isn't a domain
+                        # it accepts (e.g. webmail/unverifiable domains). companySite is
+                        # optional, so drop it and retry rather than losing the lead.
+                        if "companysite" in str(add_error).lower() and prospect_payload.get("companySite"):
+                            retry_payload = {k: v for k, v in prospect_payload.items() if k != "companySite"}
+                            logger.warning("Retrying %s without companySite (was %r)", email, prospect_payload.get("companySite"))
+                            response = client.add_prospect_to_list(list_id, retry_payload)
+                        else:
+                            raise
                     row_report["response"] = response
                     row_report["snovioProspectId"] = response.get("id")
-                    row_report["status"] = "updated" if response.get("updated") else "added" if response.get("added") else "failed"
+                    if response.get("updated"):
+                        row_report["status"] = "updated"
+                    elif response.get("added") or response.get("success") or response.get("id"):
+                        # Snov.io's add-prospect-to-list returns {"success": true} (and
+                        # sometimes an id) on success without "added"/"updated" keys, so a
+                        # genuine success must not be misread as a failure.
+                        row_report["status"] = "added"
+                    else:
+                        message = (
+                            response.get("message")
+                            or response.get("error")
+                            or "Snov.io did not confirm the prospect was added."
+                        )
+                        row_report.update({"status": "failed", "error": str(message)})
+                        logger.warning("Snov.io add-prospect not confirmed for %s: %s", email, response)
             except Exception as error:
                 row_report.update({"status": "failed", "error": str(error)})
+                logger.warning("Snov.io add-prospect failed for %s: %s", email, error)
+
 
     report = {
         "jobId": job_id,
