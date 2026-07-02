@@ -148,7 +148,12 @@ def _request_json(req: func.HttpRequest) -> dict:
 
 def _query_params(req: func.HttpRequest) -> dict:
     params = getattr(req, "params", {}) or {}
-    return params if isinstance(params, dict) else {}
+    # req.params is a read-only Mapping (not a dict) on Azure Functions, so an
+    # isinstance(dict) check silently drops every query parameter in production.
+    try:
+        return dict(params)
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
