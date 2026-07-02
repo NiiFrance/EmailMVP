@@ -24,6 +24,14 @@
       "statusCode": 404
     },
     {
+      "route": "/login.html",
+      "allowedRoles": ["anonymous", "authenticated"]
+    },
+    {
+      "route": "/assets/*",
+      "allowedRoles": ["anonymous", "authenticated"]
+    },
+    {
       "route": "/api/*",
       "allowedRoles": ["authenticated"]
     },
@@ -34,7 +42,7 @@
   ],
   "responseOverrides": {
     "401": {
-      "redirect": "/.auth/login/aad?post_login_redirect_uri=.referrer",
+      "redirect": "/login.html",
       "statusCode": 302
     },
     "404": {

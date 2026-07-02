@@ -1283,7 +1283,7 @@
         try {
             const resp = await fetch("/api/me");
             if (resp.status === 401) {
-                window.location.href = "/.auth/login/aad?post_login_redirect_uri=" + encodeURIComponent(location.pathname);
+                window.location.href = "/login.html";
                 return;
             }
             if (!resp.ok) return;

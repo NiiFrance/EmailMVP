@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Campaign Generator — Cloudware</title>
+    <link rel="stylesheet" href="/assets/fonts.css">
+    <style>
+        :root {
+            --ink: #141414;
+            --ink-2: #1D1D1D;
+            --red: #E0301E;
+            --red-deep: #C22415;
+            --paper: #F7F5F1;
+            --muted: rgba(255, 255, 255, 0.62);
+            --muted-2: rgba(255, 255, 255, 0.4);
+            --line: rgba(255, 255, 255, 0.12);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; }
+        body {
+            font-family: "DIN 2014", "Segoe UI", -apple-system, sans-serif;
+            background: var(--ink);
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+        }
+        .bg-glow {
+            position: fixed; inset: 0; pointer-events: none;
+            background:
+                radial-gradient(700px 420px at 82% 8%, rgba(224, 48, 30, 0.16), transparent 60%),
+                radial-gradient(560px 380px at 8% 92%, rgba(224, 48, 30, 0.08), transparent 60%);
+        }
+        .wrap {
+            position: relative;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 48px 24px;
+        }
+        .card {
+            width: 100%;
+            max-width: 520px;
+            text-align: center;
+        }
+        .logo { height: 44px; margin-bottom: 34px; }
+        .eyebrow {
+            font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
+            text-transform: uppercase; color: var(--red);
+            margin-bottom: 14px;
+        }
+        h1 {
+            font-size: 40px; line-height: 1.12; font-weight: 700;
+            letter-spacing: -0.01em; margin-bottom: 16px;
+        }
+        .sub {
+            font-size: 16px; line-height: 1.6; color: var(--muted);
+            max-width: 430px; margin: 0 auto 36px;
+        }
+        .signin-btn {
+            display: inline-flex; align-items: center; gap: 12px;
+            background: var(--red); color: #fff; border: none; cursor: pointer;
+            font: inherit; font-size: 15.5px; font-weight: 700;
+            padding: 15px 30px; border-radius: 12px; text-decoration: none;
+            transition: background .15s, transform .15s;
+        }
+        .signin-btn:hover { background: var(--red-deep); transform: translateY(-1px); }
+        .ms-mark { width: 18px; height: 18px; flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+        .ms-mark span { display: block; padding-top: 100%; }
+        .ms-mark span:nth-child(1) { background: #F25022; }
+        .ms-mark span:nth-child(2) { background: #7FBA00; }
+        .ms-mark span:nth-child(3) { background: #00A4EF; }
+        .ms-mark span:nth-child(4) { background: #FFB900; }
+        .hint { margin-top: 18px; font-size: 13px; color: var(--muted-2); }
+        .features {
+            margin-top: 52px; display: grid; grid-template-columns: repeat(3, 1fr);
+            gap: 12px; text-align: left;
+        }
+        .feature {
+            background: var(--ink-2); border: 1px solid var(--line);
+            border-radius: 14px; padding: 18px 16px;
+        }
+        .feature .f-num {
+            width: 26px; height: 26px; border-radius: 8px; background: rgba(224, 48, 30, 0.18);
+            color: var(--red); font-size: 13px; font-weight: 700;
+            display: flex; align-items: center; justify-content: center; margin-bottom: 12px;
+        }
+        .feature .f-title { font-size: 13.5px; font-weight: 700; margin-bottom: 5px; }
+        .feature .f-text { font-size: 12px; line-height: 1.5; color: var(--muted-2); }
+        footer {
+            position: relative; text-align: center; padding: 22px;
+            font-size: 12px; color: var(--muted-2); border-top: 1px solid var(--line);
+        }
+        @media (max-width: 620px) {
+            h1 { font-size: 30px; }
+            .features { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-glow"></div>
+    <div class="wrap">
+        <div class="card">
+            <img src="/assets/cloudware-logo.png" alt="Cloudware" class="logo">
+            <div class="eyebrow">Email Campaign Generator</div>
+            <h1>Personalised campaigns,<br>from lead list to launch.</h1>
+            <p class="sub">Turn a spreadsheet of leads into polished, multi-touch email campaigns — AI-drafted, reviewed by you, and pushed straight to Snov.io.</p>
+            <a class="signin-btn" href="/.auth/login/aad?post_login_redirect_uri=%2F">
+                <span class="ms-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+                Sign in with Microsoft
+            </a>
+            <div class="hint">Use your Cloudware work account. Your campaigns and Snov.io connection stay private to you.</div>
+            <div class="features">
+                <div class="feature">
+                    <div class="f-num">1</div>
+                    <div class="f-title">Pick a campaign</div>
+                    <div class="f-text">Renewals, migrations, upsell and cold-outreach motions — managed by your admins.</div>
+                </div>
+                <div class="feature">
+                    <div class="f-num">2</div>
+                    <div class="f-title">Upload &amp; generate</div>
+                    <div class="f-text">Drop a CSV or Excel file. Columns are detected automatically; every email is drafted per lead.</div>
+                </div>
+                <div class="feature">
+                    <div class="f-num">3</div>
+                    <div class="f-title">Review &amp; sync</div>
+                    <div class="f-text">Edit any touch, then push the campaign to Snov.io as a draft — nothing sends without you.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <footer>&copy; Cloudware Limited · Signing in requires a work account approved by your administrator.</footer>
+    <script>
+        // Already signed in? Go straight to the app.
+        fetch("/.auth/me").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+            if (d && d.clientPrincipal) window.location.replace("/");
+        }).catch(function () { /* stay on the landing page */ });
+    </script>
+</body>
+</html>
