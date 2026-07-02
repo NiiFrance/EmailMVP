@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import uuid
+import base64
 import hashlib
 import hmac
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,8 @@ from prompt_templates import (
     PROMPT_REGISTRY,
     get_template,
     list_templates,
+    invalidate_campaign_cache,
+    FIELDS_FIRST_NAME_ONLY,
 )
 from csv_processor import (
     parse_csv,
@@ -39,6 +42,7 @@ from csv_processor import (
 )
 from column_mapper import resolve_columns, detect_columns, _friendly_field
 from snovio_client import SnovioAPIError, SnovioClient, SnovioConfigError
+import data_store
 from snovio_workflows import (
     assess_custom_field_readiness,
     build_job_rows,
@@ -89,6 +93,7 @@ SNOVIO_DEFAULT_DELAY_DAYS = int(os.environ.get("SNOVIO_DEFAULT_DELAY_DAYS", "3")
 SNOVIO_CAMPAIGN_TIMEZONE = os.environ.get("SNOVIO_CAMPAIGN_TIMEZONE", "")
 SNOVIO_CAMPAIGN_ARCHIVE_MONTHS = int(os.environ.get("SNOVIO_CAMPAIGN_ARCHIVE_MONTHS", "3"))
 MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 
 logger = logging.getLogger("emailmvp")
 
@@ -144,6 +149,97 @@ def _request_json(req: func.HttpRequest) -> dict:
 def _query_params(req: func.HttpRequest) -> dict:
     params = getattr(req, "params", {}) or {}
     return params if isinstance(params, dict) else {}
+
+
+# ---------------------------------------------------------------------------
+# Helper — User identity (SWA Entra ID principal)
+# ---------------------------------------------------------------------------
+def _client_principal(req: func.HttpRequest) -> dict | None:
+    """Parse the x-ms-client-principal header injected by Static Web Apps.
+
+    Trustworthy because the function host only accepts traffic from the linked
+    SWA (direct calls are rejected with 401 upstream).
+    """
+    headers = getattr(req, "headers", {}) or {}
+    header = headers.get("x-ms-client-principal", "")
+    if not header:
+        return None
+    try:
+        data = json.loads(base64.b64decode(header).decode("utf-8"))
+    except Exception:
+        return None
+    if "authenticated" not in (data.get("userRoles") or []):
+        return None
+    oid = str(data.get("userId") or "").strip()
+    email = str(data.get("userDetails") or "").strip()
+    if not oid:
+        return None
+    name = email
+    for claim in data.get("claims") or []:
+        if claim.get("typ") in ("name", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name"):
+            name = str(claim.get("val") or name)
+            break
+    return {"oid": oid, "email": email, "name": name}
+
+
+def _current_user(req: func.HttpRequest) -> dict | None:
+    """Return {oid, email, name, role} for the caller, or None when anonymous.
+
+    Role resolution: ADMIN_EMAILS is a permanent floor (bootstrap admins);
+    otherwise the Users table value wins, defaulting to "user".
+    """
+    principal = _client_principal(req)
+    if not principal:
+        return None
+    role = "admin" if principal["email"].lower() in ADMIN_EMAILS else "user"
+    if role != "admin":
+        try:
+            row = data_store.get_user(principal["oid"])
+            if row and str(row.get("role", "")) == "admin":
+                role = "admin"
+        except Exception as error:
+            logger.warning("User role lookup failed: %s", error)
+    principal["role"] = role
+    return principal
+
+
+def _require_user(req: func.HttpRequest):
+    """Return (user, None) or (None, 401 response)."""
+    user = _current_user(req)
+    if not user:
+        return None, _json_response({"error": "Authentication required."}, 401)
+    return user, None
+
+
+def _require_admin(req: func.HttpRequest):
+    """Return (user, None) or (None, 401/403 response)."""
+    user, err = _require_user(req)
+    if err:
+        return None, err
+    if user["role"] != "admin":
+        return None, _json_response({"error": "Admin role required."}, 403)
+    return user, None
+
+
+def _require_job_owner(req: func.HttpRequest, job_id: str):
+    """Return (user-with-job, None) or (None, error response).
+
+    A job belongs to the caller when a Jobs row exists under their oid — point
+    lookup, no cross-user scan. Unknown/foreign jobs read as 404 (not 403) to
+    avoid leaking other users' job ids.
+    """
+    user, err = _require_user(req)
+    if err:
+        return None, err
+    try:
+        job = data_store.get_job(user["oid"], job_id)
+    except Exception as error:
+        logger.warning("Job ownership lookup failed for %s: %s", job_id, error)
+        return None, _json_response({"error": "Job lookup failed."}, 500)
+    if not job:
+        return None, _json_response({"error": "Job not found."}, 404)
+    user["job"] = job
+    return user, None
 
 
 def _parse_bool(value, default: bool = False) -> bool:
@@ -304,7 +400,7 @@ def _session_id_from_request(req: func.HttpRequest | None) -> str:
 
 
 def _resolve_snovio_credentials(req: func.HttpRequest | None) -> tuple[str, str, str]:
-    """Resolve Snov.io credentials for a request: session override first, else env."""
+    """Resolve Snov.io credentials: session header, then account-saved, then env."""
     session_id = _session_id_from_request(req)
     if session_id:
         record = _load_snovio_session(session_id)
@@ -319,6 +415,25 @@ def _resolve_snovio_credentials(req: func.HttpRequest | None) -> tuple[str, str,
                 client_secret = ""
             if client_id and client_secret:
                 return client_id, client_secret, "session"
+    # Account-saved credentials: entered once, remembered per signed-in user.
+    principal = _client_principal(req) if req is not None else None
+    if principal:
+        try:
+            row = data_store.get_snovio_creds(principal["oid"])
+        except Exception as error:
+            logger.warning("Snov.io saved-creds lookup failed: %s", error)
+            row = None
+        if row:
+            client_id = str(row.get("clientId", ""))
+            try:
+                client_secret = _decrypt_session_secret(
+                    str(row.get("clientSecret", "")), bool(row.get("secretEncrypted"))
+                )
+            except Exception:
+                logger.exception("Failed to decrypt saved Snov.io secret.")
+                client_secret = ""
+            if client_id and client_secret:
+                return client_id, client_secret, "account"
     return SNOVIO_CLIENT_ID, SNOVIO_CLIENT_SECRET, "environment"
 
 
@@ -454,6 +569,20 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
         _upload_blob(INPUT_CONTAINER, blob_name, csv_bytes)
         logger.info("Stored %s (%d leads) as %s [template=%s]", filename, total_leads, blob_name, template["id"])
 
+        # Record the job in the caller's workspace (history + ownership checks).
+        user = _current_user(req)
+        if user:
+            try:
+                data_store.record_job(user["oid"], job_id, {
+                    "templateId": template["id"],
+                    "templateName": template["name"],
+                    "fileName": filename,
+                    "totalLeads": total_leads,
+                    "status": "uploaded",
+                })
+            except Exception as error:
+                logger.warning("Job record failed for %s: %s", job_id, error)
+
         # Build a lightweight column preview: header + first non-empty sample value,
         # so the user can identify columns even when a header is blank/Unnamed.
         columns_preview = []
@@ -580,6 +709,11 @@ async def generate_emails(req: func.HttpRequest, client) -> func.HttpResponse:
                 status_code=400, mimetype="application/json",
             )
 
+        # Only the job's owner may start generation for it.
+        user, err = _require_job_owner(req, job_id)
+        if err:
+            return err
+
         # Confirm the uploaded file still exists before starting work.
         if not _blob_exists(INPUT_CONTAINER, f"{job_id}.csv"):
             return func.HttpResponse(
@@ -604,6 +738,15 @@ async def generate_emails(req: func.HttpRequest, client) -> func.HttpResponse:
         }
         await client.start_new("orchestrate_emails", client_input=orchestrator_input, instance_id=job_id)
         logger.info("Started generation for %s [template=%s, map=%s]", job_id, template["id"], column_map)
+        try:
+            data_store.update_job(user["oid"], job_id, {
+                "status": "generating",
+                "templateId": template["id"],
+                "templateName": template["name"],
+                "startedAt": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as error:
+            logger.warning("Job update failed for %s: %s", job_id, error)
 
         return func.HttpResponse(
             json.dumps({
@@ -874,19 +1017,282 @@ async def get_templates(req: func.HttpRequest) -> func.HttpResponse:
 
 
 # ===========================================================================
+# 6b. IDENTITY — current user, saved context, and admin user management
+# ===========================================================================
+@app.route(route="me", methods=["GET"])
+async def get_me(req: func.HttpRequest) -> func.HttpResponse:
+    """Return the signed-in user's identity, role, and saved context."""
+    user = _current_user(req)
+    if not user:
+        return _json_response({"error": "Not authenticated."}, 401)
+    last_context = None
+    try:
+        row = data_store.upsert_user(user["oid"], user["email"], user["name"], user["role"])
+        raw_context = row.get("lastContext")
+        if raw_context:
+            last_context = json.loads(raw_context)
+    except Exception as error:
+        logger.warning("User upsert failed for %s: %s", user["email"], error)
+    return _json_response({
+        "oid": user["oid"],
+        "email": user["email"],
+        "name": user["name"],
+        "role": user["role"],
+        "lastContext": last_context,
+    })
+
+
+@app.route(route="me/context", methods=["PUT"])
+async def put_me_context(req: func.HttpRequest) -> func.HttpResponse:
+    """Persist the user's resume context (current step / job / template)."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    payload = _request_json(req)
+    context = {
+        "step": str(payload.get("step") or ""),
+        "jobId": str(payload.get("jobId") or ""),
+        "templateId": str(payload.get("templateId") or ""),
+        "savedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        data_store.set_user_context(user["oid"], context)
+    except Exception as error:
+        logger.warning("Context save failed for %s: %s", user["email"], error)
+        return _json_response({"error": "Could not save context."}, 500)
+    return _json_response({"saved": True})
+
+
+@app.route(route="users", methods=["GET"])
+async def get_users(req: func.HttpRequest) -> func.HttpResponse:
+    """Admin: list all users and their roles."""
+    _, err = _require_admin(req)
+    if err:
+        return err
+    try:
+        users = data_store.list_users()
+    except Exception as error:
+        logger.warning("User list failed: %s", error)
+        return _json_response({"error": "Could not list users."}, 500)
+    return _json_response({"users": [
+        {
+            "oid": u.get("RowKey"),
+            "email": u.get("email", ""),
+            "name": u.get("name", ""),
+            "role": u.get("role", "user"),
+            "bootstrapAdmin": str(u.get("email", "")).lower() in ADMIN_EMAILS,
+            "lastLoginAt": u.get("lastLoginAt", ""),
+        }
+        for u in users
+    ]})
+
+
+@app.route(route="users/{oid}/role", methods=["PUT"])
+async def put_user_role(req: func.HttpRequest) -> func.HttpResponse:
+    """Admin: promote or demote a user."""
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    oid = req.route_params.get("oid", "")
+    role = str(_request_json(req).get("role") or "").strip().lower()
+    if role not in ("admin", "user"):
+        return _json_response({"error": "role must be 'admin' or 'user'."}, 400)
+    target = data_store.get_user(oid)
+    if not target:
+        return _json_response({"error": "User not found."}, 404)
+    if str(target.get("email", "")).lower() in ADMIN_EMAILS and role != "admin":
+        return _json_response({"error": "This user is a bootstrap admin (ADMIN_EMAILS) and cannot be demoted here."}, 400)
+    if admin["oid"] == oid and role != "admin":
+        return _json_response({"error": "You cannot demote yourself."}, 400)
+    data_store.set_user_role(oid, role)
+    logger.info("Role change: %s set %s to %s", admin["email"], target.get("email"), role)
+    return _json_response({"oid": oid, "role": role})
+
+
+@app.route(route="jobs", methods=["GET"])
+async def list_my_jobs(req: func.HttpRequest) -> func.HttpResponse:
+    """Return the caller's job history (their workspace)."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    try:
+        jobs = data_store.list_jobs(user["oid"], limit=25)
+    except Exception as error:
+        logger.warning("Job list failed for %s: %s", user["email"], error)
+        return _json_response({"error": "Could not load your campaigns."}, 500)
+    return _json_response({"jobs": [
+        {
+            "jobId": j.get("RowKey"),
+            "templateId": j.get("templateId", ""),
+            "templateName": j.get("templateName", ""),
+            "fileName": j.get("fileName", ""),
+            "totalLeads": int(j.get("totalLeads", 0) or 0),
+            "status": j.get("status", ""),
+            "createdAt": j.get("createdAt", ""),
+            "completedAt": j.get("completedAt", ""),
+        }
+        for j in jobs
+    ]})
+
+
+# ===========================================================================
+# 6c. CAMPAIGNS — admin-editable template registry
+# ===========================================================================
+def _campaign_public(row: dict, full: bool = False) -> dict:
+    payload = {
+        "id": row.get("RowKey"),
+        "name": row.get("name", ""),
+        "group": row.get("group", "Custom"),
+        "description": row.get("description", ""),
+        "numEmails": int(row.get("numEmails", 1) or 1),
+        "builtin": bool(row.get("builtin")),
+        "archived": bool(row.get("archived")),
+    }
+    if full:
+        payload["systemPrompt"] = row.get("systemPrompt", "")
+        payload["updatedBy"] = row.get("updatedBy", "")
+        payload["updatedAt"] = row.get("updatedAt", "")
+    return payload
+
+
+def _validate_campaign_payload(payload: dict, partial: bool = False) -> tuple[dict, str]:
+    """Validate/normalize campaign fields. Returns (fields, error_message)."""
+    fields: dict = {}
+    if "name" in payload or not partial:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return {}, "A campaign name is required."
+        fields["name"] = name[:120]
+    if "group" in payload or not partial:
+        fields["group"] = (str(payload.get("group") or "Custom").strip() or "Custom")[:60]
+    if "description" in payload:
+        fields["description"] = str(payload.get("description") or "").strip()[:500]
+    if "numEmails" in payload or not partial:
+        try:
+            num = int(payload.get("numEmails", 1))
+        except (TypeError, ValueError):
+            return {}, "numEmails must be a number."
+        if not 1 <= num <= 12:
+            return {}, "numEmails must be between 1 and 12."
+        fields["numEmails"] = num
+    if "systemPrompt" in payload or not partial:
+        prompt = str(payload.get("systemPrompt") or "").strip()
+        if not prompt:
+            return {}, "A system prompt is required."
+        if len(prompt) > 60000:
+            return {}, "The system prompt is too long (60,000 character limit)."
+        fields["systemPrompt"] = prompt
+    if "archived" in payload:
+        fields["archived"] = bool(payload.get("archived"))
+    return fields, ""
+
+
+@app.route(route="campaigns", methods=["GET"])
+async def list_campaigns_endpoint(req: func.HttpRequest) -> func.HttpResponse:
+    """List campaigns. Admins may pass ?full=true for prompts + archived ones."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    full = _parse_bool(_query_params(req).get("full"), default=False) and user["role"] == "admin"
+    try:
+        rows = data_store.list_campaign_entities(include_archived=full)
+    except Exception as error:
+        logger.warning("Campaign list failed: %s", error)
+        return _json_response({"error": "Could not load campaigns."}, 500)
+    return _json_response({"campaigns": [_campaign_public(r, full=full) for r in rows]})
+
+
+@app.route(route="campaigns", methods=["POST"])
+async def create_campaign_endpoint(req: func.HttpRequest) -> func.HttpResponse:
+    """Admin: create a new campaign."""
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    fields, message = _validate_campaign_payload(_request_json(req), partial=False)
+    if message:
+        return _json_response({"error": message}, 400)
+
+    base_id = re.sub(r"[^a-z0-9]+", "_", fields["name"].lower()).strip("_") or "campaign"
+    campaign_id = base_id
+    suffix = 2
+    while data_store.get_campaign_entity(campaign_id) is not None or campaign_id in PROMPT_REGISTRY:
+        campaign_id = f"{base_id}_{suffix}"
+        suffix += 1
+
+    fields.update({
+        "requiredFields": json.dumps(FIELDS_FIRST_NAME_ONLY),
+        "builtin": False,
+        "archived": False,
+        "updatedBy": admin["email"],
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    })
+    fields.setdefault("description", "")
+    data_store.upsert_campaign_entity(campaign_id, fields)
+    invalidate_campaign_cache()
+    logger.info("Campaign created: %s by %s", campaign_id, admin["email"])
+    row = data_store.get_campaign_entity(campaign_id) or {"RowKey": campaign_id, **fields}
+    return _json_response(_campaign_public(row, full=True), 201)
+
+
+@app.route(route="campaigns/{campaignId}", methods=["PUT"])
+async def update_campaign_endpoint(req: func.HttpRequest) -> func.HttpResponse:
+    """Admin: update or archive/restore a campaign."""
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    campaign_id = req.route_params.get("campaignId", "")
+    existing = data_store.get_campaign_entity(campaign_id)
+    if not existing:
+        return _json_response({"error": "Campaign not found."}, 404)
+    fields, message = _validate_campaign_payload(_request_json(req), partial=True)
+    if message:
+        return _json_response({"error": message}, 400)
+    if not fields:
+        return _json_response({"error": "Nothing to update."}, 400)
+    fields["updatedBy"] = admin["email"]
+    fields["updatedAt"] = datetime.now(timezone.utc).isoformat()
+    data_store.upsert_campaign_entity(campaign_id, fields)
+    invalidate_campaign_cache()
+    logger.info("Campaign updated: %s by %s (%s)", campaign_id, admin["email"], ", ".join(fields.keys()))
+    row = data_store.get_campaign_entity(campaign_id)
+    return _json_response(_campaign_public(row, full=True))
+
+
+@app.route(route="campaigns/{campaignId}", methods=["DELETE"])
+async def archive_campaign_endpoint(req: func.HttpRequest) -> func.HttpResponse:
+    """Admin: archive a campaign (soft delete — it disappears from pickers)."""
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    campaign_id = req.route_params.get("campaignId", "")
+    existing = data_store.get_campaign_entity(campaign_id)
+    if not existing:
+        return _json_response({"error": "Campaign not found."}, 404)
+    data_store.upsert_campaign_entity(campaign_id, {
+        "archived": True,
+        "updatedBy": admin["email"],
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+    })
+    invalidate_campaign_cache()
+    logger.info("Campaign archived: %s by %s", campaign_id, admin["email"])
+    return _json_response({"id": campaign_id, "archived": True})
+
+
+# ===========================================================================
 # 7. SNOV.IO — HTTP Triggers (configuration and balance preflight)
 # ===========================================================================
 @app.route(route="snovio/status", methods=["GET"])
 async def get_snovio_status(req: func.HttpRequest) -> func.HttpResponse:
     """Return Snov.io integration status without exposing secrets."""
-    _, _, source = _resolve_snovio_credentials(req)
+    resolved_id, _, source = _resolve_snovio_credentials(req)
     session_record = _load_snovio_session(_session_id_from_request(req))
+    connected = bool(session_record) or source == "account"
     return _json_response({
         "configured": _snovio_configured(req),
         "credentialSource": source,
-        "sessionActive": bool(session_record),
+        "sessionActive": connected,
         "sessionExpiresAt": session_record.get("expiresAt") if session_record else None,
-        "sessionClientIdMasked": _mask_client_id(str(session_record.get("clientId", ""))) if session_record else None,
+        "sessionClientIdMasked": _mask_client_id(str(session_record.get("clientId", ""))) if session_record else (_mask_client_id(resolved_id) if source == "account" else None),
         "environmentConfigured": bool(SNOVIO_CLIENT_ID and SNOVIO_CLIENT_SECRET),
         "apiBaseUrl": SNOVIO_API_BASE_URL,
         "rateLimitPerMinute": SNOVIO_REQUESTS_PER_MINUTE,
@@ -929,20 +1335,41 @@ async def create_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"error": "Unable to validate Snov.io credentials."}, 502)
 
     session = _store_snovio_session(client_id, client_secret)
+
+    # Remember for the signed-in user (opt-out via remember=false) so future
+    # logins auto-connect without re-entering keys.
+    remembered = False
+    if _parse_bool(payload.get("remember"), default=True):
+        principal = _client_principal(req)
+        if principal:
+            try:
+                secret_value, secret_encrypted = _encrypt_session_secret(client_secret)
+                data_store.save_snovio_creds(principal["oid"], client_id, secret_value, secret_encrypted)
+                remembered = True
+            except Exception as error:
+                logger.warning("Saving Snov.io creds failed for %s: %s", principal.get("email"), error)
+
     return _json_response({
         "configured": True,
         "sessionId": session["sessionId"],
         "expiresAt": session["expiresAt"],
         "clientIdMasked": session["clientIdMasked"],
+        "remembered": remembered,
         "balance": balance,
     }, 201)
 
 
 @app.route(route="snovio/session", methods=["DELETE"])
 async def delete_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
-    """Close a Snov.io session and delete the stored credentials."""
+    """Close the Snov.io session and forget any account-saved credentials."""
     session_id = _session_id_from_request(req)
     _delete_snovio_session(session_id)
+    principal = _client_principal(req)
+    if principal:
+        try:
+            data_store.delete_snovio_creds(principal["oid"])
+        except Exception as error:
+            logger.warning("Deleting saved Snov.io creds failed: %s", error)
     return _json_response({"closed": True})
 
 
@@ -1033,6 +1460,9 @@ async def verify_job_emails(req: func.HttpRequest) -> func.HttpResponse:
         return missing
 
     job_id = req.route_params.get("jobId", "")
+    _, owner_err = _require_job_owner(req, job_id)
+    if owner_err:
+        return owner_err
     payload = _request_json(req)
     dry_run = _parse_bool(payload.get("dryRun"), default=True)
     poll = _parse_bool(payload.get("poll"), default=False)
@@ -1262,6 +1692,9 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
         return missing
 
     job_id = req.route_params.get("jobId", "")
+    _, owner_err = _require_job_owner(req, job_id)
+    if owner_err:
+        return owner_err
     payload = _request_json(req)
     try:
         client = _snovio_client(req)
@@ -1291,6 +1724,9 @@ async def create_snovio_journey(req: func.HttpRequest) -> func.HttpResponse:
         return missing
 
     job_id = req.route_params.get("jobId", "")
+    _, owner_err = _require_job_owner(req, job_id)
+    if owner_err:
+        return owner_err
     payload = _request_json(req)
     dry_run = _parse_bool(payload.get("dryRun"), default=True)
     try:
@@ -1430,6 +1866,9 @@ async def enrich_job_with_snovio(req: func.HttpRequest) -> func.HttpResponse:
         return missing
 
     job_id = req.route_params.get("jobId", "")
+    _, owner_err = _require_job_owner(req, job_id)
+    if owner_err:
+        return owner_err
     payload = _request_json(req)
     dry_run = _parse_bool(payload.get("dryRun"), default=True)
     webhook_url = payload.get("webhookUrl")
@@ -1653,7 +2092,7 @@ async def delete_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="status/{jobId}", methods=["GET"])
 @app.durable_client_input(client_name="client")
 async def get_status(req: func.HttpRequest, client) -> func.HttpResponse:
-    """Return the processing status of a job."""
+    """Return the processing status of a job (owner only)."""
     job_id = req.route_params.get("jobId", "")
     if not job_id:
         return func.HttpResponse(
@@ -1661,6 +2100,10 @@ async def get_status(req: func.HttpRequest, client) -> func.HttpResponse:
             status_code=400,
             mimetype="application/json",
         )
+
+    user, err = _require_job_owner(req, job_id)
+    if err:
+        return err
 
     try:
         status = await client.get_status(job_id)
@@ -1696,6 +2139,17 @@ async def get_status(req: func.HttpRequest, client) -> func.HttpResponse:
         if runtime_status == "Failed":
             response_body["error"] = str(status.output) if status.output else "Unknown error"
 
+        # Lazily sync the terminal state onto the workspace job row.
+        if runtime_status in ("Completed", "Failed") and user["job"].get("status") != runtime_status:
+            try:
+                data_store.update_job(user["oid"], job_id, {
+                    "status": runtime_status,
+                    "completedAt": datetime.now(timezone.utc).isoformat(),
+                    "totalLeads": response_body.get("totalLeads", user["job"].get("totalLeads", 0)),
+                })
+            except Exception as error:
+                logger.warning("Job completion write failed for %s: %s", job_id, error)
+
         return func.HttpResponse(
             json.dumps(response_body),
             status_code=200,
@@ -1717,7 +2171,7 @@ async def get_status(req: func.HttpRequest, client) -> func.HttpResponse:
 @app.route(route="download/{jobId}", methods=["GET"])
 @app.durable_client_input(client_name="client")
 async def download_csv(req: func.HttpRequest, client) -> func.HttpResponse:
-    """Download the enriched CSV for a completed job."""
+    """Download the enriched CSV for a completed job (owner only)."""
     job_id = req.route_params.get("jobId", "")
     if not job_id:
         return func.HttpResponse(
@@ -1725,6 +2179,10 @@ async def download_csv(req: func.HttpRequest, client) -> func.HttpResponse:
             status_code=400,
             mimetype="application/json",
         )
+
+    _, err = _require_job_owner(req, job_id)
+    if err:
+        return err
 
     try:
         # Verify job is complete

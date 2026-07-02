@@ -14,8 +14,10 @@
         step3: document.getElementById("view-step3"),
         step4: document.getElementById("view-step4"),
         error: document.getElementById("view-error"),
+        manage: document.getElementById("view-manage"),
     };
     const navHome = document.getElementById("nav-home");
+    const navManage = document.getElementById("nav-manage");
     const railWrap = document.getElementById("rail-wrap");
     const sidebarSnovDot = document.getElementById("sidebar-snov-dot");
     const sidebarSnovText = document.getElementById("sidebar-snov-text");
@@ -29,6 +31,7 @@
         const inWizard = name in STEP_OF;
         railWrap.hidden = !inWizard;
         navHome.classList.toggle("active", name === "home");
+        if (navManage) navManage.classList.toggle("active", name === "manage");
 
         const step = STEP_OF[name] || 0;
         document.querySelectorAll("#step-rail .step-row").forEach((row) => {
@@ -45,6 +48,7 @@
     let selectedFile = null;
     let currentJobId = null;
     let totalLeads = 0;
+    let currentUser = null;
     let uploadColumns = [];
     let uploadDetection = null;
     let pollTimer = null;
@@ -463,6 +467,7 @@
 
     function startGenerationView() {
         showView("step3");
+        saveContext("step3");
         generatingBlock.hidden = false;
         reviewBlock.hidden = true;
         jobIdDisplay.textContent = currentJobId;
@@ -664,26 +669,97 @@
     }
 
     function renderHome() {
-        let list = [];
-        try { list = JSON.parse(localStorage.getItem("cw_recent") || "[]"); } catch (e) { list = []; }
-        statCampaigns.textContent = list.length;
-        statEmails.textContent = list.reduce((n, r) => n + (r.emails || 0), 0).toLocaleString();
-        statLeads.textContent = list.reduce((n, r) => n + (r.leads || 0), 0).toLocaleString();
+        loadMyJobs();
+    }
+
+    async function loadMyJobs() {
+        let jobs = null;
+        try {
+            const resp = await fetch("/api/jobs");
+            if (resp.ok) jobs = (await resp.json()).jobs || [];
+        } catch (e) { /* fall back below */ }
+        if (jobs === null) {
+            // Server history unavailable — fall back to local session history.
+            let list = [];
+            try { list = JSON.parse(localStorage.getItem("cw_recent") || "[]"); } catch (e) { list = []; }
+            statCampaigns.textContent = list.length;
+            statEmails.textContent = list.reduce((n, r) => n + (r.emails || 0), 0).toLocaleString();
+            statLeads.textContent = list.reduce((n, r) => n + (r.leads || 0), 0).toLocaleString();
+            recentList.innerHTML = "";
+            recentEmpty.hidden = !!list.length;
+            return;
+        }
+        const emailsFor = (j) => {
+            const t = (templateData || []).find((x) => x.id === j.templateId);
+            return (t ? t.num_emails || 1 : 1) * (j.totalLeads || 0);
+        };
+        statCampaigns.textContent = jobs.length;
+        statLeads.textContent = jobs.reduce((n, j) => n + (j.totalLeads || 0), 0).toLocaleString();
+        statEmails.textContent = jobs.filter((j) => j.status === "Completed").reduce((n, j) => n + emailsFor(j), 0).toLocaleString();
         recentList.innerHTML = "";
-        if (!list.length) { recentEmpty.hidden = false; return; }
+        if (!jobs.length) { recentEmpty.hidden = false; return; }
         recentEmpty.hidden = true;
-        list.forEach((r) => {
+        // "Continue where you left off" — saved context pointing at a completed job.
+        const ctx = currentUser && currentUser.lastContext;
+        if (ctx && ctx.jobId) {
+            const match = jobs.find((j) => j.jobId === ctx.jobId && j.status === "Completed");
+            if (match) {
+                const banner = document.createElement("div");
+                banner.className = "resume-banner";
+                banner.innerHTML = `<span class="resume-text"></span><button class="btn btn-primary resume-btn" type="button">Continue</button>`;
+                banner.querySelector(".resume-text").textContent = `Continue where you left off — ${(match.fileName || "campaign").replace(/\.[^.]+$/, "")} (${match.templateName || "campaign"})`;
+                banner.querySelector(".resume-btn").addEventListener("click", () => openJob(match));
+                recentList.appendChild(banner);
+            }
+        }
+        jobs.forEach((j) => {
             const row = document.createElement("div");
             row.className = "recent-row";
+            const statusColor = j.status === "Completed" ? "#15803D" : (j.status === "Failed" ? "#B91C1C" : "#B45309");
+            const statusLabel = j.status === "Completed" ? "Drafted" : (j.status || "—");
+            const canOpen = j.status === "Completed";
             row.innerHTML =
                 `<div style="min-width:0;"><div class="recent-name"></div><div class="recent-tpl"></div></div>` +
-                `<div class="recent-num"><div class="n">${r.leads || 0}</div><div class="u">leads</div></div>` +
-                `<div class="recent-num"><div class="n">${r.emails || 0}</div><div class="u">emails</div></div>` +
-                `<div class="recent-num"><div class="n" style="color:#15803D;">${escapeHtml(r.status || "—")}</div></div>`;
-            row.querySelector(".recent-name").textContent = r.name;
-            row.querySelector(".recent-tpl").textContent = `${r.tpl} · ${r.date}`;
+                `<div class="recent-num"><div class="n">${j.totalLeads || 0}</div><div class="u">leads</div></div>` +
+                `<div class="recent-num"><div class="n" style="color:${statusColor};"></div></div>` +
+                (canOpen ? `<button class="btn btn-secondary recent-open" type="button">Open</button>` : `<div></div>`);
+            row.querySelector(".recent-name").textContent = (j.fileName || "Campaign").replace(/\.[^.]+$/, "");
+            const when = j.createdAt ? new Date(j.createdAt).toLocaleDateString() : "";
+            row.querySelector(".recent-tpl").textContent = [j.templateName, when].filter(Boolean).join(" · ");
+            row.querySelectorAll(".recent-num .n")[1].textContent = statusLabel;
+            if (canOpen) row.querySelector(".recent-open").addEventListener("click", () => openJob(j));
             recentList.appendChild(row);
         });
+    }
+
+    // Resume a completed campaign: load its drafts straight into Review.
+    async function openJob(job) {
+        currentJobId = job.jobId;
+        totalLeads = job.totalLeads || 0;
+        if (job.templateId) selectTemplate(job.templateId);
+        stopPolling(); stopElapsedTimer();
+        railWrap.hidden = false;
+        showView("step3");
+        generatingBlock.hidden = true;
+        reviewBlock.hidden = false;
+        completedLeads.textContent = totalLeads;
+        summaryLeads.textContent = totalLeads;
+        summaryElapsed.textContent = "—";
+        summaryJobId.textContent = currentJobId;
+        saveContext("step3");
+        await loadDrafts();
+        loadSnovioOptions();
+    }
+
+    // Persist resume context (best-effort, fire-and-forget).
+    function saveContext(step) {
+        try {
+            fetch("/api/me/context", {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ step, jobId: currentJobId || "", templateId: templateSelect.value || "" }),
+            });
+        } catch (e) { /* ignore */ }
     }
 
     // ── Download ──
@@ -985,7 +1061,7 @@
                 setSidebarSnov("disconnected", "Snov.io — not connected");
                 return;
             }
-            const source = status.credentialSource === "session" ? "your session" : "server config";
+            const source = status.credentialSource === "session" ? "your session" : (status.credentialSource === "account" ? "your account" : "server config");
             const balance = preflight && preflight.balance && preflight.balance.data ? preflight.balance.data.balance : "ready";
             snovioStatus.textContent = `Ready \u00b7 ${source} \u00b7 balance ${balance}`;
             if (homeSnovText) homeSnovText.textContent = `Connected via ${source}. Balance ${balance}.`;
@@ -1202,7 +1278,223 @@
         finally { setSnovioBusy(false); }
     });
 
+    // ── Identity ──
+    async function initAuth() {
+        try {
+            const resp = await fetch("/api/me");
+            if (resp.status === 401) {
+                window.location.href = "/.auth/login/aad?post_login_redirect_uri=" + encodeURIComponent(location.pathname);
+                return;
+            }
+            if (!resp.ok) return;
+            currentUser = await resp.json();
+            renderUserChip(currentUser);
+            renderHome();
+        } catch (err) {
+            // Network hiccup — the SWA route rules enforce login at the page level.
+        }
+    }
+
+    function renderUserChip(me) {
+        const chip = document.getElementById("user-chip");
+        if (!chip || !me) return;
+        const name = me.name || me.email || "Signed in";
+        document.getElementById("user-name").textContent = name;
+        document.getElementById("user-avatar").textContent = name.trim().charAt(0).toUpperCase() || "?";
+        const roleEl = document.getElementById("user-role");
+        roleEl.textContent = me.role || "user";
+        roleEl.classList.toggle("user-role-admin", me.role === "admin");
+        chip.hidden = false;
+        if (navManage) navManage.hidden = me.role !== "admin";
+    }
+
+    // ── Manage (admin): campaigns + users ──
+    let manageCampaigns = [];
+    let editingCampaignId = null;
+
+    function openManage() {
+        showView("manage");
+        switchManageTab("campaigns");
+        loadManageCampaigns();
+        loadManageUsers();
+    }
+
+    function switchManageTab(tab) {
+        document.getElementById("manage-campaigns").hidden = tab !== "campaigns";
+        document.getElementById("manage-users").hidden = tab !== "users";
+        document.getElementById("manage-tab-campaigns").classList.toggle("active", tab === "campaigns");
+        document.getElementById("manage-tab-users").classList.toggle("active", tab === "users");
+    }
+
+    async function loadManageCampaigns() {
+        const listEl = document.getElementById("campaign-list");
+        listEl.innerHTML = "<div class='manage-loading'>Loading…</div>";
+        try {
+            const resp = await fetch("/api/campaigns?full=true");
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Could not load campaigns.");
+            manageCampaigns = data.campaigns || [];
+            renderCampaignList();
+        } catch (err) {
+            listEl.innerHTML = "";
+            const msg = document.createElement("div");
+            msg.className = "manage-loading";
+            msg.textContent = err.message;
+            listEl.appendChild(msg);
+        }
+    }
+
+    function renderCampaignList() {
+        const listEl = document.getElementById("campaign-list");
+        listEl.innerHTML = "";
+        manageCampaigns.forEach((c) => {
+            const row = document.createElement("div");
+            row.className = "campaign-row" + (c.archived ? " archived" : "");
+            row.innerHTML =
+                `<div class="cr-main"><div class="cr-name"></div><div class="cr-meta"></div></div>` +
+                `<div class="cr-badges"></div>` +
+                `<button class="btn btn-secondary cr-edit" type="button">Edit</button>`;
+            row.querySelector(".cr-name").textContent = c.name;
+            row.querySelector(".cr-meta").textContent = `${c.group} · ${c.numEmails} email${c.numEmails === 1 ? "" : "s"} per lead`;
+            const badges = row.querySelector(".cr-badges");
+            if (c.builtin) { const b = document.createElement("span"); b.className = "cr-badge"; b.textContent = "built-in"; badges.appendChild(b); }
+            if (c.archived) { const b = document.createElement("span"); b.className = "cr-badge cr-badge-archived"; b.textContent = "archived"; badges.appendChild(b); }
+            row.querySelector(".cr-edit").addEventListener("click", () => openCampaignEditor(c.id));
+            listEl.appendChild(row);
+        });
+    }
+
+    function openCampaignEditor(id) {
+        const editor = document.getElementById("campaign-editor");
+        const c = id ? manageCampaigns.find((x) => x.id === id) : null;
+        editingCampaignId = c ? c.id : null;
+        document.getElementById("ce-title").textContent = c ? `Edit “${c.name}”` : "New campaign";
+        document.getElementById("ce-name").value = c ? c.name : "";
+        document.getElementById("ce-group").value = c ? c.group : "";
+        document.getElementById("ce-num").value = c ? c.numEmails : 4;
+        document.getElementById("ce-desc").value = c ? (c.description || "") : "";
+        document.getElementById("ce-prompt").value = c ? (c.systemPrompt || "") : "";
+        const archiveBtn = document.getElementById("ce-archive");
+        archiveBtn.hidden = !c;
+        archiveBtn.textContent = c && c.archived ? "Restore" : "Archive";
+        document.getElementById("ce-error").hidden = true;
+        editor.hidden = false;
+        editor.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    function ceError(message) {
+        const el = document.getElementById("ce-error");
+        el.textContent = message;
+        el.hidden = false;
+    }
+
+    async function saveCampaign() {
+        const payload = {
+            name: document.getElementById("ce-name").value.trim(),
+            group: document.getElementById("ce-group").value.trim() || "Custom",
+            description: document.getElementById("ce-desc").value.trim(),
+            numEmails: Number(document.getElementById("ce-num").value) || 0,
+            systemPrompt: document.getElementById("ce-prompt").value.trim(),
+        };
+        const saveBtn = document.getElementById("ce-save");
+        saveBtn.disabled = true;
+        try {
+            const resp = await fetch(editingCampaignId ? `/api/campaigns/${encodeURIComponent(editingCampaignId)}` : "/api/campaigns", {
+                method: editingCampaignId ? "PUT" : "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const data = await resp.json();
+            if (!resp.ok) { ceError(data.error || "Save failed."); return; }
+            document.getElementById("campaign-editor").hidden = true;
+            await loadManageCampaigns();
+            loadTemplates(); // refresh the Step 1 picker with the change
+        } catch (err) {
+            ceError("Network error — please try again.");
+        } finally {
+            saveBtn.disabled = false;
+        }
+    }
+
+    async function toggleArchiveCampaign() {
+        if (!editingCampaignId) return;
+        const c = manageCampaigns.find((x) => x.id === editingCampaignId);
+        const btn = document.getElementById("ce-archive");
+        btn.disabled = true;
+        try {
+            const resp = c && c.archived
+                ? await fetch(`/api/campaigns/${encodeURIComponent(editingCampaignId)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ archived: false }) })
+                : await fetch(`/api/campaigns/${encodeURIComponent(editingCampaignId)}`, { method: "DELETE" });
+            const data = await resp.json();
+            if (!resp.ok) { ceError(data.error || "Update failed."); return; }
+            document.getElementById("campaign-editor").hidden = true;
+            await loadManageCampaigns();
+            loadTemplates();
+        } catch (err) {
+            ceError("Network error — please try again.");
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function loadManageUsers() {
+        const listEl = document.getElementById("user-list");
+        listEl.innerHTML = "<div class='manage-loading'>Loading…</div>";
+        try {
+            const resp = await fetch("/api/users");
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Could not load users.");
+            listEl.innerHTML = "";
+            (data.users || []).forEach((u) => {
+                const row = document.createElement("div");
+                row.className = "user-row";
+                row.innerHTML =
+                    `<div class="ur-main"><div class="ur-name"></div><div class="ur-email"></div></div>` +
+                    `<span class="ur-role"></span>` +
+                    `<button class="btn btn-secondary ur-toggle" type="button"></button>`;
+                row.querySelector(".ur-name").textContent = u.name || u.email;
+                row.querySelector(".ur-email").textContent = u.email;
+                const roleEl = row.querySelector(".ur-role");
+                roleEl.textContent = u.role;
+                roleEl.classList.toggle("ur-role-admin", u.role === "admin");
+                const btn = row.querySelector(".ur-toggle");
+                const isSelf = currentUser && currentUser.oid === u.oid;
+                if (u.bootstrapAdmin || isSelf) {
+                    btn.hidden = true;
+                } else {
+                    btn.textContent = u.role === "admin" ? "Make user" : "Make admin";
+                    btn.addEventListener("click", async () => {
+                        btn.disabled = true;
+                        try {
+                            const r = await fetch(`/api/users/${encodeURIComponent(u.oid)}/role`, {
+                                method: "PUT",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ role: u.role === "admin" ? "user" : "admin" }),
+                            });
+                            if (r.ok) loadManageUsers();
+                        } finally { btn.disabled = false; }
+                    });
+                }
+                listEl.appendChild(row);
+            });
+        } catch (err) {
+            listEl.innerHTML = "";
+            const msg = document.createElement("div");
+            msg.className = "manage-loading";
+            msg.textContent = err.message;
+            listEl.appendChild(msg);
+        }
+    }
+
     // ── Init ──
+    if (navManage) navManage.addEventListener("click", openManage);
+    document.getElementById("manage-tab-campaigns").addEventListener("click", () => switchManageTab("campaigns"));
+    document.getElementById("manage-tab-users").addEventListener("click", () => switchManageTab("users"));
+    document.getElementById("campaign-new-btn").addEventListener("click", () => openCampaignEditor(null));
+    document.getElementById("ce-close").addEventListener("click", () => { document.getElementById("campaign-editor").hidden = true; });
+    document.getElementById("ce-save").addEventListener("click", saveCampaign);
+    document.getElementById("ce-archive").addEventListener("click", toggleArchiveCampaign);
+    initAuth();
     loadTemplates();
     renderHome();
     showView("home");

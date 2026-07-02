@@ -6,6 +6,8 @@ import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # Inject fake Azure modules before importing function_app.
@@ -42,12 +44,31 @@ _azure_storage_blob.BlobSasPermissions = MagicMock()
 _azure_identity = ModuleType("azure.identity")
 _azure_identity.DefaultAzureCredential = MagicMock()
 
+_azure_core = ModuleType("azure.core")
+_azure_core_exceptions = ModuleType("azure.core.exceptions")
+
+
+class _ResourceNotFoundError(Exception):
+    pass
+
+
+_azure_core_exceptions.ResourceNotFoundError = _ResourceNotFoundError
+
+_azure_data = ModuleType("azure.data")
+_azure_data_tables = ModuleType("azure.data.tables")
+_azure_data_tables.TableServiceClient = MagicMock()
+_azure_data_tables.UpdateMode = MagicMock(MERGE="merge", REPLACE="replace")
+
 sys.modules["azure"] = _azure
 sys.modules["azure.functions"] = _azure_functions
 sys.modules["azure.durable_functions"] = _azure_durable
 sys.modules["azure.storage"] = _azure_storage
 sys.modules["azure.storage.blob"] = _azure_storage_blob
 sys.modules["azure.identity"] = _azure_identity
+sys.modules["azure.core"] = _azure_core
+sys.modules["azure.core.exceptions"] = _azure_core_exceptions
+sys.modules["azure.data"] = _azure_data
+sys.modules["azure.data.tables"] = _azure_data_tables
 
 import function_app as fa
 
@@ -235,6 +256,13 @@ class TestTemplatesEndpoint:
 
 
 class TestSnovioEndpoints:
+    @pytest.fixture(autouse=True)
+    def _job_owner(self):
+        """Per-job Snov.io routes now enforce workspace ownership; stub it here."""
+        fake_user = {"oid": "test-user", "email": "tester@example.com", "name": "Tester", "role": "user", "job": {"status": "Completed"}}
+        with patch.object(fa, "_require_job_owner", return_value=(fake_user, None)):
+            yield
+
     @staticmethod
     def _request(body=None, route_params=None, params=None, headers=None):
         req = MagicMock()

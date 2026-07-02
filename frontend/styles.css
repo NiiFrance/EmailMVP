@@ -90,6 +90,49 @@ body {
 .step-row.done .step-dot { background: rgba(206,17,38,.18); color: var(--red-accent); }
 
 .sidebar-foot { margin-top: auto; padding-top: 22px; border-top: 1px solid var(--sidebar-line); }
+.user-chip { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.user-avatar { width: 34px; height: 34px; flex: none; border-radius: 50%; background: var(--red-accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; }
+.user-meta { min-width: 0; }
+.user-name { font-size: 13px; font-weight: 600; color: #EDEAE5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.user-role-line { font-size: 11.5px; color: var(--muted-3); margin-top: 2px; }
+.user-role-badge { text-transform: capitalize; }
+.user-role-badge.user-role-admin { color: #56d98a; font-weight: 600; }
+.user-logout { color: var(--muted-3); text-decoration: underline; }
+.user-logout:hover { color: #EDEAE5; }
+.resume-banner { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 18px; background: var(--red-soft); border-bottom: 1px solid var(--line-soft); }
+.resume-text { font-size: 13.5px; font-weight: 600; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume-btn { flex: none; padding: 8px 16px; font-size: 13px; }
+.recent-open { padding: 7px 14px; font-size: 12.5px; justify-self: end; }
+
+/* ============ MANAGE (admin) ============ */
+.manage-tabs { display: flex; gap: 8px; margin: 6px 0 20px; }
+.manage-tab { border: 1px solid var(--line); background: #fff; color: var(--muted); padding: 9px 18px; border-radius: 9px; font-size: 13.5px; font-weight: 600; cursor: pointer; }
+.manage-tab.active { background: var(--ink); border-color: var(--ink); color: #fff; }
+.manage-toolbar { display: flex; justify-content: flex-end; margin-bottom: 14px; }
+.campaign-list, .user-list { background: #fff; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+.campaign-row, .user-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 14px; padding: 14px 18px; border-bottom: 1px solid var(--line-softer); }
+.campaign-row:last-child, .user-row:last-child { border-bottom: none; }
+.campaign-row.archived .cr-name { color: var(--muted-3); text-decoration: line-through; }
+.cr-name, .ur-name { font-weight: 700; font-size: 14px; }
+.cr-meta, .ur-email { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.cr-badges { display: flex; gap: 6px; }
+.cr-badge { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 20px; background: #F2F0EC; color: var(--muted); }
+.cr-badge-archived { background: var(--red-soft); color: var(--red); }
+.cr-edit, .ur-toggle { padding: 7px 14px; font-size: 12.5px; }
+.ur-role { font-size: 12px; font-weight: 600; text-transform: capitalize; color: var(--muted); }
+.ur-role-admin { color: #15803D; }
+.manage-loading { padding: 18px; font-size: 13.5px; color: var(--muted); }
+.campaign-editor { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; margin-top: 18px; }
+.ce-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.ce-title { font-weight: 700; font-size: 15.5px; }
+.ce-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 14px; margin-bottom: 12px; }
+.campaign-editor label { display: block; font-size: 12.5px; font-weight: 600; color: var(--muted); margin: 10px 0 5px; }
+.campaign-editor input, .campaign-editor textarea { width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; font-size: 13.5px; font-family: inherit; color: var(--ink); }
+.campaign-editor textarea { resize: vertical; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; line-height: 1.5; }
+.campaign-editor input:focus, .campaign-editor textarea:focus { outline: none; border-color: var(--red); }
+.ce-note { font-size: 12px; color: var(--muted-3); margin: 8px 0 0; line-height: 1.5; }
+.ce-actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 16px; }
+@media (max-width: 640px) { .ce-grid { grid-template-columns: 1fr; } }
 .sidebar-snov-line { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--muted-3); }
 .snov-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; display: inline-block; }
 .snov-dot.connected { background: #56d98a; }

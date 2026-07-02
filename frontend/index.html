@@ -24,6 +24,14 @@
                 </div>
             </div>
 
+            <div class="nav-row" id="nav-manage" hidden>
+                <div class="nav-dot">&#9881;</div>
+                <div class="nav-text">
+                    <div class="nav-title">Manage</div>
+                    <div class="nav-sub">Campaigns &amp; users</div>
+                </div>
+            </div>
+
             <div class="rail-wrap" id="rail-wrap" hidden>
                 <div class="rail-heading">Current campaign</div>
                 <nav class="step-rail" id="step-rail">
@@ -59,6 +67,13 @@
             </div>
 
             <div class="sidebar-foot">
+                <div class="user-chip" id="user-chip" hidden>
+                    <div class="user-avatar" id="user-avatar">?</div>
+                    <div class="user-meta">
+                        <div class="user-name" id="user-name">&mdash;</div>
+                        <div class="user-role-line"><span id="user-role" class="user-role-badge">user</span> &middot; <a href="/.auth/logout" id="user-logout" class="user-logout">Sign out</a></div>
+                    </div>
+                </div>
                 <div class="sidebar-snov-line">
                     <span class="snov-dot" id="sidebar-snov-dot"></span>
                     <span id="sidebar-snov-text">Snov.io — not connected</span>
@@ -100,7 +115,7 @@
                     </div>
 
                     <div class="stat-grid home-stats">
-                        <div class="stat-tile"><div class="stat-value" id="stat-campaigns">0</div><div class="stat-label">Campaigns this session</div></div>
+                        <div class="stat-tile"><div class="stat-value" id="stat-campaigns">0</div><div class="stat-label">Campaigns</div></div>
                         <div class="stat-tile"><div class="stat-value" id="stat-emails">0</div><div class="stat-label">Emails drafted</div></div>
                         <div class="stat-tile"><div class="stat-value" id="stat-leads">0</div><div class="stat-label">Leads processed</div></div>
                     </div>
@@ -108,7 +123,7 @@
                     <div class="recent-card">
                         <div class="recent-head">
                             <div class="recent-title">Recent campaigns</div>
-                            <div class="recent-meta">This session</div>
+                            <div class="recent-meta" id="recent-scope">Your workspace</div>
                         </div>
                         <div id="recent-list"></div>
                         <div id="recent-empty" class="recent-empty">No campaigns yet — start one above.</div>
@@ -435,6 +450,60 @@
                     <p id="error-message" class="error-detail"></p>
                     <div class="view-actions">
                         <button id="retry-btn" class="btn btn-secondary" type="button">Try Again</button>
+                    </div>
+                </section>
+
+                <!-- ---------- MANAGE (admin) ---------- -->
+                <section id="view-manage" class="view" hidden>
+                    <div class="eyebrow">Admin</div>
+                    <h1 class="view-title">Manage</h1>
+                    <p class="view-lead">Edit the campaigns your team sees on the Campaign screen, and manage user roles.</p>
+
+                    <div class="manage-tabs">
+                        <button id="manage-tab-campaigns" class="manage-tab active" type="button">Campaigns</button>
+                        <button id="manage-tab-users" class="manage-tab" type="button">Users</button>
+                    </div>
+
+                    <div id="manage-campaigns">
+                        <div class="manage-toolbar">
+                            <button id="campaign-new-btn" class="btn btn-primary" type="button">New campaign</button>
+                        </div>
+                        <div id="campaign-list" class="campaign-list"></div>
+
+                        <div id="campaign-editor" class="campaign-editor" hidden>
+                            <div class="ce-head">
+                                <div class="ce-title" id="ce-title">Edit campaign</div>
+                                <button id="ce-close" class="btn-clear" type="button" title="Close">&times;</button>
+                            </div>
+                            <div class="ce-grid">
+                                <div>
+                                    <label for="ce-name">Name</label>
+                                    <input id="ce-name" type="text" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label for="ce-group">Group</label>
+                                    <input id="ce-group" type="text" autocomplete="off" placeholder="e.g. Renewals">
+                                </div>
+                                <div>
+                                    <label for="ce-num">Emails per lead</label>
+                                    <input id="ce-num" type="number" min="1" max="12" value="4">
+                                </div>
+                            </div>
+                            <label for="ce-desc">Description (shown on the Campaign screen)</label>
+                            <input id="ce-desc" type="text" autocomplete="off">
+                            <label for="ce-prompt">System prompt</label>
+                            <textarea id="ce-prompt" rows="14" spellcheck="false"></textarea>
+                            <p class="ce-note">The prompt must tell the model to return ONLY a JSON array with exactly the number of email objects above, each with a "subject" and "body" key.</p>
+                            <div id="ce-error" class="error" hidden></div>
+                            <div class="ce-actions">
+                                <button id="ce-archive" class="btn btn-secondary" type="button">Archive</button>
+                                <button id="ce-save" class="btn btn-primary" type="button">Save campaign</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="manage-users" hidden>
+                        <div id="user-list" class="user-list"></div>
                     </div>
                 </section>
 
