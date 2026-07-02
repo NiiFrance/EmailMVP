@@ -137,6 +137,9 @@
     const snovioListSelect = document.getElementById("snovio-list-select");
     const snovioCampaignSelect = document.getElementById("snovio-campaign-select");
     const snovioListName = document.getElementById("snovio-list-name");
+    const snovioNewListBtn = document.getElementById("snovio-new-list-btn");
+    const snovioNewListRow = document.getElementById("snovio-new-list-row");
+    const snovioNewListCancel = document.getElementById("snovio-new-list-cancel");
     const snovioDateFrom = document.getElementById("snovio-date-from");
     const snovioDateTo = document.getElementById("snovio-date-to");
     const snovioRequireVerification = document.getElementById("snovio-require-verification");
@@ -1105,25 +1108,59 @@
         const fileBase = selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : "";
         return ["Cloudware", selectedTemplateName(), fileBase, date].filter(Boolean).join(" - ");
     }
-    async function runSnovioSync(dryRun) {
-        if (!currentJobId) return;
+
+    // ── New-list mode: the "+ New list" button swaps the dropdown for a name box ──
+    function isNewListMode() {
+        return !!snovioNewListRow && !snovioNewListRow.hidden;
+    }
+    function enterNewListMode() {
+        snovioNewListRow.hidden = false;
+        snovioListSelect.disabled = true;
+        snovioNewListBtn.hidden = true;
+        if (!snovioListName.value.trim()) {
+            snovioListName.value = defaultSnovioListName();
+        }
+        snovioListName.focus();
+        snovioListName.select();
+    }
+    function exitNewListMode() {
+        snovioNewListRow.hidden = true;
+        snovioListSelect.disabled = false;
+        snovioNewListBtn.hidden = false;
+        snovioListName.value = "";
+    }
+
+    // Resolve the list target shared by sync + campaign create. Returns null after
+    // rendering an error when input is incomplete.
+    function resolveListTarget(reportTitle) {
         const campaign = selectedCampaign();
         const inferredListId = campaignListId(campaign);
-        // A typed "New list name" means the user wants a brand-new list created with that
-        // exact name. Honour that intent over the dropdown's auto-selected existing list,
-        // otherwise the selected list silently wins and the named list is never created.
-        const wantsNewList = !!snovioListName.value.trim();
+        const newListMode = isNewListMode();
+        const newName = snovioListName.value.trim();
+        if (newListMode && !newName) {
+            renderSnovioReport(reportTitle, { error: "Give your new list a name, or press \u00d7 to use an existing list instead." });
+            return null;
+        }
+        const wantsNewList = newListMode && !!newName;
         const autoCreateList = wantsNewList ? true : snovioAutoCreateList.checked;
         const listId = wantsNewList ? "" : (snovioListSelect.value || inferredListId);
         if (!listId && !autoCreateList) {
-            renderSnovioReport("Snov.io", { error: "Select a list, type a new list name, or enable automatic list creation." });
-            return;
+            renderSnovioReport(reportTitle, { error: "Pick a list, click + New list, or enable automatic list creation under More options." });
+            return null;
         }
+        return { campaign, listId, autoCreateList };
+    }
+
+    async function runSnovioSync(dryRun) {
+        if (!currentJobId) return;
+        const target = resolveListTarget("Snov.io");
+        if (!target) return;
+        const { campaign, listId, autoCreateList } = target;
         setSnovioBusy(true);
         try {
             const payload = { dryRun, listId, campaignId: snovioCampaignSelect.value, campaignStatus: campaign ? campaign.status : "", autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", confirmActiveCampaign: snovioConfirmActive.checked, requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
             const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
-            if (!dryRun && report.createdList) { await loadSnovioOptions(); if (report.listId) snovioListSelect.value = report.listId; }
+            if (!dryRun && report.createdList) { exitNewListMode(); await loadSnovioOptions(); if (report.listId) snovioListSelect.value = report.listId; }
             renderSnovioReport(dryRun ? "Dry Run" : "Sync Report", report);
         } catch (err) {
             renderSnovioReport("Snov.io", { error: err.message });
@@ -1164,20 +1201,23 @@
     }
     async function runSnovioJourney(dryRun) {
         if (!currentJobId) return;
-        const campaign = selectedCampaign();
-        const inferredListId = campaignListId(campaign);
-        const wantsNewList = !!snovioListName.value.trim();
-        const autoCreateList = wantsNewList ? true : snovioAutoCreateList.checked;
-        const listId = wantsNewList ? "" : (snovioListSelect.value || inferredListId);
         const senderIds = selectedSenderIds();
+        const campaignTitle = snovioJourneyTitle.value.trim();
         if (!dryRun && !senderIds.length) { renderSnovioReport("Campaign", { error: "Select at least one sender account to create a campaign." }); return; }
-        if (!listId && !autoCreateList) { renderSnovioReport("Campaign", { error: "Select a list, type a new list name, or enable automatic list creation." }); return; }
+        if (!dryRun && !campaignTitle) {
+            renderSnovioReport("Campaign", { error: "Give your campaign a title \u2014 that's how you'll find it in Snov.io." });
+            snovioJourneyTitle.focus();
+            return;
+        }
+        const target = resolveListTarget("Campaign");
+        if (!target) return;
+        const { listId, autoCreateList } = target;
         setSnovioBusy(true);
         try {
-            const payload = { dryRun, listId, autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), campaignTitle: snovioJourneyTitle.value.trim(), senderAccountIds: senderIds, delayDays: Number(snovioJourneyDelay.value) || 0, trackOpens: snovioJourneyOpen.checked, trackClicks: snovioJourneyClick.checked, templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
+            const payload = { dryRun, listId, autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), campaignTitle, senderAccountIds: senderIds, delayDays: Number(snovioJourneyDelay.value) || 0, trackOpens: snovioJourneyOpen.checked, trackClicks: snovioJourneyClick.checked, templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
             const response = await snovioFetch(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/journey`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
             const report = await response.json();
-            if (!dryRun && response.ok) await loadSnovioOptions();
+            if (!dryRun && response.ok) { exitNewListMode(); await loadSnovioOptions(); }
             renderSnovioReport(dryRun ? "Campaign Preview" : (response.ok ? "Campaign Created" : "Campaign"), report);
         } catch (err) { renderSnovioReport("Campaign", { error: err.message }); }
         finally { setSnovioBusy(false); }
@@ -1225,6 +1265,8 @@
     // Snov.io bindings
     snovioRefreshBtn.addEventListener("click", loadSnovioOptions);
     snovioCampaignSelect.addEventListener("change", applyCampaignListSelection);
+    if (snovioNewListBtn) snovioNewListBtn.addEventListener("click", enterNewListMode);
+    if (snovioNewListCancel) snovioNewListCancel.addEventListener("click", exitNewListMode);
     if (snovioConnectBtn) snovioConnectBtn.addEventListener("click", connectSnovio);
     if (snovioDisconnectBtn) snovioDisconnectBtn.addEventListener("click", disconnectSnovio);
     if (snovioJourneyPreviewBtn) snovioJourneyPreviewBtn.addEventListener("click", () => runSnovioJourney(true));

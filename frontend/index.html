@@ -323,31 +323,26 @@
 
                             <div class="snovio-grid">
                                 <div>
-                                    <label for="snovio-list-select">List</label>
-                                    <select id="snovio-list-select"></select>
+                                    <label for="snovio-list-select">Snov.io list</label>
+                                    <div class="list-row">
+                                        <select id="snovio-list-select" data-tip="Your leads will be added to this existing Snov.io prospect list"></select>
+                                        <button id="snovio-new-list-btn" class="btn btn-secondary btn-newlist" type="button" data-tip="Create a brand-new prospect list in Snov.io for these leads">+ New list</button>
+                                    </div>
+                                    <div id="snovio-new-list-row" class="new-list-row" hidden>
+                                        <input id="snovio-list-name" type="text" autocomplete="off" placeholder="Name your new list">
+                                        <button id="snovio-new-list-cancel" class="btn-clear" type="button" title="Cancel — use an existing list instead">&times;</button>
+                                    </div>
                                 </div>
                                 <div>
                                     <label for="snovio-campaign-select">Add to existing campaign (optional)</label>
-                                    <select id="snovio-campaign-select"></select>
-                                </div>
-                                <div>
-                                    <label for="snovio-list-name">New list name</label>
-                                    <input id="snovio-list-name" type="text" autocomplete="off" placeholder="Auto-generated">
-                                </div>
-                                <div>
-                                    <label for="snovio-date-from">From</label>
-                                    <input id="snovio-date-from" type="date">
-                                </div>
-                                <div>
-                                    <label for="snovio-date-to">To</label>
-                                    <input id="snovio-date-to" type="date">
+                                    <select id="snovio-campaign-select" data-tip="Optional: attach the leads to a campaign that already exists in Snov.io"></select>
                                 </div>
                             </div>
 
                             <!-- Primary action: push leads to a Snov.io list -->
                             <div class="snovio-primary">
-                                <button id="snovio-sync-btn" class="btn btn-primary" type="button">Sync leads to Snov.io</button>
-                                <p class="snovio-primary-note">Adds your leads (and their drafted emails) to a Snov.io list. Pick an existing list above, or leave it blank and we'll create one for you. To turn these into a sending campaign, use <strong>Create a new campaign</strong> under More options.</p>
+                                <button id="snovio-sync-btn" class="btn btn-primary" type="button" data-tip="Adds every eligible lead (with their drafted emails) to the selected Snov.io list">Sync leads to Snov.io</button>
+                                <p class="snovio-primary-note">Adds your leads (and their drafted emails) to a Snov.io list. Pick an existing list above, or click <strong>+ New list</strong> to create one. To turn these into a sending campaign, use <strong>Create a new campaign</strong> under More options.</p>
                             </div>
 
                             <!-- Friendly result appears here -->
@@ -359,19 +354,25 @@
 
                                 <div class="snovio-adv-body">
                                     <div class="snovio-checks">
-                                        <label><input id="snovio-require-verification" type="checkbox"> Only sync verified emails <span class="hint">(uses Snov.io credits)</span></label>
-                                        <label><input id="snovio-auto-create-list" type="checkbox" checked> Create a list automatically if none is selected</label>
-                                        <label><input id="snovio-confirm-active" type="checkbox"> I understand this campaign is already sending</label>
+                                        <label data-tip="Runs each address through Snov.io verification first and skips risky ones. Costs Snov.io credits."><input id="snovio-require-verification" type="checkbox"> Only sync verified emails <span class="hint">(uses Snov.io credits)</span></label>
+                                        <label data-tip="If no list is selected, a sensibly-named one is created for you automatically"><input id="snovio-auto-create-list" type="checkbox" checked> Create a list automatically if none is selected</label>
+                                        <label data-tip="Safety check — required before adding leads to a campaign that is actively sending"><input id="snovio-confirm-active" type="checkbox"> I understand this campaign is already sending</label>
                                     </div>
 
                                     <div class="snovio-actions">
-                                        <button id="snovio-verify-btn" class="btn btn-secondary" type="button">Check emails are valid</button>
-                                        <button id="snovio-dry-run-btn" class="btn btn-secondary" type="button">Preview (no changes)</button>
+                                        <button id="snovio-verify-btn" class="btn btn-secondary" type="button" data-tip="Checks which email addresses are safe to send to. Uses Snov.io credits.">Check emails are valid</button>
+                                        <button id="snovio-dry-run-btn" class="btn btn-secondary" type="button" data-tip="Shows exactly what a sync would do — nothing is created or changed">Preview (no changes)</button>
+                                        <button id="snovio-enrich-btn" class="btn btn-secondary" type="button" data-tip="Estimates the Snov.io credits needed to fill in missing lead data">Enrichment estimate</button>
                                     </div>
 
-                                    <div class="snovio-actions secondary-actions">
-                                        <button id="snovio-enrich-btn" class="btn btn-secondary" type="button">Enrichment estimate</button>
-                                        <button id="snovio-analytics-btn" class="btn btn-secondary" type="button">Campaign analytics</button>
+                                    <div class="snovio-analytics-row">
+                                        <button id="snovio-analytics-btn" class="btn btn-secondary" type="button" data-tip="Opens sent/opened/replied stats for the campaign selected above">Campaign analytics</button>
+                                        <div class="date-pair">
+                                            <label for="snovio-date-from">From</label>
+                                            <input id="snovio-date-from" type="date" data-tip="Optional start date for the analytics report">
+                                            <label for="snovio-date-to">To</label>
+                                            <input id="snovio-date-to" type="date" data-tip="Optional end date for the analytics report">
+                                        </div>
                                     </div>
 
                                     <div class="snovio-journey">
@@ -380,24 +381,24 @@
                                         <div class="snovio-grid">
                                             <div>
                                                 <label for="snovio-sender-select">Sender accounts</label>
-                                                <select id="snovio-sender-select" multiple size="3"></select>
+                                                <select id="snovio-sender-select" multiple size="3" data-tip="The mailbox(es) in Snov.io the campaign will send from — pick at least one"></select>
                                             </div>
                                             <div>
-                                                <label for="snovio-journey-title">Campaign title</label>
-                                                <input id="snovio-journey-title" type="text" autocomplete="off" placeholder="Auto-generated">
+                                                <label for="snovio-journey-title">Campaign title <span class="req-star">*</span></label>
+                                                <input id="snovio-journey-title" type="text" autocomplete="off" placeholder="e.g. Q3 CSP Renewals — South Africa" data-tip="Name your campaign so the team can find it in Snov.io">
                                             </div>
                                             <div>
                                                 <label for="snovio-journey-delay">Days between touches</label>
-                                                <input id="snovio-journey-delay" type="number" min="0" max="30" value="3">
+                                                <input id="snovio-journey-delay" type="number" min="0" max="30" value="3" data-tip="Waiting time between each email in the sequence">
                                             </div>
                                         </div>
                                         <div class="snovio-checks">
-                                            <label><input id="snovio-journey-open" type="checkbox" checked> Track opens</label>
-                                            <label><input id="snovio-journey-click" type="checkbox" checked> Track link clicks</label>
+                                            <label data-tip="Records when a recipient opens an email"><input id="snovio-journey-open" type="checkbox" checked> Track opens</label>
+                                            <label data-tip="Records when a recipient clicks a link"><input id="snovio-journey-click" type="checkbox" checked> Track link clicks</label>
                                         </div>
                                         <div class="snovio-actions">
-                                            <button id="snovio-journey-preview-btn" class="btn btn-secondary" type="button">Preview campaign</button>
-                                            <button id="snovio-journey-create-btn" class="btn btn-primary" type="button">Create new campaign (draft)</button>
+                                            <button id="snovio-journey-preview-btn" class="btn btn-secondary" type="button" data-tip="See the planned email steps and any missing setup — nothing is created">Preview campaign</button>
+                                            <button id="snovio-journey-create-btn" class="btn btn-primary" type="button" data-tip="Builds the campaign in Snov.io as a draft — you review and launch it there">Create new campaign (draft)</button>
                                         </div>
                                     </div>
 

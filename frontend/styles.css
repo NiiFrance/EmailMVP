@@ -330,6 +330,45 @@ textarea { line-height: 1.65; resize: vertical; white-space: pre-wrap; }
 .snovio-connect-note { font-size: 12px; color: var(--muted-3); margin-top: 12px; line-height: 1.5; }
 .snovio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
 .snovio-grid label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+
+/* list picker + "+ New list" toggle */
+.list-row { display: flex; gap: 8px; align-items: stretch; }
+.list-row select { flex: 1; min-width: 0; }
+.list-row select:disabled { opacity: 0.45; }
+.btn-newlist { flex: none; padding: 0 16px; font-size: 13px; white-space: nowrap; }
+.new-list-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.new-list-row input { flex: 1; min-width: 0; border-color: var(--red); background: var(--red-soft); }
+.new-list-row .btn-clear { flex: none; }
+.req-star { color: var(--red); font-weight: 700; }
+
+/* analytics + date filter live together */
+.snovio-analytics-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+.snovio-analytics-row .btn { padding: 11px 20px; font-size: 13.5px; }
+.date-pair { display: flex; gap: 8px; align-items: center; }
+.date-pair label { font-size: 12px; font-weight: 600; color: var(--muted); margin: 0; }
+.date-pair input[type="date"] { padding: 8px 10px; font-size: 13px; width: 150px; }
+
+/* lightweight hover tooltips */
+[data-tip] { position: relative; }
+[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute; bottom: calc(100% + 9px); left: 50%; transform: translateX(-50%) translateY(3px);
+    background: var(--ink); color: #fff; padding: 8px 12px; border-radius: 8px;
+    font-size: 12px; font-weight: 500; line-height: 1.45; text-align: left;
+    width: max-content; max-width: 260px; white-space: normal;
+    opacity: 0; visibility: hidden; pointer-events: none; z-index: 60;
+    transition: opacity .15s ease .25s, transform .15s ease .25s, visibility 0s linear .4s;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+[data-tip]::before {
+    content: "";
+    position: absolute; bottom: calc(100% + 4px); left: 50%; transform: translateX(-50%);
+    border: 5px solid transparent; border-top-color: var(--ink);
+    opacity: 0; visibility: hidden; pointer-events: none; z-index: 60;
+    transition: opacity .15s ease .25s, visibility 0s linear .4s;
+}
+[data-tip]:hover::after { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+[data-tip]:hover::before { opacity: 1; visibility: visible; }
 .snovio-admin-grid { margin-top: 6px; }
 .snovio-checks { display: flex; gap: 22px; flex-wrap: wrap; margin: 4px 0 16px; }
 .snovio-checks label { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--ink-soft); cursor: pointer; }
