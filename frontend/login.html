@@ -4,134 +4,271 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Email Campaign Generator — Cloudware</title>
-    <link rel="stylesheet" href="/assets/fonts.css">
+    <!-- Load fonts async so a slow stylesheet can never block the page's script. -->
+    <link rel="preload" href="/assets/fonts.css" as="style" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="/assets/fonts.css"></noscript>
     <style>
         :root {
-            --ink: #141414;
-            --ink-2: #1D1D1D;
-            --red: #E0301E;
-            --red-deep: #C22415;
-            --paper: #F7F5F1;
-            --muted: rgba(255, 255, 255, 0.62);
-            --muted-2: rgba(255, 255, 255, 0.4);
-            --line: rgba(255, 255, 255, 0.12);
+            --bg: #0E0E0E;
+            --panel: #1A1A1A;
+            --panel-line: #2C2C2C;
+            --red: #CE1126;
+            --red-deep: #B10E20;
+            --red-soft: rgba(206, 17, 38, 0.15);
+            --red-text: #E0455A;
+            --grey: #A8A6A2;
+            --grey-dim: #6E6C68;
+            --ink: #1A1917;
+            --ink-grey: #6B6862;
         }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body { height: 100%; }
         body {
-            font-family: "DIN 2014", "Segoe UI", -apple-system, sans-serif;
-            background: var(--ink);
-            color: #fff;
-            display: flex;
-            flex-direction: column;
+            font-family: "DIN 2014", "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
+            background: var(--bg); color: #fff;
+            -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
         }
-        .bg-glow {
-            position: fixed; inset: 0; pointer-events: none;
-            background:
-                radial-gradient(700px 420px at 82% 8%, rgba(224, 48, 30, 0.16), transparent 60%),
-                radial-gradient(560px 380px at 8% 92%, rgba(224, 48, 30, 0.08), transparent 60%);
+        button { font-family: inherit; }
+        @keyframes cw-spin { to { transform: rotate(360deg); } }
+        @keyframes cw-fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* ============ LANDING ============ */
+        .landing { min-height: 100vh; display: flex; flex-direction: column; }
+        .nav {
+            flex: none; max-width: 1280px; width: 100%; margin: 0 auto;
+            padding: clamp(12px, 2.4vh, 22px) 48px; display: flex; align-items: center; gap: 32px;
         }
-        .wrap {
-            position: relative;
-            flex: 1;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 48px 24px;
+        .nav .logo { width: 148px; display: block; mix-blend-mode: lighten; }
+        .nav-signin {
+            margin-left: auto; background: var(--red); color: #fff; border: none; border-radius: 10px;
+            padding: 11px 22px; font-size: 14px; font-weight: 700; cursor: pointer;
+            box-shadow: 0 2px 12px rgba(206, 17, 38, 0.35); transition: background .15s;
         }
-        .card {
-            width: 100%;
-            max-width: 520px;
-            text-align: center;
+        .nav-signin:hover { background: var(--red-deep); }
+        .hero {
+            flex: 1; max-width: 1280px; width: 100%; margin: 0 auto;
+            padding: clamp(8px, 1.6vh, 12px) 48px clamp(14px, 3vh, 28px);
+            display: grid; grid-template-columns: 1fr 1.08fr; gap: 56px; align-items: center;
         }
-        .logo { height: 44px; margin-bottom: 34px; }
-        .eyebrow {
-            font-size: 12px; font-weight: 700; letter-spacing: 0.14em;
-            text-transform: uppercase; color: var(--red);
-            margin-bottom: 14px;
+        .hero h1 {
+            font-size: clamp(30px, 3.6vw, 50px); font-weight: 800; letter-spacing: -0.03em;
+            line-height: 1.08; margin-bottom: clamp(10px, 2vh, 18px);
         }
-        h1 {
-            font-size: 40px; line-height: 1.12; font-weight: 700;
-            letter-spacing: -0.01em; margin-bottom: 16px;
+        .hero h1 .accent { color: var(--red); }
+        .hero .sub {
+            font-size: clamp(13.5px, 1.9vh, 15.5px); color: var(--grey); line-height: 1.65;
+            margin-bottom: clamp(16px, 3.2vh, 28px); max-width: 460px;
         }
-        .sub {
-            font-size: 16px; line-height: 1.6; color: var(--muted);
-            max-width: 430px; margin: 0 auto 36px;
+        .hero-cta {
+            background: var(--red); color: #fff; border: none; border-radius: 12px;
+            padding: 15px 30px; font-size: 15px; font-weight: 700; cursor: pointer;
+            box-shadow: 0 4px 24px rgba(206, 17, 38, 0.4); transition: background .15s;
         }
-        .signin-btn {
-            display: inline-flex; align-items: center; gap: 12px;
-            background: var(--red); color: #fff; border: none; cursor: pointer;
-            font: inherit; font-size: 15.5px; font-weight: 700;
-            padding: 15px 30px; border-radius: 12px; text-decoration: none;
-            transition: background .15s, transform .15s;
+        .hero-cta:hover { background: var(--red-deep); }
+
+        /* product preview */
+        .preview {
+            background: var(--panel); border: 1px solid var(--panel-line); border-radius: 18px;
+            padding: 10px; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
         }
-        .signin-btn:hover { background: var(--red-deep); transform: translateY(-1px); }
-        .ms-mark { width: 18px; height: 18px; flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
-        .ms-mark span { display: block; padding-top: 100%; }
-        .ms-mark span:nth-child(1) { background: #F25022; }
-        .ms-mark span:nth-child(2) { background: #7FBA00; }
-        .ms-mark span:nth-child(3) { background: #00A4EF; }
-        .ms-mark span:nth-child(4) { background: #FFB900; }
-        .hint { margin-top: 18px; font-size: 13px; color: var(--muted-2); }
-        .features {
-            margin-top: 52px; display: grid; grid-template-columns: repeat(3, 1fr);
-            gap: 12px; text-align: left;
+        .preview-screen { display: flex; border-radius: 11px; overflow: hidden; height: min(380px, 48vh); background: #F6F6F4; }
+        .pv-rail { width: 170px; flex: none; background: #141414; padding: 18px 14px; display: flex; flex-direction: column; gap: 10px; }
+        .pv-rail img { width: 88px; mix-blend-mode: lighten; margin-bottom: 10px; }
+        .pv-step { display: flex; align-items: center; gap: 8px; }
+        .pv-dot { width: 16px; height: 16px; border-radius: 50%; flex: none; }
+        .pv-dot.on { background: var(--red); }
+        .pv-dot.off { border: 1px solid #3A3A3A; }
+        .pv-line { height: 7px; border-radius: 4px; }
+        .pv-line.bright { background: #3A3A3A; }
+        .pv-line.dim { background: #2A2A2A; }
+        .pv-body { flex: 1; padding: 26px 30px; color: var(--ink); text-align: left; }
+        .pv-eyebrow { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--red); margin-bottom: 6px; }
+        .pv-title { font-size: 19px; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 16px; }
+        .pv-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+        .pv-card { background: #fff; border: 1.5px solid #EAE7E2; border-radius: 9px; padding: 12px; }
+        .pv-card.sel { background: #FCEBED; border-color: var(--red); }
+        .pv-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .pv-name { height: 8px; border-radius: 4px; background: #D8D5CF; }
+        .pv-card.sel .pv-name { background: #33312E; }
+        .pv-badge { font-size: 8px; font-weight: 700; color: var(--red); background: #FCEBED; border-radius: 10px; padding: 2px 7px; }
+        .pv-card.sel .pv-badge { color: #fff; background: var(--red); }
+        .pv-desc { height: 6px; border-radius: 3px; background: #F1EFEB; margin-bottom: 5px; }
+        .pv-card.sel .pv-desc { background: #E8D2D5; }
+
+        /* features + footer strip */
+        .strip { flex: none; border-top: 1px solid #1E1E1E; }
+        .strip-inner {
+            max-width: 1280px; margin: 0 auto;
+            padding: clamp(11px, 2vh, 18px) 48px clamp(11px, 2.2vh, 20px);
+            display: grid; grid-template-columns: repeat(3, 1fr) auto; gap: 36px; align-items: center;
         }
-        .feature {
-            background: var(--ink-2); border: 1px solid var(--line);
-            border-radius: 14px; padding: 18px 16px;
+        .feat { display: flex; gap: 13px; align-items: flex-start; }
+        .feat-ic {
+            width: 32px; height: 32px; flex: none; border-radius: 9px; background: var(--red-soft);
+            color: var(--red-text); display: flex; align-items: center; justify-content: center; font-size: 15px;
         }
-        .feature .f-num {
-            width: 26px; height: 26px; border-radius: 8px; background: rgba(224, 48, 30, 0.18);
-            color: var(--red); font-size: 13px; font-weight: 700;
-            display: flex; align-items: center; justify-content: center; margin-bottom: 12px;
+        .feat-title { font-size: 13.5px; font-weight: 700; margin-bottom: 3px; }
+        .feat-text { font-size: 12px; color: var(--grey); line-height: 1.5; }
+        .copyright { font-size: 11.5px; color: var(--grey-dim); text-align: right; line-height: 1.5; }
+
+        /* ============ SIGN IN ============ */
+        .signin { min-height: 100vh; display: none; align-items: center; justify-content: center; padding: 40px; }
+        .signin-box { width: 420px; max-width: 100%; animation: cw-fade .25s ease; }
+        .signin-logo { text-align: center; margin-bottom: 26px; }
+        .signin-logo img { width: 170px; mix-blend-mode: lighten; }
+        .signin-card {
+            background: #fff; border-radius: 18px; padding: 34px 34px 30px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5); color: var(--ink);
         }
-        .feature .f-title { font-size: 13.5px; font-weight: 700; margin-bottom: 5px; }
-        .feature .f-text { font-size: 12px; line-height: 1.5; color: var(--muted-2); }
-        footer {
-            position: relative; text-align: center; padding: 22px;
-            font-size: 12px; color: var(--muted-2); border-top: 1px solid var(--line);
+        .signin-title { font-size: 21px; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 6px; }
+        .signin-sub { font-size: 13.5px; color: var(--ink-grey); line-height: 1.55; margin-bottom: 24px; }
+        .ms-btn {
+            width: 100%; display: flex; align-items: center; justify-content: center; gap: 12px;
+            background: #fff; border: 1px solid #D5D2CC; border-radius: 11px; padding: 14px;
+            font-size: 14.5px; font-weight: 600; color: var(--ink); cursor: pointer; text-decoration: none;
+            transition: border-color .15s, background .15s;
         }
-        @media (max-width: 620px) {
-            h1 { font-size: 30px; }
-            .features { grid-template-columns: 1fr; }
+        .ms-btn:hover { border-color: #8C8A85; background: #FBFAF8; }
+        .signin-note { margin-top: 20px; font-size: 12px; color: #9A9893; line-height: 1.5; }
+        .signin-back { text-align: center; margin-top: 22px; }
+        .signin-back button {
+            background: none; border: none; color: var(--grey-dim); font-size: 13px; font-weight: 600; cursor: pointer;
+        }
+        .signin-back button:hover { color: var(--grey); }
+        .authing { text-align: center; padding: 26px 0 20px; display: none; }
+        .authing .spin {
+            width: 40px; height: 40px; border: 3.5px solid #EDEAE5; border-top-color: var(--red);
+            border-radius: 50%; animation: cw-spin .8s linear infinite; margin: 0 auto 20px;
+        }
+        .authing .t1 { font-size: 16px; font-weight: 700; }
+        .authing .t2 { font-size: 13px; color: #8C8A85; margin-top: 6px; }
+
+        body.mode-signin .landing { display: none; }
+        body.mode-signin .signin { display: flex; }
+
+        @media (max-width: 900px) {
+            .hero { grid-template-columns: 1fr; gap: 32px; }
+            .preview { display: none; }
+            .strip-inner { grid-template-columns: 1fr; gap: 18px; }
+            .copyright { text-align: left; }
+            .nav, .hero, .strip-inner { padding-left: 24px; padding-right: 24px; }
         }
     </style>
 </head>
 <body>
-    <div class="bg-glow"></div>
-    <div class="wrap">
-        <div class="card">
+
+    <!-- ============ LANDING ============ -->
+    <div class="landing">
+        <div class="nav">
             <img src="/assets/cloudware-logo.png" alt="Cloudware" class="logo">
-            <div class="eyebrow">Email Campaign Generator</div>
-            <h1>Personalised campaigns,<br>from lead list to launch.</h1>
-            <p class="sub">Turn a spreadsheet of leads into polished, multi-touch email campaigns — AI-drafted, reviewed by you, and pushed straight to Snov.io.</p>
-            <a class="signin-btn" href="/.auth/login/aad?post_login_redirect_uri=%2F">
-                <span class="ms-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
-                Sign in with Microsoft
-            </a>
-            <div class="hint">Use your Cloudware work account. Your campaigns and Snov.io connection stay private to you.</div>
-            <div class="features">
-                <div class="feature">
-                    <div class="f-num">1</div>
-                    <div class="f-title">Pick a campaign</div>
-                    <div class="f-text">Renewals, migrations, upsell and cold-outreach motions — managed by your admins.</div>
-                </div>
-                <div class="feature">
-                    <div class="f-num">2</div>
-                    <div class="f-title">Upload &amp; generate</div>
-                    <div class="f-text">Drop a CSV or Excel file. Columns are detected automatically; every email is drafted per lead.</div>
-                </div>
-                <div class="feature">
-                    <div class="f-num">3</div>
-                    <div class="f-title">Review &amp; sync</div>
-                    <div class="f-text">Edit any touch, then push the campaign to Snov.io as a draft — nothing sends without you.</div>
+            <button class="nav-signin" type="button" onclick="goSignin()">Sign in</button>
+        </div>
+
+        <div class="hero">
+            <div>
+                <h1>From lead list to live campaign<br><span class="accent">in four steps.</span></h1>
+                <p class="sub">Upload your leads, and Cloudware drafts a personalised multi-touch email sequence for every contact — reviewed by you, then synced straight to Snov.io.</p>
+                <button class="hero-cta" type="button" onclick="goSignin()">Sign in with your work account &rarr;</button>
+            </div>
+
+            <div class="preview" aria-hidden="true">
+                <div class="preview-screen">
+                    <div class="pv-rail">
+                        <img src="/assets/cloudware-logo.png" alt="">
+                        <div class="pv-step"><div class="pv-dot on"></div><div class="pv-line bright" style="width:64px;"></div></div>
+                        <div class="pv-step"><div class="pv-dot off"></div><div class="pv-line dim" style="width:48px;"></div></div>
+                        <div class="pv-step"><div class="pv-dot off"></div><div class="pv-line dim" style="width:56px;"></div></div>
+                        <div class="pv-step"><div class="pv-dot off"></div><div class="pv-line dim" style="width:40px;"></div></div>
+                    </div>
+                    <div class="pv-body">
+                        <div class="pv-eyebrow">Step 1 of 4</div>
+                        <div class="pv-title">Choose a campaign</div>
+                        <div class="pv-cards">
+                            <div class="pv-card sel">
+                                <div class="pv-card-top"><div class="pv-name" style="width:90px;"></div><div class="pv-badge">4 emails</div></div>
+                                <div class="pv-desc" style="width:100%;"></div><div class="pv-desc" style="width:70%;"></div>
+                            </div>
+                            <div class="pv-card">
+                                <div class="pv-card-top"><div class="pv-name" style="width:76px;"></div><div class="pv-badge">4 emails</div></div>
+                                <div class="pv-desc" style="width:100%;"></div><div class="pv-desc" style="width:60%;"></div>
+                            </div>
+                            <div class="pv-card">
+                                <div class="pv-card-top"><div class="pv-name" style="width:84px;"></div><div class="pv-badge">5 emails</div></div>
+                                <div class="pv-desc" style="width:100%;"></div><div class="pv-desc" style="width:75%;"></div>
+                            </div>
+                            <div class="pv-card">
+                                <div class="pv-card-top"><div class="pv-name" style="width:70px;"></div><div class="pv-badge">8 emails</div></div>
+                                <div class="pv-desc" style="width:100%;"></div><div class="pv-desc" style="width:55%;"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
+
+        <div class="strip">
+            <div class="strip-inner">
+                <div class="feat">
+                    <div class="feat-ic">&#9636;</div>
+                    <div>
+                        <div class="feat-title">Proven campaign templates</div>
+                        <div class="feat-text">Renewals, migrations, demand gen and inbound sequences.</div>
+                    </div>
+                </div>
+                <div class="feat">
+                    <div class="feat-ic">&#9998;</div>
+                    <div>
+                        <div class="feat-title">You review every draft</div>
+                        <div class="feat-text">Edit any subject or body before a single email leaves.</div>
+                    </div>
+                </div>
+                <div class="feat">
+                    <div class="feat-ic">&#8646;</div>
+                    <div>
+                        <div class="feat-title">Native Snov.io sync</div>
+                        <div class="feat-text">Push drafts as a ready-made drip campaign.</div>
+                    </div>
+                </div>
+                <div class="copyright">&copy; 2026 Cloudware<br>Internal use only</div>
+            </div>
+        </div>
     </div>
-    <footer>&copy; Cloudware Limited · Signing in requires a work account approved by your administrator.</footer>
+
+    <!-- ============ SIGN IN ============ -->
+    <div class="signin">
+        <div class="signin-box">
+            <div class="signin-logo"><img src="/assets/cloudware-logo.png" alt="Cloudware"></div>
+            <div class="signin-card">
+                <div id="signin-start">
+                    <div class="signin-title">Sign in</div>
+                    <div class="signin-sub">Use your Cloudware work account. Access is limited to authorised team members.</div>
+                    <a class="ms-btn" href="/.auth/login/aad?post_login_redirect_uri=%2F" onclick="showAuthing()">
+                        <svg width="19" height="19" viewBox="0 0 21 21" aria-hidden="true"><rect x="0" y="0" width="10" height="10" fill="#F25022"></rect><rect x="11" y="0" width="10" height="10" fill="#7FBA00"></rect><rect x="0" y="11" width="10" height="10" fill="#00A4EF"></rect><rect x="11" y="11" width="10" height="10" fill="#FFB900"></rect></svg>
+                        Continue with Microsoft Entra ID
+                    </a>
+                    <div class="signin-note">Single sign-on enforced by your organisation. No passwords are stored by Cloudware.</div>
+                </div>
+                <div class="authing" id="signin-authing">
+                    <div class="spin"></div>
+                    <div class="t1">Signing you in&hellip;</div>
+                    <div class="t2">Verifying with Microsoft Entra ID</div>
+                </div>
+            </div>
+            <div class="signin-back"><button type="button" onclick="backToLanding()">&larr; Back</button></div>
+        </div>
+    </div>
+
     <script>
+        function goSignin() {
+            document.body.classList.add("mode-signin");
+        }
+        function backToLanding() {
+            document.body.classList.remove("mode-signin");
+        }
+        function showAuthing() {
+            document.getElementById("signin-start").style.display = "none";
+            document.getElementById("signin-authing").style.display = "block";
+        }
         // Already signed in? Go straight to the app.
         fetch("/.auth/me").then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
             if (d && d.clientPrincipal) window.location.replace("/");
