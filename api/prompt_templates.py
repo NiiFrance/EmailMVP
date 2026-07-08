@@ -353,16 +353,110 @@ SYSTEM_PROMPT = _load_prompt("cold_email")
 
 
 # ---------------------------------------------------------------------------
+# Table-backed campaign registry (admin-editable) with code fallback
+# ---------------------------------------------------------------------------
+import time as _time
+from datetime import datetime as _datetime, timezone as _timezone
+
+_campaign_cache: dict = {"at": 0.0, "templates": None}
+_CAMPAIGN_CACHE_TTL_SECONDS = 60.0
+
+
+def _template_from_row(row: dict) -> dict:
+    """Build a runtime template dict from a Campaigns table row."""
+    try:
+        num_emails = max(1, min(12, int(row.get("numEmails", 1) or 1)))
+    except (TypeError, ValueError):
+        num_emails = 1
+    required = None
+    raw_fields = row.get("requiredFields")
+    if raw_fields:
+        try:
+            parsed = json.loads(raw_fields)
+            required = {str(k): list(v) for k, v in parsed.items()} if parsed else None
+        except Exception:
+            required = None
+    return {
+        "id": str(row.get("RowKey")),
+        "name": str(row.get("name", row.get("RowKey"))),
+        "group": str(row.get("group", "Custom")),
+        "description": str(row.get("description", "")),
+        "num_emails": num_emails,
+        "system_prompt": str(row.get("systemPrompt", "")),
+        "build_user_prompt": build_user_prompt,
+        "parse_response": _make_parser(num_emails),
+        "output_headers": _make_output_headers_fn(num_emails),
+        "flatten_result": _flatten_emails,
+        "required_fields": required,
+        "builtin": bool(row.get("builtin")),
+        "archived": bool(row.get("archived")),
+    }
+
+
+def _seed_campaigns(ds) -> None:
+    """Seed the Campaigns table from the code registry (first run only)."""
+    now = _datetime.now(_timezone.utc).isoformat()
+    for t in PROMPT_REGISTRY.values():
+        ds.upsert_campaign_entity(t["id"], {
+            "name": t["name"],
+            "group": t["group"],
+            "description": t["description"],
+            "numEmails": t["num_emails"],
+            "systemPrompt": t["system_prompt"],
+            "requiredFields": json.dumps(t.get("required_fields") or {}),
+            "builtin": True,
+            "archived": False,
+            "updatedBy": "seed",
+            "updatedAt": now,
+        })
+    logger.info("Seeded %d built-in campaigns into the Campaigns table.", len(PROMPT_REGISTRY))
+
+
+def _load_campaign_templates(force: bool = False) -> dict | None:
+    """Return {id: template} from the Campaigns table, or None when unavailable."""
+    now = _time.time()
+    if not force and _campaign_cache["templates"] is not None and now - _campaign_cache["at"] < _CAMPAIGN_CACHE_TTL_SECONDS:
+        return _campaign_cache["templates"]
+    try:
+        import data_store
+
+        if data_store.campaigns_table_empty():
+            _seed_campaigns(data_store)
+        rows = data_store.list_campaign_entities(include_archived=True)
+        templates = {str(row.get("RowKey")): _template_from_row(row) for row in rows}
+    except Exception as error:
+        logger.warning("Campaigns table unavailable, using built-in registry: %s", error)
+        templates = None
+    _campaign_cache["at"] = now
+    _campaign_cache["templates"] = templates
+    return templates
+
+
+def invalidate_campaign_cache() -> None:
+    _campaign_cache["templates"] = None
+    _campaign_cache["at"] = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def get_template(template_id: str) -> dict:
-    """Get a template by ID. Raises KeyError if not found."""
+    """Get a template by ID (table-backed with code fallback). Raises KeyError."""
+    templates = _load_campaign_templates()
+    if templates and template_id in templates:
+        return templates[template_id]
     return PROMPT_REGISTRY[template_id]
 
 
 def list_templates() -> list[dict]:
-    """Return template metadata for the frontend (id, name, group, description, num_emails)."""
+    """Return non-archived template metadata for the frontend."""
+    templates = _load_campaign_templates()
+    source = (
+        [t for t in templates.values() if not t.get("archived")]
+        if templates
+        else list(PROMPT_REGISTRY.values())
+    )
     return [
         {
             "id": t["id"],
@@ -371,5 +465,5 @@ def list_templates() -> list[dict]:
             "description": t["description"],
             "num_emails": t["num_emails"],
         }
-        for t in PROMPT_REGISTRY.values()
+        for t in source
     ]

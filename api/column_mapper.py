@@ -26,6 +26,45 @@ _DISQUALIFY = {
     "email_address": ["campaign", "id", "status", "type", "template", "sent", "open", "click", "bounce", "opt"],
 }
 
+# Keywords that identify a single combined "Full Name" column. Used as a fallback to
+# derive first/last name when those dedicated columns are absent.
+_FULL_NAME_KEYWORDS = ["full name", "fullname", "contact name", "prospect name", "lead name", "contact"]
+
+# Human-friendly labels for required fields, used in error messages.
+_FRIENDLY_FIELD = {
+    "first_name": "First Name",
+    "last_name": "Last Name",
+    "organization": "Company / Organization",
+    "organisation_name": "Company / Organization",
+    "email_address": "Email",
+    "license_renewal": "License or Renewal info",
+    "engagement_objectives": "Engagement objective",
+}
+
+
+def _friendly_field(field: str) -> str:
+    return _FRIENDLY_FIELD.get(field, field.replace("_", " ").title())
+
+
+def find_full_name_column(headers: list[str], used_indices: set[int]) -> int | None:
+    """Find a single combined full-name column, skipping first/last/company columns."""
+    for idx, header in enumerate(headers):
+        if idx in used_indices:
+            continue
+        norm = _normalize(header)
+        if any(skip in norm for skip in ("first", "last", "surname", "given", "company", "organi", "user")):
+            continue
+        if any(kw in norm for kw in _FULL_NAME_KEYWORDS):
+            return idx
+    # Accept a bare "name" column only if nothing more specific matched.
+    for idx, header in enumerate(headers):
+        if idx in used_indices:
+            continue
+        if _normalize(header) == "name":
+            return idx
+    return None
+
+
 
 def _normalize(header: str) -> str:
     """Lowercase, strip, collapse whitespace and remove common punctuation."""
@@ -137,29 +176,13 @@ def llm_match_columns(
         return {field: None for field in unresolved}
 
 
-def resolve_columns(
-    headers: list[str],
-    client=None,
-    deployment: str = "",
-    required_fields: dict | None = None,
-) -> dict[str, int]:
-    """Resolve all required fields to column indices.
+def _resolve_core(headers: list[str], client, deployment: str, fields: dict):
+    """Shared detection core. Returns (result, matched, full_idx, still_missing).
 
-    1. Fuzzy-match first.
-    2. For any unresolved fields, try LLM if a client is provided.
-    3. Raise ValueError if any required field is still unresolved.
-
-    Args:
-        headers: List of column header strings.
-        client: Optional AzureOpenAI client for LLM fallback.
-        deployment: Model deployment name.
-        required_fields: Optional dict mapping field names to keyword lists.
-                         Defaults to REQUIRED_FIELDS if not provided.
-
-    Returns:
-        A dict mapping each required field name to its 0-based column index.
+    ``result`` maps directly-resolved fields (and ``full_name`` when first/last are
+    derived from it) to indices. ``matched`` includes first/last keys pointing at the
+    full-name column when derived. ``still_missing`` lists fields with no column.
     """
-    fields = required_fields or REQUIRED_FIELDS
     matched = fuzzy_match_columns(headers, fields)
 
     unresolved = [f for f, idx in matched.items() if idx is None]
@@ -170,14 +193,79 @@ def resolve_columns(
             if idx is not None:
                 matched[field] = idx
 
-    # Check for any still-unresolved fields
+    result = {f: idx for f, idx in matched.items() if idx is not None}
+
+    # Full-name fallback: if first_name and/or last_name are required but still
+    # unmatched, derive them from a single "Full Name" column (split at extraction
+    # time) instead of rejecting the upload. extract_lead_data handles the split.
+    full_idx = None
+    missing_name_fields = [f for f in fields if f in ("first_name", "last_name") and matched.get(f) is None]
+    if missing_name_fields:
+        full_idx = find_full_name_column(headers, set(result.values()))
+        if full_idx is not None:
+            result["full_name"] = full_idx
+            for f in missing_name_fields:
+                matched[f] = full_idx  # mark satisfied (value derived from full name)
+
     still_missing = [f for f, idx in matched.items() if idx is None]
+    return result, matched, full_idx, still_missing
+
+
+def resolve_columns(
+    headers: list[str],
+    client=None,
+    deployment: str = "",
+    required_fields: dict | None = None,
+) -> dict[str, int]:
+    """Resolve all required fields to column indices, raising if any is missing.
+
+    1. Fuzzy-match first.
+    2. For any unresolved fields, try LLM if a client is provided.
+    3. Derive first/last name from a "Full Name" column when present.
+    4. Raise ValueError if any required field is still unresolved.
+    """
+    fields = required_fields or REQUIRED_FIELDS
+    result, _matched, _full_idx, still_missing = _resolve_core(headers, client, deployment, fields)
     if still_missing:
+        missing_labels = ", ".join(_friendly_field(f) for f in still_missing)
+        all_labels = ", ".join(_friendly_field(f) for f in fields)
         raise ValueError(
-            f"Could not detect required columns: {', '.join(still_missing)}. "
-            f"Please ensure your file has columns for: "
-            f"{', '.join(fields.keys())}"
+            f"Could not find a column for: {missing_labels}. "
+            f"This campaign needs columns for: {all_labels}. "
+            f"Tip: a single \u201cFull Name\u201d column can stand in for First/Last Name."
         )
 
-    # At this point every value is an int (not None)
-    return {f: idx for f, idx in matched.items() if idx is not None}
+    # full_name (when present) is returned so extraction can split it; the dedicated
+    # first_name/last_name keys are omitted when derived from it.
+    return result
+
+
+def detect_columns(
+    headers: list[str],
+    client=None,
+    deployment: str = "",
+    required_fields: dict | None = None,
+) -> dict:
+    """Detect column mapping WITHOUT raising — powers the review/correction UI.
+
+    Returns a dict with one entry per required field (best-guess column index,
+    friendly label, and whether it was derived from a Full Name column), plus the
+    list of unresolved fields and the detected full-name column index (if any).
+    """
+    fields = required_fields or REQUIRED_FIELDS
+    result, matched, full_idx, still_missing = _resolve_core(headers, client, deployment, fields)
+    field_info = []
+    for f in fields:
+        idx = matched.get(f)
+        derived = f in ("first_name", "last_name") and f not in result and idx is not None and idx == full_idx
+        field_info.append({
+            "field": f,
+            "label": _friendly_field(f),
+            "index": idx,
+            "derivedFromFullName": bool(derived),
+        })
+    return {
+        "fields": field_info,
+        "unresolved": still_missing,
+        "fullNameIndex": full_idx,
+    }

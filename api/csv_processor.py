@@ -77,6 +77,18 @@ def extract_lead_data(df: pd.DataFrame, row_index: int, column_map: dict | None 
     for field, idx in column_map.items():
         lead[field] = str(row.iloc[idx]) if len(headers) > idx else ""
 
+    # Derive first/last name from a combined "Full Name" column when dedicated
+    # first_name/last_name columns are absent (column_map carries "full_name").
+    full_idx = column_map.get("full_name")
+    if full_idx is not None and len(headers) > full_idx:
+        full_val = str(row.iloc[full_idx]).strip()
+        if full_val and full_val.lower() != "nan":
+            parts = full_val.split()
+            if not str(lead.get("first_name", "")).strip() and parts:
+                lead["first_name"] = parts[0]
+            if not str(lead.get("last_name", "")).strip() and len(parts) > 1:
+                lead["last_name"] = " ".join(parts[1:])
+
     # Add all remaining columns as demographic/psychographic data
     for col_idx in range(len(headers)):
         if col_idx in primary_indices:
