@@ -1,13 +1,12 @@
-# Reliance Infosystems — Email Campaign Generator
+# Cloudware — Email Campaign Generator
 
-A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 10 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
+A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 9 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
 
 ## Live Environments
 
 | Environment | URL |
 |---|---|
-| **Staging** | https://calm-smoke-02e96b50f.6.azurestaticapps.net |
-| **Production** | https://blue-mud-0ae74790f.4.azurestaticapps.net |
+| **Cloudware** | https://zealous-mushroom-0ddbf460f.7.azurestaticapps.net |
 
 ## Available Templates
 
@@ -23,7 +22,6 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 | **Demand Gen** | CloudAscent — Solution Focus | 4 | `first_name`, `organization` |
 | **Demand Gen** | Marketplace Offers | 4 | `first_name`, `organization` |
 | **Demand Gen** | Cold Email — Original | 8 | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
-| **Compliance** | NRS E-Invoice — Nigeria | 4 | `first_name`, `organization` |
 | **Inbound** | Help & Assistance — Leads | 2 | `first_name` |
 
 ## Architecture
@@ -33,7 +31,7 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 ```
 [Azure Static Web App]  -> vanilla HTML/CSS/JS
         |
-        +-> GET  /api/templates        (list 10 campaign templates)
+        +-> GET  /api/templates        (list 9 campaign templates)
         +-> POST /api/upload           (CSV/Excel + template selection)
         +-> GET  /api/status/{jobId}   (real-time progress)
         +-> GET  /api/download/{jobId} (enriched CSV)
@@ -44,26 +42,39 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
    +-> upload_csv               parse file, detect columns, start orchestration
    +-> orchestrate_emails       fan-out/fan-in across leads in batches of 100
    +-> extract_leads_activity   extract lead rows from stored CSV
-   +-> process_lead_activity    build prompt pair, call GPT 5.3, parse JSON
+  +-> process_lead_activity    build prompt pair, call GPT 5.5, parse JSON
    +-> assemble_csv_activity    flatten emails into CSV columns, upload output
 
 [Azure Blob Storage]    <- csv-input / csv-output containers
-[Azure OpenAI]          <- deployment: gpt-53-chat (GPT 5.3)
+[Azure OpenAI]          <- deployment: gpt-5.5 (GPT 5.5)
 ```
 
 ## API Surface
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/templates` | `GET` | Returns all 10 templates with group, description, email count |
+| `/api/templates` | `GET` | Returns all 9 templates with group, description, email count |
 | `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
 | `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
 | `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
+| `/api/snovio/status` | `GET` | Returns whether Snov.io credentials are configured and any active session |
+| `/api/snovio/session` | `POST` / `DELETE` | Opens or closes a secure server-side session for user-supplied Snov.io API keys |
+| `/api/snovio/balance` | `GET` | Returns Snov.io balance preflight data when configured |
+| `/api/snovio/options` | `GET` | Lists Snov.io lists, campaigns, sender accounts, schedules, custom fields, and template mappings |
+| `/api/snovio/preflight` | `GET` | Estimates credits and request volume before Snov.io actions |
+| `/api/jobs/{jobId}/snovio/verify` | `POST` | Starts email verification for generated rows |
+| `/api/jobs/{jobId}/snovio/sync` | `POST` | Dry-runs or syncs eligible rows into a Snov.io list |
+| `/api/jobs/{jobId}/snovio/journey` | `POST` | Dry-runs or builds a multi-touch draft drip campaign from the generated emails |
+| `/api/jobs/{jobId}/snovio/enrich` | `POST` | Dry-runs or starts optional Snov.io enrichment tasks |
+| `/api/snovio/analytics` | `GET` | Proxies campaign analytics and progress |
+| `/api/snovio/webhook` | `POST` | Receives signed Snov.io webhook events |
+| `/api/snovio/suppressions` | `POST` | Adds emails/domains to a Snov.io Do-not-email list |
+| `/api/snovio/recipient-status` | `POST` | Pauses, activates, or unsubscribes a campaign recipient |
 
 ### Upload Form Fields
 
 - `file`: CSV or Excel (.xlsx) file
-- `prompt_id`: one of the 10 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
+- `prompt_id`: one of the 9 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
 
 ## Column Detection
 
@@ -90,7 +101,7 @@ All non-required columns are preserved as context and passed to the model for pe
 The frontend groups templates by campaign category in an `<optgroup>` dropdown:
 
 - Template selector loaded dynamically from `/api/templates`
-- Grouped dropdown: Renewals, Migrations, Demand Generation, Compliance, Inbound
+- Grouped dropdown: Renewals, Migrations, Demand Generation, Inbound
 - Dynamic button text showing email count for selected template
 - CSV and Excel upload support
 - Real-time progress bar with pulse animation during initial batch
@@ -102,7 +113,7 @@ The frontend groups templates by campaign category in an `<optgroup>` dropdown:
 EmailMVP/
 |- api/
 |  |- function_app.py          # HTTP triggers, orchestrator, activities
-|  |- prompt_templates.py      # 10-template registry with shared helpers
+|  |- prompt_templates.py      # 9-template registry with shared helpers
 |  |- csv_processor.py         # CSV/Excel parsing and dynamic CSV assembly
 |  |- column_mapper.py         # Fuzzy matching + LLM fallback for required fields
 |  |- host.json                # Durable Functions configuration
@@ -116,7 +127,6 @@ EmailMVP/
 |  |  |- leads.txt
 |  |  |- marketplace.txt
 |  |  |- price_change.txt
-|  |  |- nrs_einvoice.txt
 |  |  \- cloud_ascent.txt
 |  \- tests/
 |     |- test_column_mapper.py
@@ -137,7 +147,7 @@ EmailMVP/
 
 | Layer | Technology |
 |---|---|
-| AI Model | Azure OpenAI GPT 5.3 (`gpt-53-chat`) |
+| AI Model | Azure OpenAI GPT 5.5 (`gpt-5.5`) |
 | Backend | Azure Functions v4, Durable Functions, Python 3.11 |
 | Frontend | Azure Static Web Apps, vanilla HTML/CSS/JS |
 | File Parsing | pandas + openpyxl |
@@ -145,6 +155,7 @@ EmailMVP/
 | Identity | Managed Identity + RBAC |
 | Secrets | Azure Key Vault |
 | Monitoring | Application Insights |
+| Outreach Integration | Snov.io verification, sync, enrichment, analytics, suppression, and webhooks |
 | IaC | Bicep |
 
 ## Local Development
@@ -168,13 +179,63 @@ pip install -r requirements.txt
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AZURE_OPENAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
     "AZURE_OPENAI_API_KEY": "<api-key>",
-    "AZURE_OPENAI_DEPLOYMENT": "gpt-53-chat",
+    "AZURE_OPENAI_DEPLOYMENT": "gpt-5.5",
     "CSV_INPUT_CONTAINER": "csv-input",
     "CSV_OUTPUT_CONTAINER": "csv-output",
-    "BATCH_SIZE": "100"
+    "BATCH_SIZE": "100",
+    "SNOVIO_CLIENT_ID": "<snovio-client-id>",
+    "SNOVIO_CLIENT_SECRET": "<snovio-client-secret>",
+    "SNOVIO_API_BASE_URL": "https://api.snov.io",
+    "SNOVIO_REQUESTS_PER_MINUTE": "60",
+    "SNOVIO_WEBHOOK_SECRET": "<shared-webhook-secret>",
+    "SNOVIO_TEMPLATE_MAPPINGS": "{}",
+    "SNOVIO_ALLOW_UNKNOWN_VERIFICATION": "false",
+    "SNOVIO_LOW_CREDIT_THRESHOLD": "0",
+    "SNOVIO_SESSION_TTL_SECONDS": "3600",
+    "SNOVIO_SESSION_ENCRYPTION_KEY": "<optional-fernet-key>",
+    "SNOVIO_DEFAULT_DELAY_DAYS": "3",
+    "SNOVIO_CAMPAIGN_TIMEZONE": "",
+    "SNOVIO_CAMPAIGN_ARCHIVE_MONTHS": "3"
   }
 }
 ```
+
+Snov.io settings are optional. If they are absent, `/api/snovio/status` reports the integration as disabled and the generation/download workflow continues unchanged.
+
+Snov.io sync is explicitly user-triggered after generation. Dry-run mode is available from the UI and backend, active campaign sync requires `confirmActiveCampaign=true`, and recipient verification is required by default before live sync.
+
+The app campaign template selected before generation controls the emails GPT creates. The Snov.io campaign selected after generation is optional outreach context. When a Snov.io campaign is selected and its API payload includes `list_id`, sync uses that campaign list automatically. If no list is selected or inferred, the UI can request `autoCreateList=true`; dry-run reports the planned list name, while live sync creates a Snov.io prospect list with `POST /v1/lists` before adding prospects.
+
+### Bring-your-own Snov.io credentials
+
+Credentials are resolved per request. A server-side default can be supplied through Key Vault (`SNOVIO_CLIENT_ID` / `SNOVIO_CLIENT_SECRET`), and a user can additionally connect their own keys from the UI:
+
+1. The browser sends the `client_id` / `client_secret` to `POST /api/snovio/session` over HTTPS.
+2. The backend validates them against Snov.io, then stores them server-side under an opaque session id (encrypted at rest — app-level Fernet encryption when `SNOVIO_SESSION_ENCRYPTION_KEY` is set, otherwise storage encryption only).
+3. The browser keeps only the opaque session id (in `sessionStorage`) and sends it back via the `X-Snovio-Session` header. The secret is never returned to the browser, never written to `localStorage`, and never logged.
+4. `DELETE /api/snovio/session` closes the session and deletes the stored credentials. Sessions also expire after `SNOVIO_SESSION_TTL_SECONDS`.
+
+### Customer journey (drip campaign)
+
+`POST /api/jobs/{jobId}/snovio/journey` turns the drafted, per-lead emails into one multi-touch Snov.io drip campaign:
+
+- The touch count is derived from the generated `Subject_Touch{n}` / `Body_Touch{n}` columns.
+- Each lead's drafted emails are synced as prospect **custom fields**, and every campaign email step references them through merge variables (`{{Subject_Touch1}}`, `{{Body_Touch1}}`, …) — so every recipient receives their own AI-drafted content for each touch.
+- The campaign is created in **draft** state only (this endpoint never starts a campaign). A human reviews and launches it in Snov.io.
+- **Prerequisites:** at least one connected sender email account, and the `Subject_Touch{n}` / `Body_Touch{n}` custom fields must already exist in the Snov.io account (Prospects → custom fields). If they are missing, the journey returns `422` listing the exact field names to create. `delayDays`, tracking, and campaign title are configurable from the UI; `dryRun` previews the full plan without creating anything.
+
+
+For isolated Cloudware test environments that should reuse an existing GPT-5.5 Azure OpenAI deployment, set `existingAzureOpenAiKeyVaultName` during Bicep deployment. The Function App reads `AzureOpenAIEndpoint` and `AzureOpenAIApiKey` from that vault instead of copying the secrets into the new environment vault. Grant the Function App managed identity `Key Vault Secrets User` on the existing vault when the vault is outside the deployment resource group.
+
+Template mappings can be provided with `SNOVIO_TEMPLATE_MAPPINGS` as JSON, for example:
+
+```json
+{
+  "cold_email": { "listId": "1234567", "campaignId": "237945" }
+}
+```
+
+Generated `Subject_TouchN` and `Body_TouchN` values are sent as Snov.io custom fields only when matching custom field labels exist in the Snov.io account.
 
 ### 3. Start local storage
 
@@ -205,7 +266,7 @@ cd api
 python -m pytest tests -q
 ```
 
-Current status: **151 passed**
+Current status: **180 passed**
 
 ## Deployment
 
@@ -235,24 +296,24 @@ npx @azure/static-web-apps-cli deploy ./frontend `
   --env production
 ```
 
-### Staging Environment
+### Cloudware Environment
 
 | Resource | Name |
 |---|---|
-| Resource Group | `rg-emailmvp-stg-eastus2` |
-| Function App | `azfnemailmvpstg6476` |
-| Static Web App | `azswa-emailmvp-stg-6476` |
-| Storage Account | `azstemailmvpstg6476` |
-| App Insights | `appi-emailmvp-stg` |
+| Resource Group | `rg-emailmvp-cloudware-eastus2` |
+| Function App | `azfnzcn6oizgufwbo` |
+| Static Web App | `azswazcn6oizgufwbo` |
+| Storage Account | `azstzcn6oizgufwbo` |
+| App Insights | `azaizcn6oizgufwbo` |
 
 The SWA has the Function App linked as a backend, so `/api/*` routes are proxied automatically.
 
 ## Key Design Decisions
 
-- **10-template registry** with prompts loaded from individual `.txt` files for easy editing
+- **9-template registry** with prompts loaded from individual `.txt` files for easy editing
 - **Unified output schema** — all templates produce `[{"subject": ..., "body": ...}]`, eliminating per-template parsers and flatteners
 - **Shared generic helpers** — factory functions for parsing, headers, and flattening parameterized by email count
-- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Compliance, Inbound)
+- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Inbound)
 - **No custom prompt mode** — removed in favor of purpose-built templates vetted by the marketing team
 - **Excel normalization** — `.xlsx` uploads are converted to CSV at upload time so the downstream pipeline stays consistent
 - **Durable fan-out/fan-in** — batch size 100, 2-second inter-batch delay, 2-hour timeout on EP1

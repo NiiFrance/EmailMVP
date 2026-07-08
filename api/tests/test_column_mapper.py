@@ -132,7 +132,7 @@ class TestLLMMatchColumns:
             choices=[MagicMock(message=MagicMock(content='{"first_name": 0, "last_name": 1}'))]
         )
 
-        result = llm_match_columns(headers, ["first_name", "last_name"], mock_client, "gpt-53-chat")
+        result = llm_match_columns(headers, ["first_name", "last_name"], mock_client, "test-deployment")
         assert result["first_name"] == 0
         assert result["last_name"] == 1
 
@@ -143,14 +143,14 @@ class TestLLMMatchColumns:
             choices=[MagicMock(message=MagicMock(content='{"first_name": null}'))]
         )
 
-        result = llm_match_columns(headers, ["first_name"], mock_client, "gpt-53-chat")
+        result = llm_match_columns(headers, ["first_name"], mock_client, "test-deployment")
         assert result["first_name"] is None
 
     def test_llm_failure_returns_none(self):
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("API error")
 
-        result = llm_match_columns(["A"], ["first_name"], mock_client, "gpt-53-chat")
+        result = llm_match_columns(["A"], ["first_name"], mock_client, "test-deployment")
         assert result["first_name"] is None
 
     def test_llm_out_of_range_index(self):
@@ -160,7 +160,7 @@ class TestLLMMatchColumns:
             choices=[MagicMock(message=MagicMock(content='{"first_name": 99}'))]
         )
 
-        result = llm_match_columns(headers, ["first_name"], mock_client, "gpt-53-chat")
+        result = llm_match_columns(headers, ["first_name"], mock_client, "test-deployment")
         assert result["first_name"] is None
 
     def test_llm_strips_markdown_fences(self):
@@ -170,7 +170,7 @@ class TestLLMMatchColumns:
             choices=[MagicMock(message=MagicMock(content='```json\n{"first_name": 0}\n```'))]
         )
 
-        result = llm_match_columns(headers, ["first_name"], mock_client, "gpt-53-chat")
+        result = llm_match_columns(headers, ["first_name"], mock_client, "test-deployment")
         assert result["first_name"] == 0
 
 
@@ -190,7 +190,7 @@ class TestResolveColumns:
 
     def test_raises_when_fields_missing_no_client(self):
         headers = ["Column A", "Column B"]
-        with pytest.raises(ValueError, match="Could not detect required columns"):
+        with pytest.raises(ValueError, match="Could not find a column for"):
             resolve_columns(headers)
 
     def test_llm_fallback_fills_gaps(self):
@@ -203,7 +203,7 @@ class TestResolveColumns:
             ))]
         )
 
-        result = resolve_columns(headers, client=mock_client, deployment="gpt-53-chat")
+        result = resolve_columns(headers, client=mock_client, deployment="test-deployment")
         assert result["first_name"] == 0
         assert result["last_name"] == 1
         assert result["organization"] == 2
@@ -213,8 +213,8 @@ class TestResolveColumns:
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = Exception("fail")
 
-        with pytest.raises(ValueError, match="Could not detect required columns"):
-            resolve_columns(headers, client=mock_client, deployment="gpt-53-chat")
+        with pytest.raises(ValueError, match="Could not find a column for"):
+            resolve_columns(headers, client=mock_client, deployment="test-deployment")
 
     def test_returns_int_values_only(self):
         headers = ["first_name", "last_name", "organization", "license", "objective"]
@@ -254,8 +254,8 @@ class TestCustomRequiredFields:
         assert result["email_address"] == 3
 
     def test_resolve_raises_for_missing_custom_field(self):
-        headers = ["Name", "Phone"]
-        with pytest.raises(ValueError, match="Could not detect"):
+        headers = ["Phone", "Status"]
+        with pytest.raises(ValueError, match="Could not find a column for"):
             resolve_columns(headers, required_fields=self.E_INVOICE_FIELDS)
 
     def test_none_required_fields_falls_back_to_default(self):

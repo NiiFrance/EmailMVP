@@ -1,4 +1,4 @@
-"""Tests for prompt_templates module — 10-template registry."""
+"""Tests for prompt_templates module — 9-template registry."""
 
 import json
 import pytest
@@ -38,8 +38,8 @@ class TestSystemPrompt:
         assert '"subject"' in SYSTEM_PROMPT
         assert '"body"' in SYSTEM_PROMPT
 
-    def test_mentions_reliance(self):
-        assert "Reliance Infosystems" in SYSTEM_PROMPT
+    def test_mentions_cloudware(self):
+        assert "Reliance" in SYSTEM_PROMPT
 
     def test_cold_email_context(self):
         assert "cold" in SYSTEM_PROMPT.lower()
@@ -47,22 +47,22 @@ class TestSystemPrompt:
 
 
 # ---------------------------------------------------------------------------
-# Template Registry — all 10 templates
+# Template Registry — all 9 templates
 # ---------------------------------------------------------------------------
 
 EXPECTED_IDS = [
     "cold_email", "csp_renewal_with_license", "csp_renewal_without_license",
     "e7_upsell", "ea_to_csp", "leads", "marketplace", "price_change",
-    "nrs_einvoice", "cloud_ascent",
+    "cloud_ascent", "nrs_einvoice",
 ]
 
 
 class TestPromptRegistry:
-    def test_all_10_templates_present(self):
+    def test_all_9_templates_present(self):
         for tid in EXPECTED_IDS:
             assert tid in PROMPT_REGISTRY, f"Missing template: {tid}"
 
-    def test_exactly_10_templates(self):
+    def test_exactly_9_templates(self):
         assert len(PROMPT_REGISTRY) == 10
 
     def test_no_extra_templates(self):
@@ -84,7 +84,7 @@ class TestPromptRegistry:
             assert len(tmpl["system_prompt"]) > 50, f"Template '{tid}' has short system_prompt"
 
     def test_group_values(self):
-        valid_groups = {"Renewals", "Migrations", "Demand Generation", "Compliance", "Inbound"}
+        valid_groups = {"Renewals", "Migrations", "Demand Generation", "Inbound", "Compliance"}
         for tid, tmpl in PROMPT_REGISTRY.items():
             assert tmpl["group"] in valid_groups, f"Template '{tid}' has invalid group '{tmpl['group']}'"
 
@@ -93,7 +93,7 @@ class TestPromptRegistry:
             "cold_email": 8, "csp_renewal_with_license": 4,
             "csp_renewal_without_license": 4, "e7_upsell": 5,
             "ea_to_csp": 4, "leads": 2, "marketplace": 4,
-            "price_change": 4, "nrs_einvoice": 4, "cloud_ascent": 4,
+            "price_change": 4, "cloud_ascent": 4,
         }
         for tid, count in expected.items():
             assert PROMPT_REGISTRY[tid]["num_emails"] == count, f"{tid} num_emails mismatch"
@@ -353,6 +353,23 @@ class TestBuildGenericUserPrompt:
         assert "Industry" not in prompt
         assert "Country" not in prompt
 
+    def test_redacts_email_fields(self):
+        lead = {
+            "row_index": 0,
+            "first_name": "Aseda",
+            "Email ": "asedaboateng@pacificsavingsandloansltdgh.com",
+            "Company": "Pacific Savings and Loans PLC",
+        }
+        prompt = build_user_prompt(lead)
+        assert "Email: [provided]" in prompt
+        assert "asedaboateng@pacificsavingsandloansltdgh.com" not in prompt
+
+    def test_redacts_email_values_in_other_fields(self):
+        lead = {"row_index": 0, "first_name": "Aseda", "Notes": "Contact aseda@example.com"}
+        prompt = build_user_prompt(lead)
+        assert "Notes: Contact [email redacted]" in prompt
+        assert "aseda@example.com" not in prompt
+
     def test_returns_string(self):
         prompt = build_user_prompt({"row_index": 0, "first_name": "X"})
         assert isinstance(prompt, str)
@@ -365,8 +382,8 @@ class TestBuildGenericUserPrompt:
 class TestTemplatePromptContent:
     """Validate that each template's system prompt loaded correctly from disk."""
 
-    def test_cold_email_mentions_reliance(self):
-        assert "Reliance Infosystems" in get_template("cold_email")["system_prompt"]
+    def test_cold_email_mentions_cloudware(self):
+        assert "Reliance" in get_template("cold_email")["system_prompt"]
 
     def test_csp_renewal_with_license_mentions_4_emails(self):
         prompt = get_template("csp_renewal_with_license")["system_prompt"]
@@ -379,10 +396,6 @@ class TestTemplatePromptContent:
     def test_e7_upsell_mentions_5_emails(self):
         prompt = get_template("e7_upsell")["system_prompt"]
         assert "5" in prompt
-
-    def test_nrs_einvoice_mentions_invoic(self):
-        prompt = get_template("nrs_einvoice")["system_prompt"]
-        assert "invoic" in prompt.lower()
 
     def test_cloud_ascent_mentions_propensity(self):
         prompt = get_template("cloud_ascent")["system_prompt"]

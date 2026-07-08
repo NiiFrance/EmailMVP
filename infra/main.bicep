@@ -1,6 +1,6 @@
-// EmailMVP Infrastructure — Azure Functions (Premium EP1) + Storage + Key Vault + Static Web App
-// Deploys all resources needed for the Reliance Infosystems cold email generator.
-// Region: East US 2 (required for Azure Foundry Claude models)
+// EmailMVP Infrastructure - Azure Functions (Premium EP1) + Storage + Key Vault + Static Web App
+// Deploys all resources needed for the Cloudware cold email generator.
+// Region: East US 2
 
 targetScope = 'resourceGroup'
 
@@ -13,16 +13,65 @@ param environmentName string
 @description('Primary location for all resources')
 param location string = 'eastus2'
 
-@description('Anthropic Base URL from Azure Foundry deployment')
+@description('Azure OpenAI endpoint, for example https://<resource>.openai.azure.com/')
 @secure()
-param anthropicBaseUrl string
+param azureOpenAiEndpoint string = ''
 
-@description('Anthropic API Key from Azure Foundry deployment')
+@description('Azure OpenAI API key')
 @secure()
-param anthropicApiKey string
+param azureOpenAiApiKey string = ''
 
-@description('Anthropic model deployment name')
-param anthropicModel string = 'claude-opus-4-6'
+@description('Existing Key Vault name that already contains AzureOpenAIEndpoint and AzureOpenAIApiKey. Leave blank to create secrets in this deployment Key Vault.')
+param existingAzureOpenAiKeyVaultName string = ''
+
+@description('Azure OpenAI deployment name')
+param azureOpenAiDeployment string = 'gpt-5.5'
+
+@description('Number of leads processed concurrently per durable batch')
+param batchSize string = '100'
+
+@description('Snov.io API client ID. Leave blank to disable Snov.io integration.')
+@secure()
+param snovioClientId string = ''
+
+@description('Snov.io API client secret. Leave blank to disable Snov.io integration.')
+@secure()
+param snovioClientSecret string = ''
+
+@description('Snov.io webhook shared secret. Leave blank to disable webhook ingestion.')
+@secure()
+param snovioWebhookSecret string = ''
+
+@description('Maximum Snov.io API requests per minute')
+param snovioRequestsPerMinute string = '60'
+
+@description('Snov.io API base URL')
+param snovioApiBaseUrl string = 'https://api.snov.io'
+
+@description('JSON mapping from app template IDs to Snov.io list and campaign IDs')
+param snovioTemplateMappings string = '{}'
+
+@description('Whether unknown/catch-all verified emails are eligible for Snov.io sync')
+param snovioAllowUnknownVerification string = 'false'
+
+@description('Minimum credit buffer before warning/blocking Snov.io workflows')
+param snovioLowCreditThreshold string = '0'
+
+@description('Fernet key for encrypting per-session Snov.io credentials at rest. Leave blank to rely on storage encryption only.')
+@secure()
+param snovioSessionEncryptionKey string = ''
+
+@description('Lifetime in seconds of a user-supplied Snov.io credential session')
+param snovioSessionTtlSeconds string = '3600'
+
+@description('Default number of days between Snov.io journey campaign touches')
+param snovioDefaultDelayDays string = '3'
+
+@description('Default Snov.io campaign timezone (IANA name, e.g. America/New_York). Blank uses the Snov.io account default.')
+param snovioCampaignTimezone string = ''
+
+@description('Months after which Snov.io journey campaigns auto-archive')
+param snovioCampaignArchiveMonths string = '3'
 
 // -----------------------------------------------------------------------
 // Variables
@@ -36,6 +85,34 @@ var appInsightsName = 'azai${resourceToken}'
 var logAnalyticsName = 'azla${resourceToken}'
 var staticWebAppName = 'azswa${resourceToken}'
 var managedIdentityName = 'azid${resourceToken}'
+var useExistingAzureOpenAiKeyVault = !empty(existingAzureOpenAiKeyVaultName)
+var azureOpenAiKeyVaultName = useExistingAzureOpenAiKeyVault ? existingAzureOpenAiKeyVaultName : keyVaultName
+var azureOpenAiEndpointSetting = '@Microsoft.KeyVault(VaultName=${azureOpenAiKeyVaultName};SecretName=AzureOpenAIEndpoint)'
+var azureOpenAiApiKeySetting = '@Microsoft.KeyVault(VaultName=${azureOpenAiKeyVaultName};SecretName=AzureOpenAIApiKey)'
+var snovioEnabled = !empty(snovioClientId) && !empty(snovioClientSecret)
+var snovioWebhookEnabled = !empty(snovioWebhookSecret)
+var snovioSessionEncryptionEnabled = !empty(snovioSessionEncryptionKey)
+var snovioCredentialAppSettings = snovioEnabled ? [
+  { name: 'SNOVIO_CLIENT_ID', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioClientId)' }
+  { name: 'SNOVIO_CLIENT_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioClientSecret)' }
+] : []
+var snovioWebhookAppSettings = snovioWebhookEnabled ? [
+  { name: 'SNOVIO_WEBHOOK_SECRET', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioWebhookSecret)' }
+] : []
+var snovioSessionEncryptionAppSettings = snovioSessionEncryptionEnabled ? [
+  { name: 'SNOVIO_SESSION_ENCRYPTION_KEY', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=SnovioSessionEncryptionKey)' }
+] : []
+var snovioAppSettings = concat([
+  { name: 'SNOVIO_API_BASE_URL', value: snovioApiBaseUrl }
+  { name: 'SNOVIO_REQUESTS_PER_MINUTE', value: snovioRequestsPerMinute }
+  { name: 'SNOVIO_TEMPLATE_MAPPINGS', value: snovioTemplateMappings }
+  { name: 'SNOVIO_ALLOW_UNKNOWN_VERIFICATION', value: snovioAllowUnknownVerification }
+  { name: 'SNOVIO_LOW_CREDIT_THRESHOLD', value: snovioLowCreditThreshold }
+  { name: 'SNOVIO_SESSION_TTL_SECONDS', value: snovioSessionTtlSeconds }
+  { name: 'SNOVIO_DEFAULT_DELAY_DAYS', value: snovioDefaultDelayDays }
+  { name: 'SNOVIO_CAMPAIGN_TIMEZONE', value: snovioCampaignTimezone }
+  { name: 'SNOVIO_CAMPAIGN_ARCHIVE_MONTHS', value: snovioCampaignArchiveMonths }
+], snovioCredentialAppSettings, snovioWebhookAppSettings, snovioSessionEncryptionAppSettings)
 
 // -----------------------------------------------------------------------
 // User-Assigned Managed Identity
@@ -187,22 +264,58 @@ resource kvSecretsOfficerRole 'Microsoft.Authorization/roleAssignments@2022-04-0
   }
 }
 
-// Store Anthropic API key in Key Vault
-resource anthropicApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+// Store Azure OpenAI API key in Key Vault
+resource azureOpenAiApiKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!useExistingAzureOpenAiKeyVault) {
   parent: keyVault
-  name: 'AnthropicApiKey'
+  name: 'AzureOpenAIApiKey'
   properties: {
-    value: anthropicApiKey
+    value: azureOpenAiApiKey
   }
   dependsOn: [kvSecretsOfficerRole]
 }
 
-// Store Anthropic base URL in Key Vault
-resource anthropicBaseUrlSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+// Store Azure OpenAI endpoint in Key Vault
+resource azureOpenAiEndpointSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (!useExistingAzureOpenAiKeyVault) {
   parent: keyVault
-  name: 'AnthropicBaseUrl'
+  name: 'AzureOpenAIEndpoint'
   properties: {
-    value: anthropicBaseUrl
+    value: azureOpenAiEndpoint
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioClientIdSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioEnabled) {
+  parent: keyVault
+  name: 'SnovioClientId'
+  properties: {
+    value: snovioClientId
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioClientSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioEnabled) {
+  parent: keyVault
+  name: 'SnovioClientSecret'
+  properties: {
+    value: snovioClientSecret
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioWebhookSecretSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioWebhookEnabled) {
+  parent: keyVault
+  name: 'SnovioWebhookSecret'
+  properties: {
+    value: snovioWebhookSecret
+  }
+  dependsOn: [kvSecretsOfficerRole]
+}
+
+resource snovioSessionEncryptionKeySecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = if (snovioSessionEncryptionEnabled) {
+  parent: keyVault
+  name: 'SnovioSessionEncryptionKey'
+  properties: {
+    value: snovioSessionEncryptionKey
   }
   dependsOn: [kvSecretsOfficerRole]
 }
@@ -246,7 +359,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
       cors: {
         allowedOrigins: ['*']
       }
-      appSettings: [
+      appSettings: concat([
         { name: 'AzureWebJobsStorage__accountName', value: storageAccountName }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'AzureWebJobsStorage__clientId', value: managedIdentity.properties.clientId }
@@ -254,14 +367,14 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
         { name: 'APPINSIGHTS_INSTRUMENTATIONKEY', value: appInsights.properties.InstrumentationKey }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-        { name: 'ANTHROPIC_BASE_URL', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AnthropicBaseUrl)' }
-        { name: 'ANTHROPIC_API_KEY', value: '@Microsoft.KeyVault(VaultName=${keyVaultName};SecretName=AnthropicApiKey)' }
-        { name: 'ANTHROPIC_MODEL', value: anthropicModel }
+        { name: 'AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpointSetting }
+        { name: 'AZURE_OPENAI_API_KEY', value: azureOpenAiApiKeySetting }
+        { name: 'AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }
         { name: 'CSV_INPUT_CONTAINER', value: 'csv-input' }
         { name: 'CSV_OUTPUT_CONTAINER', value: 'csv-output' }
-        { name: 'STORAGE_CONNECTION_STRING', value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccountName};EndpointSuffix=${environment().suffixes.storage};AccountKey=PLACEHOLDER' }
-        { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
-      ]
+        { name: 'BATCH_SIZE', value: batchSize }
+        { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'true' }
+      ], snovioAppSettings)
     }
     keyVaultReferenceIdentity: managedIdentity.id
   }

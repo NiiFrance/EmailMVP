@@ -4,119 +4,512 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Email Campaign Generator — Reliance Infosystems</title>
+    <link rel="stylesheet" href="assets/fonts.css">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <header class="header">
-            <div class="logo">
-                <div class="logo-icon">R</div>
-                <div>
-                    <h1>Reliance Infosystems</h1>
-                    <p class="tagline">Email Campaign Generator</p>
+    <div class="app-shell">
+        <!-- ============ SIDEBAR ============ -->
+        <aside class="sidebar">
+            <div class="sidebar-brand">
+                <img src="assets/reliance-logo.png" alt="Reliance Infosystems" class="sidebar-logo">
+            </div>
+            <div class="sidebar-subtitle">Email Campaign Generator</div>
+
+            <div class="nav-row" id="nav-home">
+                <div class="nav-dot">&#8962;</div>
+                <div class="nav-text">
+                    <div class="nav-title">Home</div>
+                    <div class="nav-sub">Dashboard &amp; history</div>
                 </div>
             </div>
-        </header>
 
-        <!-- Main Content -->
-        <main>
-            <!-- Step 1: Upload -->
-            <section id="upload-section" class="card">
-                <h2>Upload Lead File</h2>
-                <p class="description">
-                    Upload your lead data file (CSV or Excel .xlsx).
-                    Columns are detected automatically.
-                    Select a template below, then upload your file.
-                </p>
-
-                <!-- Template Selector -->
-                <div class="template-selector">
-                    <label for="template-select">Campaign Template</label>
-                    <select id="template-select">
-                        <option value="cold_email" selected>Cold Email - Original (8 emails)</option>
-                    </select>
-                    <p id="template-description" class="template-desc">
-                        8-touch cold email sequence for Microsoft licensing outreach. 8 emails per lead.
-                    </p>
+            <div class="nav-row" id="nav-manage" hidden>
+                <div class="nav-dot">&#9881;</div>
+                <div class="nav-text">
+                    <div class="nav-title">Manage</div>
+                    <div class="nav-sub">Campaigns &amp; users</div>
                 </div>
+            </div>
 
-                <div class="upload-area" id="drop-zone">
-                    <div class="upload-icon">&#128196;</div>
-                    <p>Drag &amp; drop your CSV or Excel file here</p>
-                    <p class="upload-or">or</p>
-                    <label for="file-input" class="btn btn-secondary">Browse Files</label>
-                    <input type="file" id="file-input" accept=".csv,.xlsx" hidden>
-                </div>
-
-                <div id="file-info" class="file-info" hidden>
-                    <span id="file-name"></span>
-                    <button id="clear-file" class="btn-clear" title="Remove file">&times;</button>
-                </div>
-
-                <button id="upload-btn" class="btn btn-primary" disabled>
-                    Generate Emails
-                </button>
-
-                <div id="upload-error" class="error" hidden></div>
-            </section>
-
-            <!-- Step 2: Progress -->
-            <section id="progress-section" class="card" hidden>
-                <h2>Generating Emails</h2>
-                <div class="progress-container">
-                    <div class="progress-bar">
-                        <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+            <div class="rail-wrap" id="rail-wrap" hidden>
+                <div class="rail-heading">Current campaign</div>
+                <nav class="step-rail" id="step-rail">
+                    <div class="step-row" data-step="1">
+                        <div class="step-dot">1</div>
+                        <div class="nav-text">
+                            <div class="step-title">Choose a campaign</div>
+                            <div class="nav-sub">Pick a template</div>
+                        </div>
                     </div>
-                    <div class="progress-text">
-                        <span id="progress-status">Starting...</span>
-                        <span id="progress-percent">0%</span>
+                    <div class="step-row" data-step="2">
+                        <div class="step-dot">2</div>
+                        <div class="nav-text">
+                            <div class="step-title">Upload leads</div>
+                            <div class="nav-sub">CSV or Excel</div>
+                        </div>
+                    </div>
+                    <div class="step-row" data-step="3">
+                        <div class="step-dot">3</div>
+                        <div class="nav-text">
+                            <div class="step-title">Review drafts</div>
+                            <div class="nav-sub">Edit every touch</div>
+                        </div>
+                    </div>
+                    <div class="step-row" data-step="4">
+                        <div class="step-dot">4</div>
+                        <div class="nav-text">
+                            <div class="step-title">Send to Snov.io</div>
+                            <div class="nav-sub">Sync the campaign</div>
+                        </div>
+                    </div>
+                </nav>
+            </div>
+
+            <div class="sidebar-foot">
+                <div class="user-chip" id="user-chip" hidden>
+                    <div class="user-avatar" id="user-avatar">?</div>
+                    <div class="user-meta">
+                        <div class="user-name" id="user-name">&mdash;</div>
+                        <div class="user-role-line"><span id="user-role" class="user-role-badge">user</span> &middot; <a href="/.auth/logout" id="user-logout" class="user-logout">Sign out</a></div>
                     </div>
                 </div>
-                <div class="progress-details">
-                    <p><strong>Job ID:</strong> <code id="job-id-display"></code></p>
-                    <p><strong>Total Leads:</strong> <span id="total-leads-display">—</span></p>
-                    <p><strong>Started:</strong> <span id="start-time-display">—</span></p>
-                    <p><strong>Elapsed:</strong> <span id="elapsed-display">—</span></p>
+                <div class="sidebar-snov-line">
+                    <span class="snov-dot" id="sidebar-snov-dot"></span>
+                    <span id="sidebar-snov-text">Snov.io — not connected</span>
                 </div>
-            </section>
+            </div>
+        </aside>
 
-            <!-- Step 3: Download -->
-            <section id="download-section" class="card" hidden>
-                <h2>Emails Generated Successfully</h2>
-                <div class="success-icon">&#10003;</div>
-                <p class="success-message">
-                    All <span id="completed-leads">0</span> leads have been processed.
-                    Your enriched CSV is ready for download.
-                </p>
-                <div class="job-summary">
-                    <p><strong>Total Leads:</strong> <span id="summary-leads">—</span></p>
-                    <p><strong>Elapsed Time:</strong> <span id="summary-elapsed">—</span></p>
-                    <p><strong>Job ID:</strong> <code id="summary-job-id"></code></p>
-                </div>
-                <button id="download-btn" class="btn btn-primary">
-                    Download Enriched CSV
-                </button>
-                <button id="new-job-btn" class="btn btn-secondary">
-                    Process Another File
-                </button>
-            </section>
+        <!-- ============ MAIN ============ -->
+        <main class="main">
+            <div class="main-inner">
 
-            <!-- Error State -->
-            <section id="error-section" class="card" hidden>
-                <h2>Processing Error</h2>
-                <div class="error-icon">&#9888;</div>
-                <p id="error-message" class="error-detail"></p>
-                <button id="retry-btn" class="btn btn-secondary">
-                    Try Again
-                </button>
-            </section>
+                <!-- ---------- HOME ---------- -->
+                <section id="view-home" class="view">
+                    <h1 class="view-title">Welcome back</h1>
+                    <p class="view-lead">Turn a lead list into a personalised, multi-touch email campaign — then push it straight to Snov.io.</p>
+
+                    <div class="home-top">
+                        <!-- hero CTA -->
+                        <div class="hero-card">
+                            <div class="hero-glow"></div>
+                            <div class="hero-body">
+                                <div class="hero-eyebrow">Start here</div>
+                                <div class="hero-headline">Create a new<br>email campaign</div>
+                                <div class="hero-sub">Pick a template, upload your leads, review every draft, and sync — in four steps.</div>
+                                <button id="home-new-campaign" class="btn btn-primary hero-btn" type="button">New campaign &rarr;</button>
+                            </div>
+                        </div>
+                        <!-- snov status -->
+                        <div class="snov-status-card">
+                            <div class="snov-status-head">
+                                <span class="snov-badge">S</span>
+                                <div class="snov-name">Snov.io</div>
+                                <span class="snov-pill" id="home-snov-pill">—</span>
+                            </div>
+                            <div class="snov-status-text" id="home-snov-text">Checking account…</div>
+                            <div class="hr"></div>
+                            <div class="snov-status-foot">Your account connects during the final sync step of any campaign.</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-grid home-stats">
+                        <div class="stat-tile"><div class="stat-value" id="stat-campaigns">0</div><div class="stat-label">Campaigns</div></div>
+                        <div class="stat-tile"><div class="stat-value" id="stat-emails">0</div><div class="stat-label">Emails drafted</div></div>
+                        <div class="stat-tile"><div class="stat-value" id="stat-leads">0</div><div class="stat-label">Leads processed</div></div>
+                    </div>
+
+                    <div class="recent-card">
+                        <div class="recent-head">
+                            <div class="recent-title">Recent campaigns</div>
+                            <div class="recent-meta" id="recent-scope">Your workspace</div>
+                        </div>
+                        <div id="recent-list"></div>
+                        <div id="recent-empty" class="recent-empty">No campaigns yet — start one above.</div>
+                    </div>
+                </section>
+
+                <!-- ---------- STEP 1: CHOOSE ---------- -->
+                <section id="view-step1" class="view" hidden>
+                    <div class="eyebrow">Step 1 of 4</div>
+                    <h1 class="view-title">Choose a campaign</h1>
+                    <p class="view-lead">Pick the sequence that matches your play. Each template drafts a tailored set of touches per lead, personalised from your file.</p>
+
+                    <div id="template-groups"></div>
+                    <!-- Hidden select kept in sync for the rest of the app logic -->
+                    <select id="template-select" hidden><option value="cold_email" selected>Cold Email - Original (8 emails)</option></select>
+                    <p id="template-description" hidden></p>
+
+                    <div class="view-actions">
+                        <button id="step1-continue" class="btn btn-primary" type="button" disabled>Continue &rarr;</button>
+                    </div>
+                </section>
+
+                <!-- ---------- STEP 2: UPLOAD ---------- -->
+                <section id="view-step2" class="view" hidden>
+                    <div class="eyebrow">Step 2 of 4</div>
+                    <h1 class="view-title">Upload your lead list</h1>
+                    <p class="view-lead">Drop a CSV or Excel file. Columns are detected and mapped automatically — you'll get a chance to check them below.</p>
+
+                    <div class="campaign-pill-bar">
+                        <span class="cpb-label">Campaign</span>
+                        <span class="cpb-name" id="step2-campaign-name">—</span>
+                        <span class="cpb-count" id="step2-campaign-count">—</span>
+                    </div>
+
+                    <div class="upload-area" id="drop-zone">
+                        <div id="drop-empty">
+                            <div class="upload-icon">&#8682;</div>
+                            <p class="upload-head">Drag &amp; drop your CSV or Excel file</p>
+                            <p class="upload-or">or</p>
+                            <label for="file-input" class="btn btn-dark">Browse files</label>
+                            <input type="file" id="file-input" accept=".csv,.xlsx" hidden>
+                        </div>
+                        <div id="file-info" class="drop-filled" hidden>
+                            <span class="file-check">&#10003;</span>
+                            <div class="file-meta">
+                                <div id="file-name" class="file-name-txt"></div>
+                                <div id="file-detail" class="file-detail-txt"></div>
+                            </div>
+                            <button id="clear-file" class="btn-clear" title="Remove file" type="button">&times;</button>
+                        </div>
+                    </div>
+
+                    <!-- file format guidance -->
+                    <details class="upload-tips">
+                        <summary>What should my file look like?</summary>
+                        <div class="upload-tips-body">
+                            <p>Almost any CSV or Excel works — column names don't need to be exact, and extra columns are kept as context. For the best results:</p>
+                            <ul>
+                                <li><strong>First row = column headers</strong>, then one lead per row.</li>
+                                <li>Include a <strong>first name</strong> column (e.g. <em>First Name</em>) and a <strong>company</strong> column (e.g. <em>Company</em> or <em>Organization</em>). Some campaigns also use an <strong>email</strong> column.</li>
+                                <li>For company-only lists with no contact name, the greeting may use the company name — add a first-name column to personalise it.</li>
+                                <li>Use a <strong>single sheet</strong>, no merged cells or blank header rows.</li>
+                                <li>Don't include <em>Subject_Touch</em> / <em>Body_Touch</em> columns — those are generated for you.</li>
+                                <li>Formats: <strong>.csv</strong> or <strong>.xlsx</strong>, up to <strong>50&nbsp;MB</strong>.</li>
+                            </ul>
+                        </div>
+                    </details>
+
+                    <!-- detected columns preview -->
+                    <div id="columns-card" class="cols-card" hidden>
+                        <div class="cols-head">
+                            <div class="cols-title">Detected columns</div>
+                            <div id="cols-badge" class="cols-badge">—</div>
+                        </div>
+                        <div class="cols-scroll">
+                            <table id="cols-table" class="cols-table"></table>
+                        </div>
+                    </div>
+
+                    <!-- column mapping review (after upload, before generation) -->
+                    <div id="mapping-card" class="map-card" hidden>
+                        <div class="map-head">
+                            <div class="map-title">Confirm your columns</div>
+                            <p class="map-sub">We matched your file to the fields this campaign needs. Change any that look wrong — then generate.</p>
+                        </div>
+                        <div id="map-rows" class="map-rows"></div>
+                        <p id="map-hint" class="map-hint" hidden></p>
+                    </div>
+
+                    <div id="upload-error" class="error" hidden></div>
+
+                    <div class="view-split">
+                        <button id="step2-back" class="btn btn-secondary" type="button">&larr; Back</button>
+                        <button id="upload-btn" class="btn btn-primary" type="button" disabled>Generate Emails</button>
+                        <button id="generate-btn" class="btn btn-primary" type="button" hidden>Generate emails &rarr;</button>
+                    </div>
+                </section>
+
+                <!-- ---------- STEP 3: REVIEW ---------- -->
+                <section id="view-step3" class="view" hidden>
+                    <!-- generating -->
+                    <div id="generating-block" class="generating-wrap">
+                        <div class="spinner"></div>
+                        <div class="gen-title">Drafting your emails…</div>
+                        <div class="gen-sub">Personalising <span id="gen-emails">—</span> messages across <span id="gen-leads">—</span> leads</div>
+                        <div class="gen-bar"><div class="gen-bar-fill" id="progress-fill" style="width:0%"></div></div>
+                        <div class="gen-status-row">
+                            <span id="progress-status">Starting…</span>
+                            <span id="progress-percent">0%</span>
+                        </div>
+                        <!-- hidden mirrors kept for status display -->
+                        <span id="job-id-display" hidden></span>
+                        <span id="total-leads-display" hidden></span>
+                        <span id="start-time-display" hidden></span>
+                        <span id="elapsed-display" hidden></span>
+                    </div>
+
+                    <!-- generated / review -->
+                    <div id="review-block" hidden>
+                        <div class="eyebrow">Step 3 of 4</div>
+                        <h1 class="view-title">Review &amp; edit drafts</h1>
+                        <p class="view-lead">Every draft is yours to refine before it leaves Reliance Infosystems. Pick a lead, edit any touch — changes save as you type.</p>
+
+                        <div class="stat-grid">
+                            <div class="stat-tile"><div class="stat-value" id="review-leads"><span id="completed-leads">0</span><span id="summary-leads" hidden></span></div><div class="stat-label">Leads processed</div></div>
+                            <div class="stat-tile"><div class="stat-value" id="review-emails">0</div><div class="stat-label">Emails drafted</div></div>
+                            <div class="stat-tile"><div class="stat-value" id="summary-elapsed">—</div><div class="stat-label">Elapsed</div></div>
+                        </div>
+                        <span id="summary-job-id" hidden></span>
+
+                        <div class="review-grid">
+                            <div class="review-leads-panel">
+                                <div class="review-leads-head">Leads</div>
+                                <div id="review-lead-list"></div>
+                            </div>
+                            <div class="review-editor">
+                                <div class="review-editor-head">
+                                    <div class="rev-name" id="review-current-name">—</div>
+                                    <div class="rev-meta" id="review-current-meta">—</div>
+                                </div>
+                                <div class="touch-tabs" id="review-touch-tabs"></div>
+                                <div class="editor-body">
+                                    <label class="field-label">Subject</label>
+                                    <input id="edit-subject" type="text" class="edit-subject">
+                                    <label class="field-label" style="margin-top:16px;">Body</label>
+                                    <textarea id="edit-body" rows="11"></textarea>
+                                    <div class="saved-note"><span class="saved-dot"></span>Draft saved · merge fields resolved per lead</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="view-split">
+                            <button id="step3-back" class="btn btn-secondary" type="button">&larr; Back</button>
+                            <div class="step3-right">
+                                <button id="download-btn" class="btn btn-secondary" type="button">Download CSV</button>
+                                <button id="step3-continue" class="btn btn-primary" type="button">Continue to sync &rarr;</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ---------- STEP 4: SYNC ---------- -->
+                <section id="view-step4" class="view" hidden>
+                    <!-- not synced -->
+                    <div id="sync-block">
+                        <div class="eyebrow">Step 4 of 4</div>
+                        <h1 class="view-title">Send to Snov.io</h1>
+                        <p class="view-lead">Connect your Snov.io account, choose a list, and push the drafts as a multi-touch campaign — created as a draft for your final review.</p>
+
+                        <div id="snovio-panel" class="snovio-panel">
+                            <div class="snovio-header">
+                                <span class="snov-badge">S</span>
+                                <div>
+                                    <h3>Snov.io</h3>
+                                    <p id="snovio-status">Checking account...</p>
+                                </div>
+                                <button id="snovio-refresh-btn" class="btn-icon" title="Refresh Snov.io data" type="button">&#8635;</button>
+                            </div>
+
+                            <div id="snovio-connect" class="snovio-connect">
+                                <div class="snovio-grid">
+                                    <div>
+                                        <label for="snovio-client-id">Snov.io Client ID</label>
+                                        <input id="snovio-client-id" type="text" autocomplete="off" placeholder="From app.snov.io/account/api">
+                                    </div>
+                                    <div>
+                                        <label for="snovio-client-secret">Snov.io Client Secret</label>
+                                        <input id="snovio-client-secret" type="password" autocomplete="off" placeholder="Validated, then held server-side">
+                                    </div>
+                                </div>
+                                <div class="snovio-actions">
+                                    <button id="snovio-connect-btn" class="btn btn-dark" type="button">Connect account</button>
+                                    <button id="snovio-disconnect-btn" class="btn btn-secondary" type="button" hidden>Disconnect</button>
+                                </div>
+                                <p class="snovio-connect-note">Your secret is validated, then held server-side for this session only — it is never stored in your browser.</p>
+                            </div>
+
+                            <div class="snovio-grid">
+                                <div>
+                                    <label for="snovio-list-select">Snov.io list</label>
+                                    <div class="list-row">
+                                        <select id="snovio-list-select" data-tip="Your leads will be added to this existing Snov.io prospect list"></select>
+                                        <button id="snovio-new-list-btn" class="btn btn-secondary btn-newlist" type="button" data-tip="Create a brand-new prospect list in Snov.io for these leads">+ New list</button>
+                                    </div>
+                                    <div id="snovio-new-list-row" class="new-list-row" hidden>
+                                        <input id="snovio-list-name" type="text" autocomplete="off" placeholder="Name your new list">
+                                        <button id="snovio-new-list-cancel" class="btn-clear" type="button" title="Cancel — use an existing list instead">&times;</button>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label for="snovio-campaign-select">Add to existing campaign (optional)</label>
+                                    <select id="snovio-campaign-select" data-tip="Optional: attach the leads to a campaign that already exists in Snov.io"></select>
+                                </div>
+                            </div>
+
+                            <!-- Primary action: push leads to a Snov.io list -->
+                            <div class="snovio-primary">
+                                <button id="snovio-sync-btn" class="btn btn-primary" type="button" data-tip="Adds every eligible lead (with their drafted emails) to the selected Snov.io list">Sync leads to Snov.io</button>
+                                <p class="snovio-primary-note">Adds your leads (and their drafted emails) to a Snov.io list. Pick an existing list above, or click <strong>+ New list</strong> to create one. To turn these into a sending campaign, use <strong>Create a new campaign</strong> under More options.</p>
+                            </div>
+
+                            <!-- Friendly result appears here -->
+                            <div id="snovio-report" class="snovio-report" hidden></div>
+
+                            <!-- Everything optional/advanced is tucked away to keep things simple -->
+                            <details class="snovio-advanced">
+                                <summary>More options &mdash; create a campaign, verify emails, suppression</summary>
+
+                                <div class="snovio-adv-body">
+                                    <div class="snovio-checks">
+                                        <label data-tip="Runs each address through Snov.io verification first and skips risky ones. Costs Snov.io credits."><input id="snovio-require-verification" type="checkbox"> Only sync verified emails <span class="hint">(uses Snov.io credits)</span></label>
+                                        <label data-tip="If no list is selected, a sensibly-named one is created for you automatically"><input id="snovio-auto-create-list" type="checkbox" checked> Create a list automatically if none is selected</label>
+                                        <label data-tip="Safety check — required before adding leads to a campaign that is actively sending"><input id="snovio-confirm-active" type="checkbox"> I understand this campaign is already sending</label>
+                                    </div>
+
+                                    <div class="snovio-actions">
+                                        <button id="snovio-verify-btn" class="btn btn-secondary" type="button" data-tip="Checks which email addresses are safe to send to. Uses Snov.io credits.">Check emails are valid</button>
+                                        <button id="snovio-dry-run-btn" class="btn btn-secondary" type="button" data-tip="Shows exactly what a sync would do — nothing is created or changed">Preview (no changes)</button>
+                                        <button id="snovio-enrich-btn" class="btn btn-secondary" type="button" data-tip="Estimates the Snov.io credits needed to fill in missing lead data">Enrichment estimate</button>
+                                    </div>
+
+                                    <div class="snovio-analytics-row">
+                                        <button id="snovio-analytics-btn" class="btn btn-secondary" type="button" data-tip="Opens sent/opened/replied stats for the campaign selected above">Campaign analytics</button>
+                                        <div class="date-pair">
+                                            <label for="snovio-date-from">From</label>
+                                            <input id="snovio-date-from" type="date" data-tip="Optional start date for the analytics report">
+                                            <label for="snovio-date-to">To</label>
+                                            <input id="snovio-date-to" type="date" data-tip="Optional end date for the analytics report">
+                                        </div>
+                                    </div>
+
+                                    <div class="snovio-journey">
+                                        <h4>Create a new campaign in Snov.io (drip sequence)</h4>
+                                        <p class="snovio-journey-note">This builds a <strong>brand-new</strong> multi-step email campaign in Snov.io from your drafted touches, personalised per lead — you don't need an existing campaign. It's created as a <strong>draft</strong> for you to review and launch; nothing sends automatically. Requires a connected sender account (below). One-time setup: Snov.io needs matching custom fields; we'll tell you exactly which to add if any are missing.</p>
+                                        <div class="snovio-grid">
+                                            <div>
+                                                <label for="snovio-sender-select">Sender accounts</label>
+                                                <select id="snovio-sender-select" multiple size="3" data-tip="The mailbox(es) in Snov.io the campaign will send from — pick at least one"></select>
+                                            </div>
+                                            <div>
+                                                <label for="snovio-journey-title">Campaign title <span class="req-star">*</span></label>
+                                                <input id="snovio-journey-title" type="text" autocomplete="off" placeholder="e.g. Q3 CSP Renewals — South Africa" data-tip="Name your campaign so the team can find it in Snov.io">
+                                            </div>
+                                            <div>
+                                                <label for="snovio-journey-delay">Days between touches</label>
+                                                <input id="snovio-journey-delay" type="number" min="0" max="30" value="3" data-tip="Waiting time between each email in the sequence">
+                                            </div>
+                                        </div>
+                                        <div class="snovio-checks">
+                                            <label data-tip="Records when a recipient opens an email"><input id="snovio-journey-open" type="checkbox" checked> Track opens</label>
+                                            <label data-tip="Records when a recipient clicks a link"><input id="snovio-journey-click" type="checkbox" checked> Track link clicks</label>
+                                        </div>
+                                        <div class="snovio-actions">
+                                            <button id="snovio-journey-preview-btn" class="btn btn-secondary" type="button" data-tip="See the planned email steps and any missing setup — nothing is created">Preview campaign</button>
+                                            <button id="snovio-journey-create-btn" class="btn btn-primary" type="button" data-tip="Builds the campaign in Snov.io as a draft — you review and launch it there">Create new campaign (draft)</button>
+                                        </div>
+                                    </div>
+
+                                    <div class="snovio-journey">
+                                        <h4>Suppression &amp; recipients</h4>
+                                        <p class="snovio-journey-note">Add do-not-email entries, or change a recipient's status in a campaign.</p>
+                                        <div class="snovio-grid snovio-admin-grid">
+                                            <div>
+                                                <label for="snovio-suppression-list-id">Do-not-email list ID</label>
+                                                <input id="snovio-suppression-list-id" type="text" autocomplete="off">
+                                            </div>
+                                            <div>
+                                                <label for="snovio-suppression-items">Emails or domains</label>
+                                                <input id="snovio-suppression-items" type="text" autocomplete="off">
+                                            </div>
+                                            <div>
+                                                <label for="snovio-recipient-email">Recipient email</label>
+                                                <input id="snovio-recipient-email" type="email" autocomplete="off">
+                                            </div>
+                                            <div>
+                                                <label for="snovio-recipient-status">Recipient status</label>
+                                                <select id="snovio-recipient-status">
+                                                    <option value="Paused">Paused</option>
+                                                    <option value="Unsubscribed">Unsubscribed</option>
+                                                    <option value="Active">Active</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="snovio-actions secondary-actions">
+                                            <button id="snovio-suppress-btn" class="btn btn-secondary" type="button">Add suppression</button>
+                                            <button id="snovio-recipient-status-btn" class="btn btn-secondary" type="button">Update recipient</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </details>
+                        </div>
+
+                        <div class="view-split">
+                            <button id="step4-back" class="btn btn-secondary" type="button">&larr; Back</button>
+                            <button id="new-job-btn" class="btn btn-secondary" type="button">Start another campaign</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ---------- ERROR ---------- -->
+                <section id="view-error" class="view" hidden>
+                    <div class="eyebrow eyebrow-error">Something went wrong</div>
+                    <h1 class="view-title">Processing error</h1>
+                    <div class="error-icon">&#9888;</div>
+                    <p id="error-message" class="error-detail"></p>
+                    <div class="view-actions">
+                        <button id="retry-btn" class="btn btn-secondary" type="button">Try Again</button>
+                    </div>
+                </section>
+
+                <!-- ---------- MANAGE (admin) ---------- -->
+                <section id="view-manage" class="view" hidden>
+                    <div class="eyebrow">Admin</div>
+                    <h1 class="view-title">Manage</h1>
+                    <p class="view-lead">Edit the campaigns your team sees on the Campaign screen, and manage user roles.</p>
+
+                    <div class="manage-tabs">
+                        <button id="manage-tab-campaigns" class="manage-tab active" type="button">Campaigns</button>
+                        <button id="manage-tab-users" class="manage-tab" type="button">Users</button>
+                    </div>
+
+                    <div id="manage-campaigns">
+                        <div class="manage-toolbar">
+                            <button id="campaign-new-btn" class="btn btn-primary" type="button">New campaign</button>
+                        </div>
+                        <div id="campaign-list" class="campaign-list"></div>
+
+                        <div id="campaign-editor" class="campaign-editor" hidden>
+                            <div class="ce-head">
+                                <div class="ce-title" id="ce-title">Edit campaign</div>
+                                <button id="ce-close" class="btn-clear" type="button" title="Close">&times;</button>
+                            </div>
+                            <div class="ce-grid">
+                                <div>
+                                    <label for="ce-name">Name</label>
+                                    <input id="ce-name" type="text" autocomplete="off">
+                                </div>
+                                <div>
+                                    <label for="ce-group">Group</label>
+                                    <input id="ce-group" type="text" autocomplete="off" placeholder="e.g. Renewals">
+                                </div>
+                                <div>
+                                    <label for="ce-num">Emails per lead</label>
+                                    <input id="ce-num" type="number" min="1" max="12" value="4">
+                                </div>
+                            </div>
+                            <label for="ce-desc">Description (shown on the Campaign screen)</label>
+                            <input id="ce-desc" type="text" autocomplete="off">
+                            <label for="ce-prompt">System prompt</label>
+                            <textarea id="ce-prompt" rows="14" spellcheck="false"></textarea>
+                            <p class="ce-note">The prompt must tell the model to return ONLY a JSON array with exactly the number of email objects above, each with a "subject" and "body" key.</p>
+                            <div id="ce-error" class="error" hidden></div>
+                            <div class="ce-actions">
+                                <button id="ce-archive" class="btn btn-secondary" type="button">Archive</button>
+                                <button id="ce-save" class="btn btn-primary" type="button">Save campaign</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="manage-users" hidden>
+                        <div id="user-list" class="user-list"></div>
+                    </div>
+                </section>
+
+            </div>
         </main>
-
-        <!-- Footer -->
-        <footer class="footer">
-            <p>Reliance Infosystems</p>
-        </footer>
     </div>
 
     <script src="app.js"></script>

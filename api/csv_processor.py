@@ -77,6 +77,18 @@ def extract_lead_data(df: pd.DataFrame, row_index: int, column_map: dict | None 
     for field, idx in column_map.items():
         lead[field] = str(row.iloc[idx]) if len(headers) > idx else ""
 
+    # Derive first/last name from a combined "Full Name" column when dedicated
+    # first_name/last_name columns are absent (column_map carries "full_name").
+    full_idx = column_map.get("full_name")
+    if full_idx is not None and len(headers) > full_idx:
+        full_val = str(row.iloc[full_idx]).strip()
+        if full_val and full_val.lower() != "nan":
+            parts = full_val.split()
+            if not str(lead.get("first_name", "")).strip() and parts:
+                lead["first_name"] = parts[0]
+            if not str(lead.get("last_name", "")).strip() and len(parts) > 1:
+                lead["last_name"] = " ".join(parts[1:])
+
     # Add all remaining columns as demographic/psychographic data
     for col_idx in range(len(headers)):
         if col_idx in primary_indices:
@@ -95,6 +107,26 @@ def extract_lead_data(df: pd.DataFrame, row_index: int, column_map: dict | None 
 def extract_all_leads(df: pd.DataFrame, column_map: dict | None = None) -> list[dict]:
     """Extract lead data for every row in the DataFrame."""
     return [extract_lead_data(df, i, column_map) for i in range(len(df))]
+
+
+def _format_generation_error(error) -> str:
+    text = str(error)
+    lowered = text.lower()
+
+    if "content_filter" in lowered or "responsibleaipolicyviolation" in lowered:
+        return "Azure OpenAI blocked this lead during safety filtering. Retry with fewer optional contact or context fields."
+
+    if "rate limit" in lowered or "429" in lowered:
+        return "The model was temporarily rate limited. Retry this lead later."
+
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:300] + ("..." if len(text) > 300 else "")
+
+
+def _error_cell_value(header: str, message: str) -> str:
+    if header.startswith("Subject_Touch"):
+        return "Generation unavailable"
+    return f"Generation unavailable for this lead: {message}"
 
 
 def assemble_enriched_csv(
@@ -138,16 +170,18 @@ def assemble_enriched_csv(
         error = result.get("error")
 
         if error:
+            message = _format_generation_error(error)
             for i in range(total_out_cols):
-                df.iloc[row_idx, output_start + i] = f"[ERROR: {error}]"
+                df.iloc[row_idx, output_start + i] = _error_cell_value(out_headers[i], message)
         elif flatten_result and "parsed" in result:
             flat = flatten_result(result["parsed"])
             for col_name, value in flat.items():
                 if col_name in df.columns:
                     df.at[row_idx, col_name] = value
         else:
+            message = "The model returned an invalid response format."
             for i in range(total_out_cols):
-                df.iloc[row_idx, output_start + i] = "[ERROR: Invalid response format]"
+                df.iloc[row_idx, output_start + i] = _error_cell_value(out_headers[i], message)
 
     buf = io.BytesIO()
     df.to_csv(buf, index=False, encoding="utf-8-sig")

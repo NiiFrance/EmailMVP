@@ -20,6 +20,12 @@ local.settings.json
 bin/
 obj/
 
+# Local storage emulator (Azurite)
+.azurite/
+__azurite_db*.json
+__blobstorage__/
+__queuestorage__/
+
 # IDE
 
 .idea/
