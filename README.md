@@ -1,16 +1,22 @@
-# Cloudware — Email Campaign Generator
+# EmailMVP — Email Campaign Generator
 
-A template-driven email campaign generator that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI. Upload a lead file, pick one of 9 built-in campaign templates, and download an enriched CSV with subject lines and email bodies generated per lead.
+A multi-user, template-driven email campaign platform that turns CSV/Excel lead lists into personalized multi-touch email sequences using Azure OpenAI — then pushes them to Snov.io as ready-made drip campaigns. Users sign in with Microsoft Entra ID and get a private workspace (campaign history, resume, saved Snov.io connection); admins manage the campaign library and user roles from an in-app Manage screen.
+
+One codebase powers three branded deployments:
 
 ## Live Environments
 
-| Environment | URL |
-|---|---|
-| **Cloudware** | https://zealous-mushroom-0ddbf460f.7.azurestaticapps.net |
+| Environment | Branch | URL |
+|---|---|---|
+| **Cloudware (Snov.io flagship)** | `feature/cloudware-snovio-foundation` | https://ashy-ocean-0a8e5f60f.7.azurestaticapps.net |
+| **Cloudware** | `multi-prompt-templates-cloudware` | https://mango-bush-067ca3b0f.7.azurestaticapps.net |
+| **Reliance Infosystems** | `main` | https://brave-pebble-0633e900f.7.azurestaticapps.net |
+
+All three require Microsoft Entra ID sign-in (single tenant; external staff join as B2B guests). Anonymous visitors land on a branded sign-in page.
 
 ## Available Templates
 
-All templates share a unified output format: JSON array of `{"subject": ..., "body": ...}` objects, flattened into `Subject_Touch1`, `Body_Touch1`, etc. columns in the output CSV.
+Campaigns are seeded from the code registry into Azure Table Storage on first use and are **admin-editable in-app** (Manage → Campaigns: create, edit prompt/name/description/email count, archive). The built-in seeds share a unified output format: JSON array of `{"subject": ..., "body": ...}` objects, flattened into `Subject_Touch1`, `Body_Touch1`, etc. columns in the output CSV.
 
 | Group | Template | Emails/Lead | Required Fields |
 |---|---|---|---|
@@ -23,40 +29,65 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 | **Demand Gen** | Marketplace Offers | 4 | `first_name`, `organization` |
 | **Demand Gen** | Cold Email — Original | 8 | `first_name`, `last_name`, `organization`, `license_renewal`, `engagement_objectives` |
 | **Inbound** | Help & Assistance — Leads | 2 | `first_name` |
+| **Compliance** *(Reliance only)* | NRS E-Invoice — Nigeria | 4 | `first_name`, `organization` |
+
+The Reliance deployment (`main`) carries its own fully Reliance-branded prompt set including the NRS E-Invoice campaign; the Cloudware deployments carry Cloudware-branded prompts.
 
 ## Architecture
 
 ![Architecture Diagram](emailmvp_architecture.png)
 
 ```
-[Azure Static Web App]  -> vanilla HTML/CSS/JS
+[Azure Static Web App]  -> vanilla HTML/CSS/JS SPA + branded /login.html
+        |   (Entra ID sign-in enforced by SWA; principal forwarded to the API)
         |
-        +-> GET  /api/templates        (list 9 campaign templates)
-        +-> POST /api/upload           (CSV/Excel + template selection)
-        +-> GET  /api/status/{jobId}   (real-time progress)
-        +-> GET  /api/download/{jobId} (enriched CSV)
+        +-> GET  /api/me               (identity, role, resume context)
+        +-> GET  /api/campaigns        (table-backed campaign library)
+        +-> POST /api/upload           (store file + detect columns — no generation yet)
+        +-> POST /api/generate         (confirmed column map -> start orchestration)
+        +-> GET  /api/status/{jobId}   (owner-only progress)
+        +-> GET  /api/download/{jobId} (owner-only enriched CSV)
+        +-> GET  /api/jobs             (my workspace history)
         |
         v
 [Azure Functions App]   -> Python 3.11, Durable Functions, EP1
    |
-   +-> upload_csv               parse file, detect columns, start orchestration
+   +-> upload_csv               parse file, detect columns, return mapping for review
+   +-> generate_emails          validate ownership + column map, start orchestration
    +-> orchestrate_emails       fan-out/fan-in across leads in batches of 100
    +-> extract_leads_activity   extract lead rows from stored CSV
-  +-> process_lead_activity    build prompt pair, call GPT 5.5, parse JSON
+   +-> process_lead_activity    build prompt pair, call the model, parse + retry
    +-> assemble_csv_activity    flatten emails into CSV columns, upload output
 
-[Azure Blob Storage]    <- csv-input / csv-output containers
-[Azure OpenAI]          <- deployment: gpt-5.5 (GPT 5.5)
+[Azure Blob Storage]    <- csv-input / csv-output / snovio session blobs
+[Azure Table Storage]   <- Users / Jobs / SnovioCreds / Campaigns (per-app account)
+[Azure OpenAI]          <- shared deployment: gpt-5.4-mini
 ```
+
+## Identity, Workspaces & Roles
+
+- **Sign-in**: SWA built-in Entra ID auth (custom single-tenant app registration shared by all three SWAs, one redirect URI + client secret per app). Anonymous requests redirect to `/login.html`.
+- **Workspaces**: every job is recorded against the signed-in user; status/download/Snov.io routes enforce ownership (foreign jobs read as 404). The Home dashboard lists the user's history with open-to-resume and a “continue where you left off” banner.
+- **Roles**: `ADMIN_EMAILS` app setting bootstraps permanent admins; additional admins are promoted in-app (Manage → Users). Admins manage the campaign library; users cannot.
+- **Snov.io credentials**: entered once, validated, then stored encrypted per user — future logins auto-connect. Disconnect forgets them.
 
 ## API Surface
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/templates` | `GET` | Returns all 9 templates with group, description, email count |
-| `/api/upload` | `POST` | Accepts `file` + `prompt_id`, starts async generation |
-| `/api/status/{jobId}` | `GET` | Returns orchestration status and progress (processed/total) |
-| `/api/download/{jobId}` | `GET` | Returns the enriched CSV with generated email columns |
+| `/api/me` | `GET` | Signed-in identity, role, and saved resume context |
+| `/api/me/context` | `PUT` | Persist the user's resume context |
+| `/api/users` | `GET` | Admin: list users and roles |
+| `/api/users/{oid}/role` | `PUT` | Admin: promote/demote a user |
+| `/api/jobs` | `GET` | The caller's workspace history |
+| `/api/campaigns` | `GET` | Campaign library (admins may pass `?full=true`) |
+| `/api/campaigns` | `POST` | Admin: create a campaign |
+| `/api/campaigns/{id}` | `PUT` / `DELETE` | Admin: edit or archive a campaign |
+| `/api/templates` | `GET` | Template metadata for the campaign picker |
+| `/api/upload` | `POST` | Accepts `file` + `prompt_id`; stores the file and returns detected columns + mapping for review (does **not** start generation) |
+| `/api/generate` | `POST` | Starts generation for an uploaded job with the user-confirmed column map |
+| `/api/status/{jobId}` | `GET` | Owner-only orchestration status and progress |
+| `/api/download/{jobId}` | `GET` | Owner-only enriched CSV |
 | `/api/snovio/status` | `GET` | Returns whether Snov.io credentials are configured and any active session |
 | `/api/snovio/session` | `POST` / `DELETE` | Opens or closes a secure server-side session for user-supplied Snov.io API keys |
 | `/api/snovio/balance` | `GET` | Returns Snov.io balance preflight data when configured |
@@ -74,7 +105,7 @@ All templates share a unified output format: JSON array of `{"subject": ..., "bo
 ### Upload Form Fields
 
 - `file`: CSV or Excel (.xlsx) file
-- `prompt_id`: one of the 9 template IDs (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
+- `prompt_id`: any campaign id from `/api/campaigns` (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
 
 ## Column Detection
 
@@ -82,7 +113,8 @@ Required columns are detected automatically using a two-stage resolver:
 
 1. **Fuzzy matching** against template-specific keyword sets (e.g. "company", "firm", "employer" all resolve to `organization`)
 2. **Azure OpenAI fallback** for any unresolved fields
-3. Upload rejection with a clear error if fields still cannot be resolved
+3. A combined **"Full Name" column can stand in** for first/last name (split at extraction time)
+4. The user then **reviews the mapping in a "Confirm your columns" panel** before generation — each dropdown shows a sample value, so even blank/`Unnamed` headers can be pointed at the right field
 
 Invalid email addresses (containing patterns like `noemail`, `unknown`, `test@test`) are automatically disqualified during mapping.
 
@@ -98,46 +130,39 @@ All non-required columns are preserved as context and passed to the model for pe
 
 ## Frontend
 
-The frontend groups templates by campaign category in an `<optgroup>` dropdown:
+A single-page app with a branded public sign-in page and a four-step wizard:
 
-- Template selector loaded dynamically from `/api/templates`
-- Grouped dropdown: Renewals, Migrations, Demand Generation, Inbound
-- Dynamic button text showing email count for selected template
-- CSV and Excel upload support
-- Real-time progress bar with pulse animation during initial batch
-- Job summary (leads, elapsed time, job ID) on the download screen
+- **/login.html** — designed landing page (hero, product preview, feature strip) with “Sign in with Microsoft”
+- **Home** — workspace dashboard: stats, campaign history with open-to-resume, continue-where-you-left-off banner, Snov.io connection status
+- **Steps 1–4** — Choose a campaign (grouped cards) → Upload leads (drag-drop, format guidance, detected-columns preview, mapping confirmation) → Review & edit every drafted touch → Send to Snov.io (list sync, drip-campaign creation, verification, suppression — with hover tooltips throughout)
+- **Manage** *(admins)* — campaign library editor and user role management
+- Sidebar shows the signed-in user chip with role badge and sign-out
 
 ## Project Structure
 
 ```
 EmailMVP/
 |- api/
-|  |- function_app.py          # HTTP triggers, orchestrator, activities
-|  |- prompt_templates.py      # 9-template registry with shared helpers
+|  |- function_app.py          # HTTP triggers, identity/roles, orchestrator, activities
+|  |- data_store.py            # Table Storage layer (Users, Jobs, SnovioCreds, Campaigns)
+|  |- prompt_templates.py      # Template registry (table-backed w/ code fallback + seeds)
 |  |- csv_processor.py         # CSV/Excel parsing and dynamic CSV assembly
-|  |- column_mapper.py         # Fuzzy matching + LLM fallback for required fields
+|  |- column_mapper.py         # Fuzzy matching + LLM fallback + full-name splitting
+|  |- snovio_client.py         # Snov.io API client (OAuth, throttling)
+|  |- snovio_workflows.py      # Verification, sync, prospect payloads, reports
+|  |- snovio_campaigns.py      # Drip-campaign (journey) builder
 |  |- host.json                # Durable Functions configuration
 |  |- requirements.txt         # Python dependencies
-|  |- prompts/                 # System prompt text files (one per template)
-|  |  |- cold_email.txt
-|  |  |- csp_renewal_with_license.txt
-|  |  |- csp_renewal_without_license.txt
-|  |  |- e7_upsell.txt
-|  |  |- ea_to_csp.txt
-|  |  |- leads.txt
-|  |  |- marketplace.txt
-|  |  |- price_change.txt
-|  |  \- cloud_ascent.txt
+|  |- prompts/                 # System prompt text files (one per built-in template)
 |  \- tests/
-|     |- test_column_mapper.py
-|     |- test_csv_processor.py
-|     |- test_function_app.py
-|     \- test_prompt_templates.py
 |- frontend/
-|  |- index.html               # Upload UI with grouped template selector
-|  |- app.js                   # Upload, polling, download, template loading
-|  |- styles.css               # UI styling and progress animation
-|  \- staticwebapp.config.json
+|  |- login.html               # Public branded sign-in page
+|  |- index.html               # SPA (Home, wizard steps 1-4, Manage)
+|  |- app.js                   # Views, auth, upload/mapping, review, Snov.io, admin
+|  |- styles.css               # Design system, tooltips, admin screens
+|  |- assets/                  # Brand logo + fonts
+|  \- staticwebapp.config.json # Entra auth provider + route lockdown
+|- scripts/                    # Deploy + Azure utility scripts (incl. setup_swa_auth.ps1)
 |- infra/
 |  \- main.bicep
 \- README.md
@@ -147,15 +172,16 @@ EmailMVP/
 
 | Layer | Technology |
 |---|---|
-| AI Model | Azure OpenAI GPT 5.5 (`gpt-5.5`) |
+| AI Model | Azure OpenAI (`gpt-5.4-mini`, shared deployment) |
 | Backend | Azure Functions v4, Durable Functions, Python 3.11 |
 | Frontend | Azure Static Web Apps, vanilla HTML/CSS/JS |
+| Identity (users) | Microsoft Entra ID via SWA built-in auth (B2B guests for external staff) |
 | File Parsing | pandas + openpyxl |
-| Storage | Azure Blob Storage |
-| Identity | Managed Identity + RBAC |
-| Secrets | Azure Key Vault |
+| Storage | Azure Blob Storage + Azure Table Storage (users/jobs/creds/campaigns) |
+| Identity (infra) | Managed Identity + RBAC |
+| Secrets | Azure Key Vault + encrypted-at-rest per-user Snov.io credentials |
 | Monitoring | Application Insights |
-| Outreach Integration | Snov.io verification, sync, enrichment, analytics, suppression, and webhooks |
+| Outreach Integration | Snov.io verification, sync, drip campaigns, enrichment, analytics, suppression, webhooks |
 | IaC | Bicep |
 
 ## Local Development
@@ -179,7 +205,7 @@ pip install -r requirements.txt
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AZURE_OPENAI_ENDPOINT": "https://<your-resource>.openai.azure.com/",
     "AZURE_OPENAI_API_KEY": "<api-key>",
-    "AZURE_OPENAI_DEPLOYMENT": "gpt-5.5",
+    "AZURE_OPENAI_DEPLOYMENT": "gpt-5.4-mini",
     "CSV_INPUT_CONTAINER": "csv-input",
     "CSV_OUTPUT_CONTAINER": "csv-output",
     "BATCH_SIZE": "100",
@@ -195,7 +221,8 @@ pip install -r requirements.txt
     "SNOVIO_SESSION_ENCRYPTION_KEY": "<optional-fernet-key>",
     "SNOVIO_DEFAULT_DELAY_DAYS": "3",
     "SNOVIO_CAMPAIGN_TIMEZONE": "",
-    "SNOVIO_CAMPAIGN_ARCHIVE_MONTHS": "3"
+    "SNOVIO_CAMPAIGN_ARCHIVE_MONTHS": "3",
+    "ADMIN_EMAILS": "you@yourtenant.com"
   }
 }
 ```
@@ -225,7 +252,7 @@ Credentials are resolved per request. A server-side default can be supplied thro
 - **Prerequisites:** at least one connected sender email account, and the `Subject_Touch{n}` / `Body_Touch{n}` custom fields must already exist in the Snov.io account (Prospects → custom fields). If they are missing, the journey returns `422` listing the exact field names to create. `delayDays`, tracking, and campaign title are configurable from the UI; `dryRun` previews the full plan without creating anything.
 
 
-For isolated Cloudware test environments that should reuse an existing GPT-5.5 Azure OpenAI deployment, set `existingAzureOpenAiKeyVaultName` during Bicep deployment. The Function App reads `AzureOpenAIEndpoint` and `AzureOpenAIApiKey` from that vault instead of copying the secrets into the new environment vault. Grant the Function App managed identity `Key Vault Secrets User` on the existing vault when the vault is outside the deployment resource group.
+For isolated test environments that should reuse an existing Azure OpenAI deployment, set `existingAzureOpenAiKeyVaultName` during Bicep deployment. The Function App reads `AzureOpenAIEndpoint` and `AzureOpenAIApiKey` from that vault instead of copying the secrets into the new environment vault. Grant the Function App managed identity `Key Vault Secrets User` on the existing vault when the vault is outside the deployment resource group.
 
 Template mappings can be provided with `SNOVIO_TEMPLATE_MAPPINGS` as JSON, for example:
 
@@ -266,57 +293,59 @@ cd api
 python -m pytest tests -q
 ```
 
-Current status: **180 passed**
+Current status: **201+ passing** (203 on `main`, which carries extra Reliance template tests)
 
 ## Deployment
 
 ### Backend — Function App (ZIP deploy with remote build)
 
 ```powershell
-# Create zip from api/ excluding dev files
+# Preferred: use the helper script (zips api/, deploys with remote build, restarts)
+.\scripts\redeploy_api.ps1
+
+# Or manually:
 cd api
 $items = Get-ChildItem -Path . -Exclude tests,__pycache__,.pytest_cache,.venv,.funcignore,local.settings.json
 Compress-Archive -Path ($items | ForEach-Object { $_.FullName }) -DestinationPath ..\deploy.zip -Force
-
-# Deploy with Oryx build (required for pip install)
 az functionapp deployment source config-zip `
-  --resource-group rg-emailmvp-stg-eastus2 `
-  --name azfnemailmvpstg6476 `
+  --resource-group <resource-group> `
+  --name <function-app> `
   --src ..\deploy.zip `
   --build-remote true
+az functionapp restart --resource-group <resource-group> --name <function-app>
 ```
 
-**Important:** `SCM_DO_BUILD_DURING_DEPLOYMENT` must be `true` in app settings, otherwise `requirements.txt` dependencies won't be installed.
+**Important:** `SCM_DO_BUILD_DURING_DEPLOYMENT` must be `true` in app settings, otherwise `requirements.txt` dependencies won't be installed. A restart after deploy is required for the new package to load. If Oryx serves a cached build, bump the `# cache-bust` comment in `api/requirements.txt`.
 
 ### Frontend — Static Web App
 
 ```powershell
+# Preferred: helper script (fetches the deployment token and runs the SWA CLI)
+.\scripts\deploy_frontend.ps1
+
+# Or manually:
 npx @azure/static-web-apps-cli deploy ./frontend `
   --deployment-token <token> `
   --env production
 ```
 
-### Cloudware Environment
+### Entra ID auth for a new SWA
 
-| Resource | Name |
-|---|---|
-| Resource Group | `rg-emailmvp-cloudware-eastus2` |
-| Function App | `azfnzcn6oizgufwbo` |
-| Static Web App | `azswazcn6oizgufwbo` |
-| Storage Account | `azstzcn6oizgufwbo` |
-| App Insights | `azaizcn6oizgufwbo` |
+`scripts/setup_swa_auth.ps1` wires a Static Web App to the shared Entra app registration: it appends the SWA's `/.auth/login/aad/callback` redirect URI, mints a dedicated client secret (append — never reset), and sets `AAD_CLIENT_ID` / `AAD_CLIENT_SECRET` on the SWA.
 
-The SWA has the Function App linked as a backend, so `/api/*` routes are proxied automatically.
+### Environments
+
+Each deployment has its own resource group, Function App, Static Web App, and storage account (see Live Environments above). Every SWA has its Function App linked as a backend, so `/api/*` routes are proxied automatically.
 
 ## Key Design Decisions
 
-- **9-template registry** with prompts loaded from individual `.txt` files for easy editing
+- **Table-backed campaign registry** — campaigns live in Azure Table Storage (seeded from code `.txt` prompts on first use) so admins can create/edit/archive them in-app without a deploy
 - **Unified output schema** — all templates produce `[{"subject": ..., "body": ...}]`, eliminating per-template parsers and flatteners
+- **Two-phase upload** — upload detects and proposes a column mapping the user confirms before generation, instead of rejecting ambiguous files
+- **Per-user workspaces** — jobs, resume context, and encrypted Snov.io credentials are keyed by the Entra object id; ownership is enforced server-side (foreign jobs return 404)
 - **Shared generic helpers** — factory functions for parsing, headers, and flattening parameterized by email count
-- **Grouped dropdown UI** — templates organized by campaign category (Renewals, Migrations, Demand Gen, Inbound)
 - **No custom prompt mode** — removed in favor of purpose-built templates vetted by the marketing team
 - **Excel normalization** — `.xlsx` uploads are converted to CSV at upload time so the downstream pipeline stays consistent
 - **Durable fan-out/fan-in** — batch size 100, 2-second inter-batch delay, 2-hour timeout on EP1
-- The cold-email template remains backward compatible through `SYSTEM_PROMPT` and `build_user_prompt` aliases
 
 See `PLAN.md` for the implementation history and the design changes that took the app from a single-purpose cold-email generator to a multi-template branch.

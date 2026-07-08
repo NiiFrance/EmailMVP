@@ -2,6 +2,8 @@
 
 > Design decisions, architecture, and implementation history for the EmailMVP email campaign generator. The app supports 9 built-in campaign templates covering renewals, migrations, demand generation, and inbound motions.
 
+> **Note (July 2026):** This document is a historical record of the original single-user generator. The app has since evolved into a multi-user platform — Microsoft Entra ID sign-in, per-user workspaces with resume, admin-managed campaigns in Table Storage, persistent per-user Snov.io credentials, a two-phase upload with column-mapping review, a branded landing page, and three live deployments (Cloudware Snov.io flagship, Cloudware, Reliance). See `README.md` for the current state of the platform.
+
 ---
 
 ## 1. Problem Statement
