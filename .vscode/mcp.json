@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "snovio": {
+      "type": "http",
+      "url": "https://mcp.snov.io/mcp"
+    }
+  }
+}

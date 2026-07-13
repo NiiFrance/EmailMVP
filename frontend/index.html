@@ -177,6 +177,26 @@
                     </div>
 
                     <!-- file format guidance -->
+                    <details class="upload-tips" id="lead-search-panel">
+                        <summary>Find leads in Snov.io instead (no file needed)</summary>
+                        <div class="upload-tips-body">
+                            <p>Describe who you're after and we'll search Snov.io's database — the results become your lead list. Requires the <strong>Connect Snov.io</strong> sign-in (step 4).</p>
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                                <input id="lead-search-prompt" type="text" style="flex:1;min-width:260px;" placeholder="e.g. CFOs at financial services companies in Lagos, 51-200 employees">
+                                <button id="lead-search-btn" class="btn btn-dark" type="button">Search</button>
+                            </div>
+                            <div id="lead-search-status" class="file-detail-txt" style="margin-top:8px;"></div>
+                            <div id="lead-search-results" hidden style="margin-top:10px;">
+                                <div style="max-height:220px;overflow:auto;"><table class="cols-table" id="lead-search-table"></table></div>
+                                <div style="display:flex;gap:8px;margin-top:10px;align-items:center;">
+                                    <button id="lead-search-use-btn" class="btn btn-primary" type="button">Save to Snov.io &amp; use these leads →</button>
+                                    <button id="lead-search-more-btn" class="btn btn-secondary" type="button">Load more</button>
+                                    <span id="lead-search-count" class="file-detail-txt"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+
                     <details class="upload-tips">
                         <summary>What should my file look like?</summary>
                         <div class="upload-tips-body">
@@ -304,21 +324,29 @@
                             </div>
 
                             <div id="snovio-connect" class="snovio-connect">
-                                <div class="snovio-grid">
-                                    <div>
-                                        <label for="snovio-client-id">Snov.io Client ID</label>
-                                        <input id="snovio-client-id" type="text" autocomplete="off" placeholder="From app.snov.io/account/api">
-                                    </div>
-                                    <div>
-                                        <label for="snovio-client-secret">Snov.io Client Secret</label>
-                                        <input id="snovio-client-secret" type="password" autocomplete="off" placeholder="Validated, then held server-side">
-                                    </div>
+                                <div class="snovio-actions" style="margin-bottom:10px;">
+                                    <button id="snovio-mcp-connect-btn" class="btn btn-dark" type="button" data-tip="Sign in to Snov.io once — no API keys needed">Connect Snov.io (no keys needed)</button>
+                                    <button id="snovio-mcp-disconnect-btn" class="btn btn-secondary" type="button" hidden>Disconnect Snov.io login</button>
+                                    <span id="snovio-mcp-status" class="snovio-connect-note" style="margin:0;"></span>
                                 </div>
-                                <div class="snovio-actions">
-                                    <button id="snovio-connect-btn" class="btn btn-dark" type="button">Connect account</button>
-                                    <button id="snovio-disconnect-btn" class="btn btn-secondary" type="button" hidden>Disconnect</button>
-                                </div>
-                                <p class="snovio-connect-note">Your secret is validated, then held server-side for this session only — it is never stored in your browser.</p>
+                                <details class="snovio-keys-fallback">
+                                    <summary>Or connect with API keys (advanced)</summary>
+                                    <div class="snovio-grid" style="margin-top:10px;">
+                                        <div>
+                                            <label for="snovio-client-id">Snov.io Client ID</label>
+                                            <input id="snovio-client-id" type="text" autocomplete="off" placeholder="From app.snov.io/account/api">
+                                        </div>
+                                        <div>
+                                            <label for="snovio-client-secret">Snov.io Client Secret</label>
+                                            <input id="snovio-client-secret" type="password" autocomplete="off" placeholder="Validated, then held server-side">
+                                        </div>
+                                    </div>
+                                    <div class="snovio-actions">
+                                        <button id="snovio-connect-btn" class="btn btn-dark" type="button">Connect account</button>
+                                        <button id="snovio-disconnect-btn" class="btn btn-secondary" type="button" hidden>Disconnect</button>
+                                    </div>
+                                    <p class="snovio-connect-note">Your secret is validated, then held server-side for this session only — it is never stored in your browser.</p>
+                                </details>
                             </div>
 
                             <div class="snovio-grid">
@@ -510,6 +538,27 @@
 
             </div>
         </main>
+    </div>
+
+    <!-- ── In-app copilot ── -->
+    <button id="copilot-fab" type="button" title="Ask the copilot"
+        style="position:fixed;right:24px;bottom:24px;z-index:60;width:56px;height:56px;border-radius:50%;border:none;background:#CE1126;color:#fff;font-size:22px;cursor:pointer;box-shadow:0 4px 24px rgba(206,17,38,.4);">&#10024;</button>
+    <div id="copilot-panel" hidden
+        style="position:fixed;right:24px;bottom:92px;z-index:60;width:min(420px,92vw);height:min(560px,72vh);background:#1A1A1A;border:1px solid #2C2C2C;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.5);">
+        <div style="padding:14px 16px;border-bottom:1px solid #2C2C2C;display:flex;align-items:center;gap:10px;">
+            <span style="font-size:18px;">&#10024;</span>
+            <div style="flex:1;">
+                <div style="font-weight:700;color:#fff;">Copilot</div>
+                <div id="copilot-sub" style="font-size:12px;color:#A8A6A2;">Lists, leads &amp; campaign questions</div>
+            </div>
+            <button id="copilot-close" type="button" style="background:none;border:none;color:#A8A6A2;font-size:20px;cursor:pointer;">&times;</button>
+        </div>
+        <div id="copilot-messages" style="flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;font-size:13.5px;line-height:1.55;color:#eee;"></div>
+        <div style="padding:12px;border-top:1px solid #2C2C2C;display:flex;gap:8px;">
+            <input id="copilot-input" type="text" placeholder="e.g. Which of my lists has the most prospects?"
+                style="flex:1;background:#0E0E0E;border:1px solid #2C2C2C;border-radius:10px;color:#fff;padding:10px 12px;font-size:13.5px;">
+            <button id="copilot-send" type="button" class="btn btn-primary" style="padding:10px 16px;">Send</button>
+        </div>
     </div>
 
     <script src="app.js"></script>

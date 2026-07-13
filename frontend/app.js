@@ -1319,6 +1319,207 @@
     if (snovioNewListCancel) snovioNewListCancel.addEventListener("click", exitNewListMode);
     if (snovioConnectBtn) snovioConnectBtn.addEventListener("click", connectSnovio);
     if (snovioDisconnectBtn) snovioDisconnectBtn.addEventListener("click", disconnectSnovio);
+
+    // ── Snov.io MCP (OAuth) connect ──
+    const mcpConnectBtn = document.getElementById("snovio-mcp-connect-btn");
+    const mcpDisconnectBtn = document.getElementById("snovio-mcp-disconnect-btn");
+    const mcpStatusEl = document.getElementById("snovio-mcp-status");
+
+    async function refreshMcpStatus() {
+        if (!mcpStatusEl) return false;
+        try {
+            const resp = await fetch("/api/snovio/mcp/status");
+            const data = resp.ok ? await resp.json() : {};
+            const connected = !!data.connected;
+            mcpStatusEl.textContent = connected ? "Signed in to Snov.io \u2713" : "Not signed in yet";
+            if (mcpConnectBtn) mcpConnectBtn.textContent = connected ? "Reconnect Snov.io" : "Connect Snov.io (no keys needed)";
+            if (mcpDisconnectBtn) mcpDisconnectBtn.hidden = !connected;
+            return connected;
+        } catch (e) { mcpStatusEl.textContent = ""; return false; }
+    }
+
+    if (mcpConnectBtn) mcpConnectBtn.addEventListener("click", async () => {
+        mcpConnectBtn.disabled = true;
+        try {
+            const resp = await fetch("/api/snovio/mcp/connect");
+            const data = await resp.json();
+            if (!resp.ok || !data.authorizeUrl) throw new Error(data.error || "Could not start the connection");
+            window.open(data.authorizeUrl, "_blank", "noopener");
+            mcpStatusEl.textContent = "Waiting for Snov.io sign-in\u2026";
+            const poll = setInterval(async () => {
+                const ok = await refreshMcpStatus();
+                if (ok) clearInterval(poll);
+            }, 3000);
+            setTimeout(() => clearInterval(poll), 180000);
+        } catch (e) {
+            mcpStatusEl.textContent = e.message || "Connection failed";
+        } finally {
+            mcpConnectBtn.disabled = false;
+        }
+    });
+    if (mcpDisconnectBtn) mcpDisconnectBtn.addEventListener("click", async () => {
+        await fetch("/api/snovio/mcp/disconnect", { method: "POST" });
+        refreshMcpStatus();
+    });
+    window.addEventListener("message", (e) => {
+        if (e.data && e.data.snovioMcp === "done") refreshMcpStatus();
+    });
+    refreshMcpStatus();
+
+    // ── Lead sourcing (Step 2): search Snov.io's database instead of uploading ──
+    const leadSearchBtn = document.getElementById("lead-search-btn");
+    const leadSearchPrompt = document.getElementById("lead-search-prompt");
+    const leadSearchStatus = document.getElementById("lead-search-status");
+    const leadSearchResults = document.getElementById("lead-search-results");
+    const leadSearchTable = document.getElementById("lead-search-table");
+    const leadSearchUseBtn = document.getElementById("lead-search-use-btn");
+    const leadSearchMoreBtn = document.getElementById("lead-search-more-btn");
+    const leadSearchCount = document.getElementById("lead-search-count");
+    let leadSearchLeads = [];
+    let leadSearchTaskId = null;
+    let leadSearchPage = 1;
+
+    function renderLeadSearch() {
+        if (!leadSearchTable) return;
+        const cols = ["first_name", "last_name", "title", "company", "country", "hasEmail"];
+        const labels = ["First name", "Last name", "Title", "Company", "Country", "Email?"];
+        let html = "<thead><tr>" + labels.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>";
+        leadSearchLeads.slice(0, 100).forEach((l) => {
+            html += "<tr>" + cols.map((c) => `<td>${c === "hasEmail" ? (l.hasEmail ? "\u2713" : "\u2014") : escapeHtml(l[c] || "")}</td>`).join("") + "</tr>";
+        });
+        leadSearchTable.innerHTML = html + "</tbody>";
+        const withEmail = leadSearchLeads.filter((l) => l.hasEmail).length;
+        leadSearchCount.textContent = `${leadSearchLeads.length} lead(s), ${withEmail} with emails`;
+        leadSearchResults.hidden = leadSearchLeads.length === 0;
+    }
+
+    async function runLeadSearch(more) {
+        const prompt = (leadSearchPrompt.value || "").trim();
+        if (!prompt && !leadSearchTaskId) { leadSearchStatus.textContent = "Describe the leads you want first."; return; }
+        leadSearchBtn.disabled = true; leadSearchMoreBtn.disabled = true;
+        leadSearchStatus.textContent = more ? "Loading more\u2026" : "Searching Snov.io\u2026 (can take ~20s)";
+        try {
+            const body = more && leadSearchTaskId
+                ? { taskId: leadSearchTaskId, page: leadSearchPage + 1 }
+                : { prompt, page: 1 };
+            const resp = await fetch("/api/snovio/search-leads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Search failed.");
+            const fresh = data.leads || [];
+            if (more) { leadSearchLeads = leadSearchLeads.concat(fresh); leadSearchPage += 1; }
+            else { leadSearchLeads = fresh; leadSearchPage = 1; }
+            leadSearchTaskId = data.taskId || leadSearchTaskId;
+            leadSearchStatus.textContent = fresh.length
+                ? `Found ${data.total || fresh.length} matches \u2014 showing ${leadSearchLeads.length}.`
+                : "No matches \u2014 try a broader description.";
+            renderLeadSearch();
+        } catch (e) {
+            leadSearchStatus.textContent = e.message || "Search failed.";
+        } finally {
+            leadSearchBtn.disabled = false; leadSearchMoreBtn.disabled = false;
+        }
+    }
+
+    async function useLeadSearchResults() {
+        const withIds = leadSearchLeads.filter((l) => l.encodedProspectId && l.companyId != null && l.hasEmail).slice(0, 50);
+        if (!withIds.length) { leadSearchStatus.textContent = "No selectable leads with emails in the results."; return; }
+        leadSearchUseBtn.disabled = true;
+        leadSearchStatus.textContent = `Saving ${withIds.length} lead(s) to Snov.io and revealing emails\u2026 (uses Snov.io credits)`;
+        try {
+            const resp = await fetch("/api/snovio/import-leads", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    listName: `Sourced: ${(leadSearchPrompt.value || "leads")}`.slice(0, 50),
+                    prospects: withIds.map((l) => ({ encodedProspectId: l.encodedProspectId, companyId: l.companyId, emailId: l.emailId })),
+                }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Import failed.");
+            const leads = (data.leads || []).filter((l) => l.email);
+            if (!leads.length) throw new Error("Snov.io did not return any emails for these leads.");
+            const headers = ["Email", "First name", "Last name", "Full name", "Job position", "Company name", "Company URL", "Country", "Location", "Industry"];
+            const keys = ["email", "first_name", "last_name", "full_name", "title", "company", "company_url", "country", "location", "industry"];
+            const esc = (v) => { const s = String(v || ""); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+            const lines = [headers.join(",")];
+            leads.forEach((l) => lines.push(keys.map((k) => esc(l[k])).join(",")));
+            const file = new File([lines.join("\n")], "snovio-sourced-leads.csv", { type: "text/csv" });
+            selectFile(file);
+            leadSearchStatus.textContent = `${leads.length} lead(s) with emails loaded as your file (Snov.io list "${data.listName}") \u2014 continue below.`;
+        } catch (e) {
+            leadSearchStatus.textContent = e.message || "Import failed.";
+        } finally {
+            leadSearchUseBtn.disabled = false;
+        }
+    }
+
+    if (leadSearchBtn) leadSearchBtn.addEventListener("click", () => runLeadSearch(false));
+    if (leadSearchMoreBtn) leadSearchMoreBtn.addEventListener("click", () => runLeadSearch(true));
+    if (leadSearchUseBtn) leadSearchUseBtn.addEventListener("click", useLeadSearchResults);
+    if (leadSearchPrompt) leadSearchPrompt.addEventListener("keydown", (e) => { if (e.key === "Enter") runLeadSearch(false); });
+
+    // ── In-app copilot chat ──
+    const copilotFab = document.getElementById("copilot-fab");
+    const copilotPanel = document.getElementById("copilot-panel");
+    const copilotClose = document.getElementById("copilot-close");
+    const copilotMessages = document.getElementById("copilot-messages");
+    const copilotInput = document.getElementById("copilot-input");
+    const copilotSend = document.getElementById("copilot-send");
+    const copilotHistory = [];
+
+    function copilotBubble(role, text) {
+        const div = document.createElement("div");
+        div.style.cssText = role === "user"
+            ? "align-self:flex-end;background:#CE1126;color:#fff;border-radius:12px 12px 2px 12px;padding:9px 12px;max-width:85%;white-space:pre-wrap;"
+            : "align-self:flex-start;background:#242424;border:1px solid #2C2C2C;border-radius:12px 12px 12px 2px;padding:9px 12px;max-width:90%;white-space:pre-wrap;";
+        div.textContent = text;
+        copilotMessages.appendChild(div);
+        copilotMessages.scrollTop = copilotMessages.scrollHeight;
+        return div;
+    }
+
+    async function copilotSendMessage() {
+        const text = (copilotInput.value || "").trim();
+        if (!text) return;
+        copilotInput.value = "";
+        copilotBubble("user", text);
+        copilotHistory.push({ role: "user", content: text });
+        const thinking = copilotBubble("assistant", "Thinking\u2026");
+        copilotSend.disabled = true;
+        try {
+            const resp = await fetch("/api/copilot/chat", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: copilotHistory.slice(-12) }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Copilot failed.");
+            thinking.textContent = data.reply || "(no reply)";
+            copilotHistory.push({ role: "assistant", content: data.reply || "" });
+            if (data.toolTrace && data.toolTrace.length) {
+                const trace = document.createElement("div");
+                trace.style.cssText = "align-self:flex-start;font-size:11px;color:#6E6C68;";
+                trace.textContent = "\u2699 " + data.toolTrace.map((t) => t.tool.replace(/^(snovio|app)__/, "")).join(" \u2192 ");
+                copilotMessages.appendChild(trace);
+            }
+        } catch (e) {
+            thinking.textContent = e.message || "Something went wrong.";
+        } finally {
+            copilotSend.disabled = false;
+            copilotMessages.scrollTop = copilotMessages.scrollHeight;
+        }
+    }
+
+    if (copilotFab) copilotFab.addEventListener("click", () => {
+        copilotPanel.hidden = !copilotPanel.hidden;
+        if (!copilotPanel.hidden && !copilotMessages.childElementCount) {
+            copilotBubble("assistant", "Hi! I can search Snov.io for leads, manage your prospect lists (including deleting old ones), check verification, and answer questions about your campaigns here. What do you need?");
+        }
+        if (!copilotPanel.hidden) copilotInput.focus();
+    });
+    if (copilotClose) copilotClose.addEventListener("click", () => { copilotPanel.hidden = true; });
+    if (copilotSend) copilotSend.addEventListener("click", copilotSendMessage);
+    if (copilotInput) copilotInput.addEventListener("keydown", (e) => { if (e.key === "Enter") copilotSendMessage(); });
+
+
     if (snovioJourneyPreviewBtn) snovioJourneyPreviewBtn.addEventListener("click", () => runSnovioJourney(true));
     if (snovioJourneyCreateBtn) snovioJourneyCreateBtn.addEventListener("click", () => runSnovioJourney(false));
     snovioVerifyBtn.addEventListener("click", async () => {

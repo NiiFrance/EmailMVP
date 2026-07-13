@@ -456,6 +456,200 @@ class TestPutJobDrafts:
         assert response.status_code == 400
 
 
+class TestSnovioMcpRoutes:
+    USER = {"oid": "user-1", "email": "u@cloudware.africa", "name": "U", "role": "user"}
+
+    def _request(self, params=None, headers=None):
+        req = MagicMock()
+        req.route_params = {}
+        req.params = params or {}
+        req.headers = headers or {}
+        return req
+
+    def test_connect_returns_authorize_url_and_saves_state(self):
+        saved = {}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_mcp_client_id", return_value="client-42"), \
+                patch.object(fa, "_public_origin", return_value="https://app.example.com"), \
+                patch.object(fa.data_store, "save_mcp_state", side_effect=lambda *a: saved.update(zip(["state", "oid", "verifier", "redirect", "clientId"], a))):
+            response = asyncio.run(fa.snovio_mcp_connect(self._request()))
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload["authorizeUrl"].startswith("https://app.snov.io/mcp/authorize?")
+        assert saved["oid"] == "user-1"
+        assert saved["clientId"] == "client-42"
+
+    def test_callback_exchanges_code_and_stores_tokens(self):
+        state_row = {"oid": "user-1", "codeVerifier": "ver", "redirectUri": "https://app.example.com/api/snovio/mcp/callback", "clientId": "client-42"}
+        stored = {}
+        with patch.object(fa.data_store, "pop_mcp_state", return_value=state_row), \
+                patch.object(fa.snovio_mcp, "exchange_code", return_value={"access_token": "at", "refresh_token": "rt", "expires_in": 3600}) as ex, \
+                patch.object(fa, "_store_mcp_tokens", side_effect=lambda oid, tokens, cid: stored.update({"oid": oid, "cid": cid})):
+            response = asyncio.run(fa.snovio_mcp_callback(self._request(params={"state": "s1", "code": "c1"})))
+        assert response.status_code == 200
+        assert "connected" in str(response.body).lower()
+        ex.assert_called_once()
+        assert stored == {"oid": "user-1", "cid": "client-42"}
+
+    def test_callback_rejects_unknown_state(self):
+        with patch.object(fa.data_store, "pop_mcp_state", return_value=None):
+            response = asyncio.run(fa.snovio_mcp_callback(self._request(params={"state": "nope", "code": "c1"})))
+        assert "expired" in str(response.body).lower()
+
+    def test_callback_rejects_state_without_oid(self):
+        state_row = {"oid": "", "codeVerifier": "v", "redirectUri": "r", "clientId": "c"}
+        with patch.object(fa.data_store, "pop_mcp_state", return_value=state_row):
+            response = asyncio.run(fa.snovio_mcp_callback(self._request(params={"state": "s1", "code": "c1"})))
+        assert "malformed" in str(response.body).lower()
+
+    def test_status_reports_disconnected_without_tokens(self):
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value=None):
+            response = asyncio.run(fa.snovio_mcp_status(self._request()))
+        assert json.loads(response.body) == {"connected": False}
+
+    def test_tools_requires_connection(self):
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value=None):
+            response = asyncio.run(fa.snovio_mcp_tools(self._request()))
+        assert response.status_code == 409
+
+    def test_get_valid_token_refreshes_expired(self):
+        row = {"accessToken": "enc-old", "refreshToken": "enc-ref", "expiresAt": 100.0, "tokensEncrypted": False, "clientId": "client-42"}
+        with patch.object(fa.data_store, "get_mcp_tokens", return_value=row), \
+                patch.object(fa, "_decrypt_session_secret", side_effect=lambda v, e: v), \
+                patch.object(fa.snovio_mcp, "refresh_tokens", return_value={"access_token": "new-at", "refresh_token": "new-rt", "expires_in": 3600}) as rf, \
+                patch.object(fa, "_store_mcp_tokens"):
+            token = fa._get_valid_mcp_token("user-1")
+        assert token == "new-at"
+        rf.assert_called_once_with("client-42", "enc-ref")
+
+
+class TestLeadSearchAndCopilotRoutes:
+    USER = {"oid": "user-1", "email": "u@cloudware.africa", "name": "U", "role": "user"}
+
+    def _request(self, body=None):
+        req = MagicMock()
+        req.route_params = {}
+        req.params = {}
+        req.headers = {}
+        req.get_json.return_value = body or {}
+        req.get_body.return_value = json.dumps(body or {}).encode("utf-8")
+        return req
+
+    def test_search_leads_requires_mcp_connection(self):
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value=None):
+            response = asyncio.run(fa.snovio_search_leads(self._request({"prompt": "CFOs in Lagos"})))
+        assert response.status_code == 409
+
+    def test_search_leads_runs_ai_filter_then_search(self):
+        session = MagicMock()
+        session.call_tool.side_effect = [
+            {"structuredContent": {"filters": {
+                "company": {"industries": {"include": [{"id": 43, "name": "Financial Services"}], "exclude": []},
+                             "locations": {"include": [{"locality": "Lagos, Nigeria"}], "exclude": []}},
+                "prospect": {"jobPositions": {"include": [{"id": 575, "text": "cfo"}], "exclude": []}},
+            }}},
+            {"structuredContent": {"task_id": 55, "count": 172, "prospects": [
+                {"firstName": "Ada", "lastName": "L", "position": "CFO", "companyName": "Acme",
+                 "country": "Nigeria", "encodedProspectId": "abc", "companyId": 9, "emailId": 77},
+            ]}},
+        ]
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value="tok"), \
+                patch.object(fa.snovio_mcp, "SnovioMCPSession", return_value=session):
+            response = asyncio.run(fa.snovio_search_leads(self._request({"prompt": "CFOs in Lagos"})))
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload["taskId"] == 55
+        assert payload["total"] == 172
+        lead = payload["leads"][0]
+        assert lead["company"] == "Acme"
+        assert lead["hasEmail"] is True
+        assert lead["encodedProspectId"] == "abc"
+        second_call = session.call_tool.call_args_list[1]
+        assert second_call[0][0] == "app_database_search_prospects"
+        args = second_call[0][1]
+        assert args["is_ai_search"] is True
+        assert args["industries"]["include"][0]["id"] == 43
+        assert args["company_locations"]["include"][0]["locality"] == "Lagos, Nigeria"
+        assert args["job_positions"]["include"][0]["text"] == "cfo"
+        assert "prospect_locations" not in args  # empty filters must be dropped
+
+    def test_search_leads_pages_with_task_id(self):
+        session = MagicMock()
+        session.call_tool.return_value = {"structuredContent": {"task_id": 55, "prospects": []}}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value="tok"), \
+                patch.object(fa.snovio_mcp, "SnovioMCPSession", return_value=session):
+            response = asyncio.run(fa.snovio_search_leads(self._request({"taskId": 55, "page": 2})))
+        assert response.status_code == 200
+        session.call_tool.assert_called_once_with("app_database_search_prospects", {"task_id": 55, "page": 2})
+
+    def test_import_leads_creates_list_and_returns_emails(self):
+        session = MagicMock()
+        session.call_tool.side_effect = [
+            {"structuredContent": {"id": 999}},  # app_create_list
+            {"structuredContent": {"success": True}},  # add_to_list
+            {"structuredContent": {"contacts": [
+                {"name": "Ada L", "firstName": "Ada", "lastName": "L", "emails": [{"email": "ada@acme.com"}],
+                 "company_name": "Acme", "position": "CFO", "country": "Nigeria"},
+            ]}},  # app_list_prospects
+        ]
+        body = {"listName": "Sourced CFOs", "prospects": [{"encodedProspectId": "abc", "companyId": 9, "emailId": 77}]}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value="tok"), \
+                patch.object(fa.snovio_mcp, "SnovioMCPSession", return_value=session):
+            response = asyncio.run(fa.snovio_import_leads(self._request(body)))
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload["listId"] == 999
+        assert payload["leads"][0]["email"] == "ada@acme.com"
+        assert payload["leads"][0]["company"] == "Acme"
+        add_call = session.call_tool.call_args_list[1]
+        assert add_call[0][0] == "app_database_search_prospects_add_to_list"
+        assert add_call[0][1] == {"list_id": 999, "prospects": [{"encodedProspectId": "abc", "companyId": 9, "emailId": 77}]}
+        create_call = session.call_tool.call_args_list[0]
+        assert create_call[0][1] == {"name": "Sourced CFOs", "type": "people"}
+
+    def test_import_leads_requires_selection(self):
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value="tok"):
+            response = asyncio.run(fa.snovio_import_leads(self._request({"prospects": []})))
+        assert response.status_code == 400
+
+    def test_mcp_json_parses_prefixed_text_payload(self):
+        result = {"content": [{"type": "text", "text": '50 prospects\n{"count": 172, "prospects": []}'}]}
+        assert fa._mcp_json(result) == {"count": 172, "prospects": []}
+
+    def test_mcp_json_prefers_structured_content(self):
+        result = {"structuredContent": {"a": 1}, "content": [{"type": "text", "text": "junk"}]}
+        assert fa._mcp_json(result) == {"a": 1}
+
+    def test_mcp_json_ignores_junk_structured_content(self):
+        result = {"structuredContent": ["type"], "content": [{"type": "text", "text": '{"list": {"id": 40236663}, "list_id": 40236663}'}]}
+        assert fa._mcp_json(result) == {"list": {"id": 40236663}, "list_id": 40236663}
+
+    def test_copilot_requires_user_message(self):
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)):
+            response = asyncio.run(fa.copilot_chat(self._request({"messages": []})))
+        assert response.status_code == 400
+
+    def test_copilot_returns_agent_reply(self):
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa, "_get_valid_mcp_token", return_value=None), \
+                patch.object(fa, "AzureOpenAI"), \
+                patch.object(fa.copilot, "run_agent", return_value={"reply": "Hi there", "toolTrace": []}) as ra:
+            response = asyncio.run(fa.copilot_chat(self._request({"messages": [{"role": "user", "content": "hello"}]})))
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload["reply"] == "Hi there"
+        assert payload["snovioConnected"] is False
+        # No MCP session is passed when Snov.io is not connected
+        assert ra.call_args[0][3] is None
+
+
 class TestSnovioEndpoints:
     @pytest.fixture(autouse=True)
     def _job_owner(self):

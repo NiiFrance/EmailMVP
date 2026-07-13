@@ -43,6 +43,9 @@ from csv_processor import (
 from column_mapper import resolve_columns, detect_columns, _friendly_field
 from snovio_client import SnovioAPIError, SnovioClient, SnovioConfigError
 import data_store
+import snovio_mcp
+import copilot
+import time
 from snovio_workflows import (
     assess_custom_field_readiness,
     build_job_rows,
@@ -1478,6 +1481,529 @@ async def delete_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
         except Exception as error:
             logger.warning("Deleting saved Snov.io creds failed: %s", error)
     return _json_response({"closed": True})
+
+
+# ===========================================================================
+# Snov.io MCP — OAuth connect (no API keys) + tool access for the copilot
+# ===========================================================================
+def _public_origin(req: func.HttpRequest) -> str:
+    """Origin the user's browser sees (the SWA host, not the function host)."""
+    configured = os.environ.get("PUBLIC_APP_ORIGIN", "").strip().rstrip("/")
+    if configured:
+        return configured
+    headers = getattr(req, "headers", {}) or {}
+    host = headers.get("x-forwarded-host") or headers.get("host") or ""
+    return f"https://{host}" if host else ""
+
+
+def _mcp_redirect_uri(req: func.HttpRequest) -> str:
+    return f"{_public_origin(req)}/api/snovio/mcp/callback"
+
+
+def _mcp_client_id(req: func.HttpRequest) -> str:
+    """Return the OAuth client id for this host, registering once if needed."""
+    redirect_uri = _mcp_redirect_uri(req)
+    host = redirect_uri.split("/")[2] if "://" in redirect_uri else redirect_uri
+    row = data_store.get_mcp_client_registration(host)
+    if row and row.get("clientId") and row.get("redirectUri") == redirect_uri:
+        return str(row["clientId"])
+    client_id = snovio_mcp.register_client("Cloudware Email Campaign Generator", redirect_uri)
+    data_store.save_mcp_client_registration(host, client_id, redirect_uri)
+    return client_id
+
+
+def _store_mcp_tokens(oid: str, payload: dict, client_id: str) -> None:
+    access_token = str(payload.get("access_token") or "")
+    refresh_token = str(payload.get("refresh_token") or "")
+    expires_at = time.time() + int(payload.get("expires_in", 3600) or 3600)
+    enc_access, encrypted = _encrypt_session_secret(access_token)
+    enc_refresh, _ = _encrypt_session_secret(refresh_token) if refresh_token else ("", encrypted)
+    data_store.save_mcp_tokens(oid, enc_access, enc_refresh, expires_at, encrypted, client_id=client_id)
+
+
+def _get_valid_mcp_token(oid: str) -> str | None:
+    """Return a decrypted, unexpired MCP access token (refreshing if possible)."""
+    row = data_store.get_mcp_tokens(oid)
+    if not row:
+        return None
+    encrypted = bool(row.get("tokensEncrypted"))
+    try:
+        access_token = _decrypt_session_secret(str(row.get("accessToken") or ""), encrypted)
+        refresh_token = _decrypt_session_secret(str(row.get("refreshToken") or ""), encrypted) if row.get("refreshToken") else ""
+    except Exception:
+        logger.exception("MCP token decryption failed for %s", oid)
+        return None
+    expires_at = float(row.get("expiresAt") or 0)
+    if time.time() < expires_at - 60:
+        return access_token
+    client_id = str(row.get("clientId") or "")
+    if not refresh_token or not client_id:
+        return None
+    try:
+        refreshed = snovio_mcp.refresh_tokens(client_id, refresh_token)
+        _store_mcp_tokens(oid, refreshed, client_id)
+        return str(refreshed.get("access_token"))
+    except Exception as error:
+        logger.warning("MCP token refresh failed for %s: %s", oid, error)
+        return None
+
+
+@app.route(route="snovio/mcp/connect", methods=["GET"])
+async def snovio_mcp_connect(req: func.HttpRequest) -> func.HttpResponse:
+    """Begin the Snov.io MCP OAuth flow; returns the authorize URL."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    try:
+        client_id = _mcp_client_id(req)
+        redirect_uri = _mcp_redirect_uri(req)
+        verifier, challenge = snovio_mcp.make_pkce_pair()
+        state = uuid.uuid4().hex
+        data_store.save_mcp_state(state, user["oid"], verifier, redirect_uri, client_id)
+        url = snovio_mcp.build_authorize_url(client_id, redirect_uri, state, challenge)
+        return _json_response({"authorizeUrl": url})
+    except Exception as error:
+        logger.exception("MCP connect failed")
+        return _json_response({"error": f"Could not start Snov.io connection: {error}"}, 502)
+
+
+@app.route(route="snovio/mcp/callback", methods=["GET"])
+async def snovio_mcp_callback(req: func.HttpRequest) -> func.HttpResponse:
+    """OAuth redirect target: exchange the code, store tokens, close the tab.
+
+    This route is reachable anonymously: SWA's auth cookie is SameSite=Strict, so
+    the cross-site redirect from Snov.io arrives without a session. The user is
+    bound through the single-use, unguessable ``state`` value created at connect
+    time (which records the initiating user's oid).
+    """
+    params = _query_params(req)
+    state = params.get("state", "")
+    code = params.get("code", "")
+    oauth_error = params.get("error", "")
+
+    def _page(message: str, ok: bool) -> func.HttpResponse:
+        color = "#1a7f37" if ok else "#b10e20"
+        html = (
+            "<!DOCTYPE html><html><head><title>Snov.io connection</title></head>"
+            "<body style=\"font-family:system-ui;display:flex;align-items:center;justify-content:center;height:90vh;\">"
+            f"<div style=\"text-align:center;\"><h2 style=\"color:{color};\">{message}</h2>"
+            "<p>You can close this tab and return to the app.</p>"
+            "<script>try{if(window.opener){window.opener.postMessage({snovioMcp:'done'},'*');}}catch(e){}</script>"
+            "</div></body></html>"
+        )
+        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+
+    if oauth_error:
+        return _page(f"Connection cancelled ({oauth_error}).", ok=False)
+    if not state or not code:
+        return _page("Missing code or state in the callback.", ok=False)
+    row = data_store.pop_mcp_state(state)
+    if not row:
+        return _page("This connection link expired — please retry from the app.", ok=False)
+    oid = str(row.get("oid") or "")
+    if not oid:
+        return _page("This connection request is malformed — please retry from the app.", ok=False)
+    try:
+        tokens = snovio_mcp.exchange_code(
+            str(row.get("clientId")), str(row.get("redirectUri")), code, str(row.get("codeVerifier"))
+        )
+        _store_mcp_tokens(oid, tokens, str(row.get("clientId")))
+        return _page("Snov.io connected \u2713", ok=True)
+    except Exception as error:
+        logger.exception("MCP code exchange failed")
+        return _page(f"Connection failed: {error}", ok=False)
+
+
+@app.route(route="snovio/mcp/status", methods=["GET"])
+async def snovio_mcp_status(req: func.HttpRequest) -> func.HttpResponse:
+    """Report whether the signed-in user has a working MCP connection."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    token = _get_valid_mcp_token(user["oid"])
+    return _json_response({"connected": bool(token)})
+
+
+@app.route(route="snovio/mcp/disconnect", methods=["POST"])
+async def snovio_mcp_disconnect(req: func.HttpRequest) -> func.HttpResponse:
+    """Forget the signed-in user's MCP tokens."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    data_store.delete_mcp_tokens(user["oid"])
+    return _json_response({"disconnected": True})
+
+
+@app.route(route="snovio/mcp/tools", methods=["GET"])
+async def snovio_mcp_tools(req: func.HttpRequest) -> func.HttpResponse:
+    """List the MCP tools available to the connected user (also used by the copilot)."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    token = _get_valid_mcp_token(user["oid"])
+    if not token:
+        return _json_response({"error": "Snov.io is not connected. Use Connect Snov.io first."}, 409)
+    try:
+        session = snovio_mcp.SnovioMCPSession(token)
+        tools = session.list_tools()
+        return _json_response({
+            "count": len(tools),
+            "tools": [
+                {"name": t.get("name"), "description": (t.get("description") or "")[:300],
+                 "inputSchema": t.get("inputSchema")}
+                for t in tools
+            ],
+        })
+    except snovio_mcp.SnovioMCPError as error:
+        return _json_response({"error": str(error)}, 502)
+
+
+# ===========================================================================
+# Lead sourcing — find prospects in Snov.io's database (via the user's MCP login)
+# ===========================================================================
+@app.route(route="snovio/search-leads", methods=["POST"])
+async def snovio_search_leads(req: func.HttpRequest) -> func.HttpResponse:
+    """Turn a plain-language description into Snov.io database-search results.
+
+    Body: {"prompt": "...", "page": 1} or {"taskId": 123, "page": 2}.
+    Returns lead rows shaped like our upload CSV so the frontend can feed them
+    straight into the existing generation pipeline.
+    """
+    user, err = _require_user(req)
+    if err:
+        return err
+    token = _get_valid_mcp_token(user["oid"])
+    if not token:
+        return _json_response({"error": "Snov.io is not connected. Click 'Connect Snov.io' in step 4 first."}, 409)
+    payload = _request_json(req)
+    prompt = str(payload.get("prompt") or "").strip()
+    task_id = payload.get("taskId")
+    page = int(payload.get("page") or 1)
+    if not prompt and not task_id:
+        return _json_response({"error": "Describe the leads you want (prompt) or pass a taskId to page."}, 400)
+
+    try:
+        session = snovio_mcp.SnovioMCPSession(token)
+        if task_id:
+            search_args: dict = {"task_id": int(task_id), "page": page}
+        else:
+            ai_result = session.call_tool("app_database_search_ai", {"prompt": prompt[:300]})
+            filters = _mcp_json(ai_result)
+            if not isinstance(filters, dict):
+                return _json_response({"error": "Snov.io could not derive search filters from that description.",
+                                       "detail": snovio_mcp.tool_result_text(ai_result)[:400]}, 422)
+            search_args = _ai_filters_to_search_args(filters)
+            if not search_args:
+                return _json_response({"error": "Snov.io returned no usable filters for that description."}, 422)
+            search_args["is_ai_search"] = True
+            search_args["page"] = page
+        search_result = session.call_tool("app_database_search_prospects", search_args)
+        data = _mcp_json(search_result)
+        if not isinstance(data, dict):
+            return _json_response({"error": "Unexpected Snov.io search response.",
+                                   "detail": snovio_mcp.tool_result_text(search_result)[:400]}, 502)
+        rows = data.get("prospects") or data.get("rows") or data.get("data") or []
+        leads = [_search_row_to_lead(row) for row in rows if isinstance(row, dict)]
+        return _json_response({
+            "taskId": data.get("task_id") or data.get("taskId") or task_id,
+            "page": page,
+            "total": data.get("count") or data.get("total") or data.get("total_count"),
+            "leads": leads,
+        })
+    except snovio_mcp.SnovioMCPError as error:
+        return _json_response({"error": str(error)}, 502)
+
+
+def _ai_filters_to_search_args(payload: dict) -> dict:
+    """Map app_database_search_ai output onto app_database_search_prospects params."""
+    filters = payload.get("filters") if isinstance(payload.get("filters"), dict) else payload
+    company = filters.get("company") if isinstance(filters.get("company"), dict) else {}
+    prospect = filters.get("prospect") if isinstance(filters.get("prospect"), dict) else {}
+    mapping = {
+        "industries": company.get("industries"),
+        "company_locations": company.get("locations"),
+        "company_names": company.get("names") or company.get("companyNames"),
+        "company_sizes": company.get("sizes") or company.get("companySizes"),
+        "founded": company.get("founded"),
+        "revenue": company.get("revenue"),
+        "job_positions": prospect.get("jobPositions") or prospect.get("positions"),
+        "prospect_locations": prospect.get("locations"),
+        "departments": _stringify_filter(prospect.get("departments")),
+        "management_levels": _stringify_filter(prospect.get("managementLevels") or prospect.get("management_levels")),
+        "skills": _stringify_filter(prospect.get("skills")),
+        "specialities": prospect.get("specialities"),
+        "first_name": prospect.get("firstName") or prospect.get("first_name"),
+        "last_name": prospect.get("lastName") or prospect.get("last_name"),
+    }
+
+    def _has_content(value) -> bool:
+        if value in (None, [], {}, ""):
+            return False
+        if isinstance(value, dict):
+            return any(_has_content(v) for v in value.values())
+        return True
+
+    return {key: value for key, value in mapping.items() if _has_content(value)}
+
+
+def _stringify_filter(value):
+    """Coerce {include/exclude: [{name/value/text...}]} item objects to plain strings.
+
+    The AI filter helper returns objects for some dictionaries (departments,
+    management levels, skills) while the search tool expects string arrays.
+    """
+    if not isinstance(value, dict):
+        return value
+    coerced = {}
+    for side in ("include", "exclude"):
+        items = value.get(side)
+        if not isinstance(items, list):
+            continue
+        flattened = []
+        for item in items:
+            if isinstance(item, dict):
+                flattened.append(str(item.get("value") or item.get("text") or item.get("name") or ""))
+            else:
+                flattened.append(str(item))
+        coerced[side] = [item for item in flattened if item]
+    return coerced or value
+
+
+def _mcp_json(result: dict) -> object:
+    """Extract structured data from an MCP tool result.
+
+    Prefers structuredContent when it's actually useful (a dict, or a list of
+    dicts) — some Snov.io tools return junk like ["type"] there — otherwise
+    parses each text content part (tools may prefix a human summary like
+    "50 prospects" before the JSON payload).
+    """
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return structured
+    if isinstance(structured, list) and structured and all(isinstance(i, dict) for i in structured):
+        return structured
+    candidates = []
+    for item in result.get("content") or []:
+        if item.get("type") == "text" and item.get("text"):
+            candidates.append(str(item["text"]))
+    for text in candidates:
+        text = text.strip()
+        # exact JSON first, then the first {...} block inside the text
+        for attempt in (text, text[text.find("{"):] if "{" in text else "", text[text.find("["):] if "[" in text else ""):
+            if not attempt:
+                continue
+            try:
+                return json.loads(attempt)
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return None
+
+
+def _search_row_to_lead(row: dict) -> dict:
+    """Normalize a Snov.io database-search row to our lead shape (no email yet:
+    Snov.io only reveals addresses once prospects are saved to a list)."""
+    def pick(*keys):
+        for key in keys:
+            value = row.get(key)
+            if value:
+                return str(value)
+        return ""
+    return {
+        "first_name": pick("firstName", "first_name"),
+        "last_name": pick("lastName", "last_name"),
+        "full_name": pick("name", "fullName", "full_name"),
+        "title": pick("position", "title", "jobPosition"),
+        "company": pick("companyName", "company_name"),
+        "company_url": pick("companyUrl", "companySite", "company_site"),
+        "country": pick("country"),
+        "location": pick("locality", "location"),
+        "industry": pick("industry"),
+        "hasEmail": bool(row.get("emailId")),
+        "encodedProspectId": pick("encodedProspectId"),
+        "companyId": row.get("companyId"),
+        "emailId": row.get("emailId"),
+    }
+
+
+@app.route(route="snovio/import-leads", methods=["POST"])
+async def snovio_import_leads(req: func.HttpRequest) -> func.HttpResponse:
+    """Save selected database-search rows to a Snov.io list and return them with
+    revealed emails (spends Snov.io credits), shaped for the upload pipeline.
+
+    Body: {"listName": "...", "prospects": [{encodedProspectId, companyId, emailId}]}
+    """
+    user, err = _require_user(req)
+    if err:
+        return err
+    token = _get_valid_mcp_token(user["oid"])
+    if not token:
+        return _json_response({"error": "Snov.io is not connected."}, 409)
+    payload = _request_json(req)
+    prospects = payload.get("prospects") or []
+    selected = [
+        {k: v for k, v in {
+            "encodedProspectId": str(p.get("encodedProspectId") or ""),
+            "companyId": p.get("companyId"),
+            "emailId": p.get("emailId"),
+        }.items() if v not in (None, "")}
+        for p in prospects
+        if isinstance(p, dict) and p.get("encodedProspectId") and p.get("companyId") is not None
+    ][:50]
+    if not selected:
+        return _json_response({"error": "Select at least one prospect from the search results."}, 400)
+    list_name = (str(payload.get("listName") or "").strip() or f"Sourced leads {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")[:50]
+
+    try:
+        session = snovio_mcp.SnovioMCPSession(token)
+        created_raw = session.call_tool("app_create_list", {"name": list_name, "type": "people"})
+        created = _mcp_json(created_raw)
+        list_id = None
+        if isinstance(created, dict):
+            data_part = created.get("data") if isinstance(created.get("data"), dict) else {}
+            list_part = created.get("list") if isinstance(created.get("list"), dict) else {}
+            list_id = created.get("list_id") or created.get("id") or data_part.get("id") or list_part.get("id")
+        if not list_id:
+            return _json_response({"error": "Could not create the Snov.io list.",
+                                   "detail": snovio_mcp.tool_result_text(created_raw)[:300]}, 502)
+        session.call_tool("app_database_search_prospects_add_to_list", {"list_id": int(list_id), "prospects": selected})
+
+        leads: list[dict] = []
+        for _ in range(6):  # saving is async on Snov.io's side; poll briefly
+            listing = _mcp_json(session.call_tool("app_list_prospects", {"list_id": int(list_id), "per_page": 100}))
+            rows = []
+            if isinstance(listing, dict):
+                rows = listing.get("contacts") or listing.get("prospects") or listing.get("rows") or listing.get("data") or []
+            leads = [_list_row_to_lead(row) for row in rows if isinstance(row, dict)]
+            if len(leads) >= len(selected):
+                break
+            time.sleep(3)
+        return _json_response({"listId": list_id, "listName": list_name, "imported": len(leads), "leads": leads})
+    except snovio_mcp.SnovioMCPError as error:
+        return _json_response({"error": str(error)}, 502)
+
+
+def _list_row_to_lead(row: dict) -> dict:
+    """Normalize an app_list_prospects row (emails revealed) to the upload shape."""
+    def pick(*keys):
+        for key in keys:
+            value = row.get(key)
+            if value:
+                return str(value)
+        return ""
+    email = pick("email", "primaryEmail")
+    if not email:
+        emails = row.get("emails")
+        if isinstance(emails, list) and emails:
+            first = emails[0]
+            email = str(first.get("email") if isinstance(first, dict) else first or "")
+    company = row.get("currentJob") if isinstance(row.get("currentJob"), dict) else {}
+    return {
+        "email": email,
+        "first_name": pick("firstName", "first_name"),
+        "last_name": pick("lastName", "last_name"),
+        "full_name": pick("name", "fullName"),
+        "title": pick("position", "title") or str(company.get("position") or ""),
+        "company": pick("companyName", "company_name") or str(company.get("companyName") or ""),
+        "company_url": pick("companyUrl", "companySite") or str(company.get("site") or ""),
+        "country": pick("country"),
+        "location": pick("locality", "location"),
+        "industry": pick("industry") or str(company.get("industry") or ""),
+    }
+
+
+# ===========================================================================
+# In-app copilot — natural-language operations over the app + the user's Snov.io
+# ===========================================================================
+def _copilot_app_tools(user: dict) -> dict:
+    """Read-only app tools the copilot can call for the signed-in user."""
+    def list_templates_tool(_args):
+        return {"templates": [
+            {"id": t["id"], "name": t["name"], "emails": t.get("num_emails")}
+            for t in list_templates()
+        ]}
+
+    def list_jobs_tool(_args):
+        jobs = data_store.list_jobs(user["oid"], limit=20)
+        return {"jobs": [
+            {"jobId": j.get("jobId"), "template": j.get("templateName"), "file": j.get("fileName"),
+             "leads": j.get("totalLeads"), "status": j.get("status"), "createdAt": j.get("createdAt")}
+            for j in jobs
+        ]}
+
+    def job_drafts_tool(args):
+        job_id = str(args.get("jobId") or "")
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+            return {"error": "jobId must be a job UUID from list_my_jobs."}
+        jobs = {str(j.get("jobId")): j for j in data_store.list_jobs(user["oid"], limit=100)}
+        if job_id not in jobs:
+            return {"error": "That job does not belong to you."}
+        try:
+            dataframe = parse_csv(_download_job_csv(job_id))
+        except Exception:
+            return {"error": "No generated output found for this job."}
+        headers = [str(c) for c in dataframe.columns]
+        preview = dataframe.head(3).astype(str).to_dict(orient="records")
+        return {"columns": headers, "rowCount": len(dataframe), "sampleRows": preview}
+
+    return {
+        "list_templates": {
+            "description": "List the campaign templates available in this app (id, name, number of emails per lead).",
+            "parameters": {"type": "object", "properties": {}},
+            "handler": list_templates_tool,
+        },
+        "list_my_jobs": {
+            "description": "List the signed-in user's recent generation jobs (campaigns) in this app.",
+            "parameters": {"type": "object", "properties": {}},
+            "handler": list_jobs_tool,
+        },
+        "get_job_output": {
+            "description": "Inspect a job's generated output: columns, row count, and a small sample (including Subject_Touch/Body_Touch drafts).",
+            "parameters": {"type": "object", "properties": {"jobId": {"type": "string", "description": "job UUID from list_my_jobs"}}, "required": ["jobId"]},
+            "handler": job_drafts_tool,
+        },
+    }
+
+
+@app.route(route="copilot/chat", methods=["POST"])
+async def copilot_chat(req: func.HttpRequest) -> func.HttpResponse:
+    """Run one turn of the in-app copilot for the signed-in user."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    payload = _request_json(req)
+    raw_messages = payload.get("messages") or []
+    history = []
+    for item in raw_messages[-16:]:
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "")[:6000]
+        if role in ("user", "assistant") and content:
+            history.append({"role": role, "content": content})
+    if not history or history[-1]["role"] != "user":
+        return _json_response({"error": "messages must end with a user message."}, 400)
+
+    token = _get_valid_mcp_token(user["oid"])
+    mcp_session = snovio_mcp.SnovioMCPSession(token) if token else None
+    try:
+        openai_client = AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version="2024-12-01-preview",
+        )
+        outcome = copilot.run_agent(
+            openai_client,
+            AZURE_OPENAI_DEPLOYMENT,
+            history,
+            mcp_session,
+            _copilot_app_tools(user),
+        )
+        return _json_response({
+            "reply": outcome["reply"],
+            "toolTrace": outcome["toolTrace"],
+            "snovioConnected": bool(token),
+        })
+    except Exception as error:
+        logger.exception("Copilot turn failed")
+        return _json_response({"error": f"Copilot failed: {error}"}, 500)
 
 
 @app.route(route="snovio/balance", methods=["GET"])

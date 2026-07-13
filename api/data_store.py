@@ -181,6 +181,90 @@ def delete_snovio_creds(oid: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Snov.io MCP OAuth — client registration, per-user tokens, and CSRF states.
+# Stored in the SnovioCreds table under dedicated partitions.
+# ---------------------------------------------------------------------------
+
+def get_mcp_client_registration(host: str) -> dict | None:
+    try:
+        return _entity_to_dict(_table(SNOVIO_CREDS_TABLE).get_entity("snoviomcpclient", host))
+    except ResourceNotFoundError:
+        return None
+
+
+def save_mcp_client_registration(host: str, client_id: str, redirect_uri: str) -> None:
+    _table(SNOVIO_CREDS_TABLE).upsert_entity(
+        {
+            "PartitionKey": "snoviomcpclient",
+            "RowKey": host,
+            "clientId": client_id,
+            "redirectUri": redirect_uri,
+            "updatedAt": _now_iso(),
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def save_mcp_state(state: str, oid: str, code_verifier: str, redirect_uri: str, client_id: str) -> None:
+    _table(SNOVIO_CREDS_TABLE).upsert_entity(
+        {
+            "PartitionKey": "snoviomcpstate",
+            "RowKey": state,
+            "oid": oid,
+            "codeVerifier": code_verifier,
+            "redirectUri": redirect_uri,
+            "clientId": client_id,
+            "createdAt": _now_iso(),
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def pop_mcp_state(state: str) -> dict | None:
+    """Fetch and delete an OAuth state row (single use)."""
+    table = _table(SNOVIO_CREDS_TABLE)
+    try:
+        entity = _entity_to_dict(table.get_entity("snoviomcpstate", state))
+    except ResourceNotFoundError:
+        return None
+    try:
+        table.delete_entity("snoviomcpstate", state)
+    except ResourceNotFoundError:
+        pass
+    return entity
+
+
+def save_mcp_tokens(oid: str, access_token: str, refresh_token: str, expires_at: float, encrypted: bool, client_id: str = "") -> None:
+    _table(SNOVIO_CREDS_TABLE).upsert_entity(
+        {
+            "PartitionKey": "snoviomcp",
+            "RowKey": oid,
+            "accessToken": access_token,
+            "refreshToken": refresh_token,
+            "expiresAt": float(expires_at),
+            "tokensEncrypted": encrypted,
+            "clientId": client_id,
+            "updatedAt": _now_iso(),
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def get_mcp_tokens(oid: str) -> dict | None:
+    try:
+        return _entity_to_dict(_table(SNOVIO_CREDS_TABLE).get_entity("snoviomcp", oid))
+    except ResourceNotFoundError:
+        return None
+
+
+def delete_mcp_tokens(oid: str) -> None:
+    try:
+        _table(SNOVIO_CREDS_TABLE).delete_entity("snoviomcp", oid)
+    except ResourceNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Campaigns — PartitionKey "campaign", RowKey = campaign id
 # ---------------------------------------------------------------------------
 
