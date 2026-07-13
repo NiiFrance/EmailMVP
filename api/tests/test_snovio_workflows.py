@@ -10,6 +10,7 @@ from snovio_workflows import (
     estimate_usage,
     infer_columns,
     is_sending_campaign,
+    summarize_report,
 )
 
 
@@ -114,3 +115,26 @@ def test_custom_field_readiness_ready_when_all_present():
 
     assert readiness["ready"] is True
     assert readiness["missing"] == []
+
+
+def test_summarize_report_buckets_each_row_once():
+    rows = [
+        {"eligible": True, "blockedReason": None, "status": "added"},
+        {"eligible": True, "blockedReason": None, "status": "updated"},
+        {"eligible": False, "blockedReason": "duplicate_in_target_list", "status": "skipped"},
+        {"eligible": False, "blockedReason": "verification_blocked", "status": "skipped"},
+        {"eligible": True, "blockedReason": None, "status": "failed"},
+    ]
+
+    summary = summarize_report(rows)
+
+    assert summary["total"] == 5
+    assert summary["added"] == 1
+    assert summary["updated"] == 1
+    assert summary["duplicates"] == 1
+    assert summary["blocked"] == 1
+    assert summary["failed"] == 1
+    # Duplicates and blocked rows must not also be counted as skipped.
+    assert summary["skipped"] == 0
+    # Every row lands in exactly one outcome bucket.
+    assert summary["added"] + summary["updated"] + summary["duplicates"] + summary["blocked"] + summary["failed"] + summary["skipped"] == summary["total"]

@@ -959,6 +959,7 @@
         const updated = s.updated || 0;
         const skipped = s.skipped || 0;
         const blocked = s.blocked || 0;
+        const duplicates = s.duplicates || 0;
         const failed = s.failed || 0;
         const synced = added + updated;
         if (withHeading) {
@@ -987,8 +988,8 @@
         }
         if (payload.listName) frag.appendChild(stat("List", payload.listName));
         if (added) frag.appendChild(stat("Added", String(added)));
-        if (updated) frag.appendChild(stat("Updated", String(updated)));
-        if (skipped) frag.appendChild(stat("Skipped (already there)", String(skipped)));
+        if (updated) frag.appendChild(stat("Updated (already in list \u2014 drafts refreshed)", String(updated)));
+        if (duplicates) frag.appendChild(stat("Skipped (already in list)", String(duplicates)));
         if (blocked) frag.appendChild(stat("Skipped (risky/invalid email)", String(blocked)));
         if (failed) frag.appendChild(stat("Failed", String(failed)));
         if (failed) {
@@ -1012,7 +1013,7 @@
                 frag.appendChild(wrapEl);
             }
         }
-        if (!synced && !payload.dryRun && (blocked || skipped)) {
+        if (!synced && !payload.dryRun && blocked) {
             frag.appendChild(note("Tip: if emails were skipped as risky, turn off \u201cOnly sync verified emails\u201d under Advanced, or run Verify first."));
         }
         return frag;
