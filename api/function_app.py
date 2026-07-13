@@ -1747,11 +1747,20 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
                     for prospect in duplicate.get("data", [])
                     for item in prospect.get("lists", [])
                 )
+                exists_elsewhere = bool(duplicate.get("data")) and not existing_in_target
                 if existing_in_target and not update_existing:
                     row_report.update({"eligible": False, "blockedReason": "duplicate_in_target_list", "status": "skipped"})
                 else:
                     row_report["existingProspect"] = existing_in_target
                     prospect_payload = build_prospect_payload(dataframe.iloc[row_index], columns, list_id, custom_fields)
+                    if exists_elsewhere:
+                        # Snov.io's updateContact updates the existing prospect's fields but
+                        # does NOT attach it to the new list — the target list stays empty.
+                        # createDuplicates makes a per-list copy so each list carries its own
+                        # campaign drafts (updateContact and createDuplicates are exclusive).
+                        prospect_payload["updateContact"] = False
+                        prospect_payload["createDuplicates"] = True
+                        row_report["duplicatedIntoList"] = True
                     try:
                         response = client.add_prospect_to_list(list_id, prospect_payload)
                     except SnovioAPIError as add_error:
