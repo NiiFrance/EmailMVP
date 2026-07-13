@@ -387,7 +387,19 @@ class TestProspectSyncDuplicates:
         client = self._client(existing_list_ids=("99",))
         report = self._run(client, {"listId": "42", "dryRun": False})
         assert report["rows"][0]["status"] == "added"
+        assert report["rows"][0]["duplicatedIntoList"] is True
         client.add_prospect_to_list.assert_called_once()
+        # updateContact alone would not attach the prospect to the new list, so the
+        # sync must request a per-list copy instead.
+        payload = client.add_prospect_to_list.call_args[0][1]
+        assert payload["createDuplicates"] is True
+        assert payload["updateContact"] is False
+
+    def test_prospect_in_target_list_is_updated_not_duplicated(self):
+        client = self._client(existing_list_ids=("42",))
+        self._run(client, {"listId": "42", "dryRun": False})
+        payload = client.add_prospect_to_list.call_args[0][1]
+        assert payload.get("createDuplicates", False) is False
 
 
 class TestPutJobDrafts:
