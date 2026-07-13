@@ -1612,6 +1612,10 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
     # credit-costing Verify step first — which read as "sync does nothing / keeps failing".
     require_verification = _parse_bool(payload.get("requireVerification"), default=False)
     confirm_active_campaign = _parse_bool(payload.get("confirmActiveCampaign"), default=False)
+    # When a lead is already in the target list, refresh it (Snov.io updateContact)
+    # so re-running a campaign pushes the newly drafted Subject/Body_Touch fields.
+    # Pass updateExisting=false to skip duplicates instead.
+    update_existing = _parse_bool(payload.get("updateExisting"), default=True)
     allow_unknown = _parse_bool(payload.get("allowUnknown"), SNOVIO_ALLOW_UNKNOWN_VERIFICATION)
     suppressed_emails = {str(item).strip().lower() for item in payload.get("suppressedEmails", [])}
     suppressed_domains = {str(item).strip().lower() for item in payload.get("suppressedDomains", [])}
@@ -1694,9 +1698,10 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
                     for prospect in duplicate.get("data", [])
                     for item in prospect.get("lists", [])
                 )
-                if existing_in_target:
+                if existing_in_target and not update_existing:
                     row_report.update({"eligible": False, "blockedReason": "duplicate_in_target_list", "status": "skipped"})
                 else:
+                    row_report["existingProspect"] = existing_in_target
                     prospect_payload = build_prospect_payload(dataframe.iloc[row_index], columns, list_id, custom_fields)
                     try:
                         response = client.add_prospect_to_list(list_id, prospect_payload)
@@ -1712,7 +1717,9 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
                             raise
                     row_report["response"] = response
                     row_report["snovioProspectId"] = response.get("id")
-                    if response.get("updated"):
+                    if response.get("updated") or (
+                        existing_in_target and (response.get("added") or response.get("success") or response.get("id"))
+                    ):
                         row_report["status"] = "updated"
                     elif response.get("added") or response.get("success") or response.get("id"):
                         # Snov.io's add-prospect-to-list returns {"success": true} (and
@@ -1743,6 +1750,7 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
         "campaign": campaign,
         "activeCampaign": active_campaign,
         "dryRun": dry_run,
+        "updateExisting": update_existing,
         "requireVerification": require_verification,
         "columns": columns,
         "summary": summarize_report(report_rows),

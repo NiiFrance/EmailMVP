@@ -336,6 +336,60 @@ class TestDomainAllowlist:
         assert response.status_code == 403
 
 
+_SYNC_CSV = b"Email,First Name,Last Name,Company\nada@example.com,Ada,Lovelace,Contoso\n"
+
+
+class TestProspectSyncDuplicates:
+    @staticmethod
+    def _client(existing_list_ids=()):
+        client = MagicMock()
+        client.get_custom_fields.return_value = []
+        client.get_user_campaigns.return_value = []
+        client.get_prospects_by_email.return_value = {
+            "data": [{"id": "p1", "lists": [{"id": i} for i in existing_list_ids]}] if existing_list_ids else []
+        }
+        client.add_prospect_to_list.return_value = {"success": True}
+        return client
+
+    def _run(self, client, payload):
+        with patch.object(fa, "_download_job_csv", return_value=_SYNC_CSV):
+            report, err = fa._run_prospect_sync(client, "job-1", payload)
+        assert err is None
+        return report
+
+    def test_new_prospect_is_added(self):
+        client = self._client()
+        report = self._run(client, {"listId": "42", "dryRun": False})
+        assert report["rows"][0]["status"] == "added"
+        assert report["summary"]["added"] == 1
+        client.add_prospect_to_list.assert_called_once()
+
+    def test_existing_prospect_is_updated_by_default(self):
+        client = self._client(existing_list_ids=("42",))
+        report = self._run(client, {"listId": "42", "dryRun": False})
+        assert report["rows"][0]["status"] == "updated"
+        assert report["rows"][0]["existingProspect"] is True
+        assert report["summary"]["updated"] == 1
+        assert report["summary"]["duplicates"] == 0
+        client.add_prospect_to_list.assert_called_once()
+
+    def test_existing_prospect_skipped_when_update_existing_false(self):
+        client = self._client(existing_list_ids=("42",))
+        report = self._run(client, {"listId": "42", "dryRun": False, "updateExisting": False})
+        assert report["rows"][0]["status"] == "skipped"
+        assert report["rows"][0]["blockedReason"] == "duplicate_in_target_list"
+        assert report["summary"]["duplicates"] == 1
+        assert report["summary"]["blocked"] == 0
+        assert report["summary"]["skipped"] == 0
+        client.add_prospect_to_list.assert_not_called()
+
+    def test_prospect_in_other_list_is_added_to_new_list(self):
+        client = self._client(existing_list_ids=("99",))
+        report = self._run(client, {"listId": "42", "dryRun": False})
+        assert report["rows"][0]["status"] == "added"
+        client.add_prospect_to_list.assert_called_once()
+
+
 class TestSnovioEndpoints:
     @pytest.fixture(autouse=True)
     def _job_owner(self):

@@ -296,14 +296,23 @@ def estimate_usage(lead_count: int, operation: str = "sync") -> dict[str, Any]:
 
 
 def summarize_report(rows: list[dict[str, Any]]) -> dict[str, int]:
-    summary = {"total": len(rows), "eligible": 0, "blocked": 0, "added": 0, "updated": 0, "skipped": 0, "failed": 0}
+    """Count each row into exactly one outcome bucket (plus the eligible tally).
+
+    Duplicates get their own bucket so the UI can distinguish "already in the
+    list" from verification/suppression blocks; blocked rows are not also
+    counted as skipped.
+    """
+    summary = {"total": len(rows), "eligible": 0, "blocked": 0, "added": 0, "updated": 0, "skipped": 0, "failed": 0, "duplicates": 0}
     for row in rows:
         if row.get("eligible"):
             summary["eligible"] += 1
-        if row.get("blockedReason"):
-            summary["blocked"] += 1
+        reason = row.get("blockedReason")
         status = row.get("status")
-        if status in summary:
+        if reason == "duplicate_in_target_list":
+            summary["duplicates"] += 1
+        elif reason:
+            summary["blocked"] += 1
+        elif status in ("added", "updated", "skipped", "failed"):
             summary[status] += 1
     return summary
 
