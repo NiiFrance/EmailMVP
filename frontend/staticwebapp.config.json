@@ -28,6 +28,10 @@
       "allowedRoles": ["anonymous", "authenticated"]
     },
     {
+      "route": "/api/snovio/mcp/callback",
+      "allowedRoles": ["anonymous", "authenticated"]
+    },
+    {
       "route": "/assets/*",
       "allowedRoles": ["anonymous", "authenticated"]
     },
