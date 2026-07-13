@@ -94,6 +94,12 @@ SNOVIO_CAMPAIGN_TIMEZONE = os.environ.get("SNOVIO_CAMPAIGN_TIMEZONE", "")
 SNOVIO_CAMPAIGN_ARCHIVE_MONTHS = int(os.environ.get("SNOVIO_CAMPAIGN_ARCHIVE_MONTHS", "3"))
 MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
+# Multi-tenant domain allowlist: comma-separated email domains permitted to use
+# the app (e.g. "relianceinfosystems.com,cloudware.africa"). Empty = allow all
+# (single-tenant behaviour / local dev).
+ALLOWED_EMAIL_DOMAINS = {
+    d.strip().lower().lstrip("@") for d in os.environ.get("ALLOWED_EMAIL_DOMAINS", "").split(",") if d.strip()
+}
 
 logger = logging.getLogger("emailmvp")
 
@@ -187,6 +193,30 @@ def _client_principal(req: func.HttpRequest) -> dict | None:
     return {"oid": oid, "email": email, "name": name}
 
 
+def _domain_allowed(email: str) -> bool:
+    """True when the email's domain is on the allowlist (empty allowlist = allow all)."""
+    if not ALLOWED_EMAIL_DOMAINS:
+        return True
+    domain = email.lower().rsplit("@", 1)[-1] if "@" in email else ""
+    return domain in ALLOWED_EMAIL_DOMAINS
+
+
+def _require_allowed_domain(req: func.HttpRequest):
+    """Multi-tenant gate: 403 when an authenticated caller's domain is not allowlisted.
+
+    Returns an error response to short-circuit with, or None when the request may
+    proceed. Requests without a client principal pass through — SWA already blocks
+    unauthenticated browser traffic, and webhook callbacks carry no principal.
+    """
+    principal = _client_principal(req)
+    if principal and not _domain_allowed(principal["email"]):
+        logger.warning("Domain allowlist rejected %s", principal["email"])
+        return _json_response(
+            {"error": "Access denied. Your organisation is not authorised to use this application."}, 403
+        )
+    return None
+
+
 def _current_user(req: func.HttpRequest) -> dict | None:
     """Return {oid, email, name, role} for the caller, or None when anonymous.
 
@@ -195,6 +225,8 @@ def _current_user(req: func.HttpRequest) -> dict | None:
     """
     principal = _client_principal(req)
     if not principal:
+        return None
+    if not _domain_allowed(principal["email"]):
         return None
     role = "admin" if principal["email"].lower() in ADMIN_EMAILS else "user"
     if role != "admin":
@@ -209,7 +241,10 @@ def _current_user(req: func.HttpRequest) -> dict | None:
 
 
 def _require_user(req: func.HttpRequest):
-    """Return (user, None) or (None, 401 response)."""
+    """Return (user, None) or (None, 401/403 response)."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return None, gate
     user = _current_user(req)
     if not user:
         return None, _json_response({"error": "Authentication required."}, 401)
@@ -479,6 +514,9 @@ def _snovio_created_list_id(response: Any) -> str:
 @app.durable_client_input(client_name="client")
 async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
     """Accept a CSV file upload, store it, and start the orchestration."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     try:
         file = req.files.get("file")
         if not file:
@@ -1013,6 +1051,9 @@ def assemble_csv_activity(assembleInput: dict) -> str:
 @app.route(route="templates", methods=["GET"])
 async def get_templates(req: func.HttpRequest) -> func.HttpResponse:
     """Return the list of available prompt templates."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     templates = list_templates()
     return func.HttpResponse(
         json.dumps({"templates": templates}),
@@ -1027,6 +1068,9 @@ async def get_templates(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="me", methods=["GET"])
 async def get_me(req: func.HttpRequest) -> func.HttpResponse:
     """Return the signed-in user's identity, role, and saved context."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     user = _current_user(req)
     if not user:
         return _json_response({"error": "Not authenticated."}, 401)
@@ -1289,6 +1333,9 @@ async def archive_campaign_endpoint(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/status", methods=["GET"])
 async def get_snovio_status(req: func.HttpRequest) -> func.HttpResponse:
     """Return Snov.io integration status without exposing secrets."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     resolved_id, _, source = _resolve_snovio_credentials(req)
     session_record = _load_snovio_session(_session_id_from_request(req))
     connected = bool(session_record) or source == "account"
@@ -1316,6 +1363,9 @@ async def create_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
     browser and never logged. The caller receives only the opaque session id, which it
     sends back via the X-Snovio-Session header on subsequent requests.
     """
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     payload = _request_json(req)
     client_id = str(payload.get("clientId") or payload.get("client_id") or "").strip()
     client_secret = str(payload.get("clientSecret") or payload.get("client_secret") or "").strip()
@@ -1367,6 +1417,9 @@ async def create_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/session", methods=["DELETE"])
 async def delete_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
     """Close the Snov.io session and forget any account-saved credentials."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     session_id = _session_id_from_request(req)
     _delete_snovio_session(session_id)
     principal = _client_principal(req)
@@ -1381,6 +1434,9 @@ async def delete_snovio_session(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/balance", methods=["GET"])
 async def get_snovio_balance(req: func.HttpRequest) -> func.HttpResponse:
     """Return Snov.io account balance as a preflight check."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -1398,6 +1454,9 @@ async def get_snovio_balance(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/options", methods=["GET"])
 async def get_snovio_options(req: func.HttpRequest) -> func.HttpResponse:
     """Return Snov.io lists, campaigns, sender accounts, schedules, and custom fields."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return _json_response({
@@ -1429,6 +1488,9 @@ async def get_snovio_options(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/preflight", methods=["GET"])
 async def get_snovio_preflight(req: func.HttpRequest) -> func.HttpResponse:
     """Estimate credit/rate impact before a Snov.io operation."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     params = _query_params(req)
     operation = params.get("operation", "sync")
     job_id = params.get("jobId", "")
@@ -1958,6 +2020,9 @@ async def get_snovio_enrichment_result(req: func.HttpRequest) -> func.HttpRespon
 @app.route(route="snovio/analytics", methods=["GET"])
 async def get_snovio_analytics(req: func.HttpRequest) -> func.HttpResponse:
     """Proxy campaign analytics without exposing Snov.io credentials."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -1988,6 +2053,9 @@ async def get_snovio_analytics(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/suppressions", methods=["POST"])
 async def add_snovio_suppressions(req: func.HttpRequest) -> func.HttpResponse:
     """Add emails or domains to a Snov.io Do-not-email list."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -2008,6 +2076,9 @@ async def add_snovio_suppressions(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="snovio/recipient-status", methods=["POST"])
 async def change_snovio_recipient_status(req: func.HttpRequest) -> func.HttpResponse:
     """Pause, activate, or unsubscribe a Snov.io campaign recipient."""
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -2044,6 +2115,9 @@ async def receive_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks", methods=["GET"])
 async def list_snovio_webhooks(req: func.HttpRequest) -> func.HttpResponse:
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -2055,6 +2129,9 @@ async def list_snovio_webhooks(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks", methods=["POST"])
 async def create_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -2068,6 +2145,9 @@ async def create_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks/{webhookId}", methods=["PUT"])
 async def update_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
@@ -2081,6 +2161,9 @@ async def update_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.route(route="snovio/webhooks/{webhookId}", methods=["DELETE"])
 async def delete_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
+    gate = _require_allowed_domain(req)
+    if gate:
+        return gate
     missing = _snovio_required_response(req)
     if missing:
         return missing
