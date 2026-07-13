@@ -1,6 +1,7 @@
 """Tests for function_app module aligned to the current Azure OpenAI pipeline."""
 
 import asyncio
+import base64
 import json
 import sys
 from types import ModuleType
@@ -253,6 +254,86 @@ class TestTemplatesEndpoint:
         assert response.status_code == 200
         assert "templates" in payload
         assert any(item["id"] == "cold_email" for item in payload["templates"])
+
+
+def _principal_header(email: str, roles=("authenticated",)) -> str:
+    return base64.b64encode(json.dumps({
+        "userId": "oid-123",
+        "userDetails": email,
+        "userRoles": list(roles),
+        "claims": [],
+    }).encode("utf-8")).decode("ascii")
+
+
+def _authed_request(email: str):
+    req = MagicMock()
+    req.headers = {"x-ms-client-principal": _principal_header(email)}
+    req.route_params = {}
+    req.params = {}
+    return req
+
+
+class TestDomainAllowlist:
+    ALLOWED = {"cloudware.africa", "relianceinfosystems.com"}
+
+    def test_empty_allowlist_allows_any_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", set()):
+            assert fa._domain_allowed("anyone@example.com") is True
+
+    def test_domain_allowed_matches_case_insensitively(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            assert fa._domain_allowed("User@Cloudware.Africa") is True
+            assert fa._domain_allowed("user@relianceinfosystems.com") is True
+            assert fa._domain_allowed("intruder@evil.com") is False
+            assert fa._domain_allowed("no-at-sign") is False
+
+    def test_gate_rejects_disallowed_domain_with_403(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            response = fa._require_allowed_domain(_authed_request("intruder@evil.com"))
+        assert response is not None
+        assert response.status_code == 403
+
+    def test_gate_allows_allowlisted_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            assert fa._require_allowed_domain(_authed_request("user@cloudware.africa")) is None
+
+    def test_gate_passes_anonymous_requests_through(self):
+        req = MagicMock()
+        req.headers = {}
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            assert fa._require_allowed_domain(req) is None
+
+    def test_require_user_returns_403_for_disallowed_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            user, err = fa._require_user(_authed_request("intruder@evil.com"))
+        assert user is None
+        assert err.status_code == 403
+
+    def test_require_user_returns_user_for_allowed_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED), \
+                patch.object(fa.data_store, "get_user", return_value=None):
+            user, err = fa._require_user(_authed_request("user@relianceinfosystems.com"))
+        assert err is None
+        assert user["email"] == "user@relianceinfosystems.com"
+
+    def test_current_user_returns_none_for_disallowed_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            assert fa._current_user(_authed_request("intruder@evil.com")) is None
+
+    def test_templates_route_rejects_disallowed_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            response = asyncio.run(fa.get_templates(_authed_request("intruder@evil.com")))
+        assert response.status_code == 403
+
+    def test_upload_route_rejects_disallowed_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            response = asyncio.run(fa.upload_csv(_authed_request("intruder@evil.com"), MagicMock()))
+        assert response.status_code == 403
+
+    def test_snovio_session_route_rejects_disallowed_domain(self):
+        with patch.object(fa, "ALLOWED_EMAIL_DOMAINS", self.ALLOWED):
+            response = asyncio.run(fa.create_snovio_session(_authed_request("intruder@evil.com")))
+        assert response.status_code == 403
 
 
 class TestSnovioEndpoints:
