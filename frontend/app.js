@@ -650,12 +650,61 @@
 
     editSubject.addEventListener("input", () => {
         const lead = reviewLeads[activeLeadIdx];
-        if (lead && lead.touches[activeTouchIdx]) lead.touches[activeTouchIdx].subject = editSubject.value;
+        if (lead && lead.touches[activeTouchIdx]) { lead.touches[activeTouchIdx].subject = editSubject.value; scheduleDraftSave(); }
     });
     editBody.addEventListener("input", () => {
         const lead = reviewLeads[activeLeadIdx];
-        if (lead && lead.touches[activeTouchIdx]) lead.touches[activeTouchIdx].body = editBody.value;
+        if (lead && lead.touches[activeTouchIdx]) { lead.touches[activeTouchIdx].body = editBody.value; scheduleDraftSave(); }
     });
+
+    // ── Draft persistence (review edits → server, so sync pushes what you see) ──
+    let draftSaveTimer = null;
+    let draftsDirty = false;
+    let draftSavePromise = null;
+
+    function draftStatus(text) {
+        const el = document.getElementById("editor-hint");
+        if (el) el.textContent = text;
+    }
+
+    function scheduleDraftSave() {
+        draftsDirty = true;
+        draftStatus("Unsaved changes\u2026");
+        clearTimeout(draftSaveTimer);
+        draftSaveTimer = setTimeout(() => { saveDrafts(); }, 1200);
+    }
+
+    async function saveDrafts() {
+        if (!draftsDirty || !currentJobId || !reviewLeads.length) return draftSavePromise;
+        draftsDirty = false;
+        draftStatus("Saving\u2026");
+        draftSavePromise = (async () => {
+            try {
+                const resp = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}/drafts`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        edits: reviewLeads.map((l) => ({
+                            email: l.email,
+                            touches: l.touches.map((t) => ({ subject: t.subject, body: t.body })),
+                        })),
+                    }),
+                });
+                if (!resp.ok) throw new Error("save failed");
+                draftStatus("Draft saved \u00b7 merge fields resolved per lead");
+            } catch (e) {
+                draftsDirty = true;
+                draftStatus("Couldn\u2019t save edits \u2014 retrying on next change");
+            }
+        })();
+        return draftSavePromise;
+    }
+
+    async function flushDraftSave() {
+        clearTimeout(draftSaveTimer);
+        if (draftsDirty) await saveDrafts();
+        else if (draftSavePromise) await draftSavePromise;
+    }
 
     // ── Recent (session history, localStorage) ──
     function recordRecent(leads, emails) {
@@ -1236,7 +1285,7 @@
     });
     step2Back.addEventListener("click", () => { resetMappingPanel(); uploadBtn.disabled = !selectedFile; showView("step1"); });
     step3Back.addEventListener("click", () => showView("step2"));
-    step3Continue.addEventListener("click", () => { showView("step4"); loadSnovioOptions(); });
+    step3Continue.addEventListener("click", async () => { await flushDraftSave(); showView("step4"); loadSnovioOptions(); });
     step4Back.addEventListener("click", () => showView("step3"));
     newJobBtn.addEventListener("click", resetAll);
     retryBtn.addEventListener("click", resetAll);

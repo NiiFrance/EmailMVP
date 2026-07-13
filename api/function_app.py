@@ -1112,6 +1112,55 @@ async def put_me_context(req: func.HttpRequest) -> func.HttpResponse:
     return _json_response({"saved": True})
 
 
+@app.route(route="jobs/{jobId}/drafts", methods=["PUT"])
+async def put_job_drafts(req: func.HttpRequest) -> func.HttpResponse:
+    """Persist review-step edits to the job's generated CSV (owner only).
+
+    Body: {"edits": [{"email": "...", "touches": [{"subject": "...", "body": "..."}, ...]}]}
+    Rewrites the Subject_Touch{n}/Body_Touch{n} columns for matching leads so the
+    Snov.io sync (which reads the output CSV) pushes what the user reviewed.
+    """
+    job_id = req.route_params.get("jobId", "")
+    _, err = _require_job_owner(req, job_id)
+    if err:
+        return err
+    payload = _request_json(req)
+    edits = payload.get("edits")
+    if not isinstance(edits, list) or not edits:
+        return _json_response({"error": "edits array is required."}, 400)
+    try:
+        dataframe = parse_csv(_download_job_csv(job_id))
+    except Exception:
+        return _json_response({"error": "Job output not found."}, 404)
+
+    rows, _columns = build_job_rows(dataframe)
+    email_to_index = {r["email"].lower(): r["rowIndex"] for r in rows if r.get("email")}
+    header_lookup = {str(c).lower(): c for c in dataframe.columns}
+    updated = 0
+    for edit in edits:
+        email = str(edit.get("email") or "").strip().lower()
+        row_index = email_to_index.get(email)
+        if row_index is None:
+            continue
+        changed = False
+        for touch_number, touch in enumerate(edit.get("touches") or [], start=1):
+            if not isinstance(touch, dict):
+                continue
+            for prefix, key in (("subject_touch", "subject"), ("body_touch", "body")):
+                if key not in touch:
+                    continue
+                column = header_lookup.get(f"{prefix}{touch_number}")
+                if column is None:
+                    continue
+                dataframe.iloc[row_index, dataframe.columns.get_loc(column)] = str(touch.get(key) or "")
+                changed = True
+        if changed:
+            updated += 1
+
+    _upload_blob(OUTPUT_CONTAINER, f"{job_id}.csv", dataframe_to_csv_bytes(dataframe))
+    return _json_response({"saved": True, "updatedLeads": updated})
+
+
 @app.route(route="users", methods=["GET"])
 async def get_users(req: func.HttpRequest) -> func.HttpResponse:
     """Admin: list all users and their roles."""

@@ -390,6 +390,60 @@ class TestProspectSyncDuplicates:
         client.add_prospect_to_list.assert_called_once()
 
 
+class TestPutJobDrafts:
+    CSV = (
+        b"Email,First Name,Last Name,Company,Subject_Touch1,Body_Touch1,Subject_Touch2,Body_Touch2\n"
+        b"ada@example.com,Ada,Lovelace,Contoso,Old Subject 1,Old Body 1,Old Subject 2,Old Body 2\n"
+    )
+
+    def _request(self, body):
+        req = MagicMock()
+        req.route_params = {"jobId": "job-1"}
+        req.headers = {}
+        req.get_json.return_value = body
+        req.get_body.return_value = json.dumps(body).encode("utf-8")
+        return req
+
+    def test_edits_rewrite_touch_columns(self):
+        fake_user = {"oid": "u1", "email": "u@example.com", "name": "U", "role": "user", "job": {}}
+        uploaded = {}
+
+        def capture_upload(container, blob_name, data):
+            uploaded["blob"] = blob_name
+            uploaded["data"] = data
+
+        body = {"edits": [{"email": "ADA@example.com", "touches": [
+            {"subject": "New Subject 1", "body": "New Body 1"},
+            {"subject": "New Subject 2", "body": "New Body 2"},
+        ]}]}
+        with patch.object(fa, "_require_job_owner", return_value=(fake_user, None)), \
+                patch.object(fa, "_download_job_csv", return_value=self.CSV), \
+                patch.object(fa, "_upload_blob", side_effect=capture_upload):
+            response = asyncio.run(fa.put_job_drafts(self._request(body)))
+
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload == {"saved": True, "updatedLeads": 1}
+        csv_text = uploaded["data"].decode("utf-8")
+        assert "New Subject 1" in csv_text and "New Body 2" in csv_text
+        assert "Old Subject 1" not in csv_text
+
+    def test_unknown_email_is_ignored(self):
+        fake_user = {"oid": "u1", "email": "u@example.com", "name": "U", "role": "user", "job": {}}
+        body = {"edits": [{"email": "nobody@example.com", "touches": [{"subject": "X"}]}]}
+        with patch.object(fa, "_require_job_owner", return_value=(fake_user, None)), \
+                patch.object(fa, "_download_job_csv", return_value=self.CSV), \
+                patch.object(fa, "_upload_blob"):
+            response = asyncio.run(fa.put_job_drafts(self._request(body)))
+        assert json.loads(response.body)["updatedLeads"] == 0
+
+    def test_requires_edits_array(self):
+        fake_user = {"oid": "u1", "email": "u@example.com", "name": "U", "role": "user", "job": {}}
+        with patch.object(fa, "_require_job_owner", return_value=(fake_user, None)):
+            response = asyncio.run(fa.put_job_drafts(self._request({})))
+        assert response.status_code == 400
+
+
 class TestSnovioEndpoints:
     @pytest.fixture(autouse=True)
     def _job_owner(self):
