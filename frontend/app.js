@@ -1468,12 +1468,25 @@
     const copilotSend = document.getElementById("copilot-send");
     const copilotHistory = [];
 
+    // Minimal, XSS-safe markdown for assistant bubbles: escape everything first,
+    // then re-introduce only our own tags (bold/italic/code/headings/bullets).
+    function renderCopilotMarkdown(el, text) {
+        let safe = escapeHtml(String(text || ""));
+        safe = safe.replace(/`([^`\n]+)`/g, '<code style="background:#1A1A1A;border:1px solid #2C2C2C;border-radius:4px;padding:0 4px;font-size:12.5px;">$1</code>');
+        safe = safe.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+        safe = safe.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,;:!?)]|$)/gm, "$1<em>$2</em>");
+        safe = safe.replace(/^#{1,4}\s+(.+)$/gm, "<strong>$1</strong>");
+        safe = safe.replace(/^(\s*)[-*]\s+/gm, "$1\u2022 ");
+        el.innerHTML = safe;
+    }
+
     function copilotBubble(role, text) {
         const div = document.createElement("div");
         div.style.cssText = role === "user"
             ? "align-self:flex-end;background:#CE1126;color:#fff;border-radius:12px 12px 2px 12px;padding:9px 12px;max-width:85%;white-space:pre-wrap;"
             : "align-self:flex-start;background:#242424;border:1px solid #2C2C2C;border-radius:12px 12px 12px 2px;padding:9px 12px;max-width:90%;white-space:pre-wrap;";
-        div.textContent = text;
+        if (role === "user") div.textContent = text;
+        else renderCopilotMarkdown(div, text);
         copilotMessages.appendChild(div);
         copilotMessages.scrollTop = copilotMessages.scrollHeight;
         return div;
@@ -1494,7 +1507,7 @@
             });
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.error || "Copilot failed.");
-            thinking.textContent = data.reply || "(no reply)";
+            renderCopilotMarkdown(thinking, data.reply || "(no reply)");
             copilotHistory.push({ role: "assistant", content: data.reply || "" });
             if (data.toolTrace && data.toolTrace.length) {
                 const trace = document.createElement("div");
