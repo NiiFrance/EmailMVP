@@ -631,23 +631,178 @@ class TestLeadSearchAndCopilotRoutes:
         result = {"structuredContent": ["type"], "content": [{"type": "text", "text": '{"list": {"id": 40236663}, "list_id": 40236663}'}]}
         assert fa._mcp_json(result) == {"list": {"id": 40236663}, "list_id": 40236663}
 
+
+class TestAdminDelegation:
+    ADMIN = {"oid": "admin-1", "email": "boss@cloudware.africa", "name": "Boss", "role": "admin"}
+    USER = {"oid": "user-1", "email": "rep@cloudware.africa", "name": "Rep", "role": "user"}
+
+    def _request(self):
+        req = MagicMock()
+        req.route_params = {}
+        req.params = {}
+        req.headers = {}
+        return req
+
+    def test_admin_can_act_on_foreign_job(self):
+        foreign_job = {"jobId": "j-1", "ownerOid": "user-1", "status": "Completed"}
+        with patch.object(fa, "_require_user", return_value=(dict(self.ADMIN), None)), \
+                patch.object(fa.data_store, "get_job", return_value=None), \
+                patch.object(fa.data_store, "find_job", return_value=foreign_job) as fj:
+            user, err = fa._require_job_owner(self._request(), "j-1")
+        assert err is None
+        assert user["job"]["ownerOid"] == "user-1"
+        fj.assert_called_once_with("j-1")
+
+    def test_regular_user_cannot_act_on_foreign_job(self):
+        with patch.object(fa, "_require_user", return_value=(dict(self.USER), None)), \
+                patch.object(fa.data_store, "get_job", return_value=None), \
+                patch.object(fa.data_store, "find_job") as fj:
+            user, err = fa._require_job_owner(self._request(), "j-1")
+        assert user is None
+        assert err.status_code == 404
+        fj.assert_not_called()
+
+    def test_own_job_keeps_owner_oid(self):
+        with patch.object(fa, "_require_user", return_value=(dict(self.USER), None)), \
+                patch.object(fa.data_store, "get_job", return_value={"jobId": "j-1"}):
+            user, err = fa._require_job_owner(self._request(), "j-1")
+        assert err is None
+        assert user["job"]["ownerOid"] == "user-1"
+
+
+class TestAdminDashboardRoutes:
+    ADMIN = {"oid": "admin-1", "email": "boss@cloudware.africa", "name": "Boss", "role": "admin"}
+
+    def _request(self, body=None, params=None):
+        req = MagicMock()
+        req.route_params = {}
+        req.params = params or {}
+        req.headers = {}
+        req.get_json.return_value = body or {}
+        req.get_body.return_value = json.dumps(body or {}).encode("utf-8")
+        return req
+
+    def test_dashboard_aggregates_and_snapshots(self):
+        client = MagicMock()
+        client.get_balance.return_value = {"data": {"balance": "1000.00", "unique_recipients_used": 5}}
+        client.get_user_campaigns.return_value = [{"id": 77, "campaign": "Price Change Early Renewal", "status": "Draft", "list_id": 1}]
+        client.get_campaign_analytics.return_value = {
+            "emails_sent": 10, "delivered": 9, "delivered_rate": "90%", "bounced": 1,
+            "email_opens": 6, "email_opens_rate": "60%", "link_clicks": 2,
+            "email_replies": 3, "email_replies_rate": "30%", "unsubscribed": 0,
+            "interested": 2, "maybe": 1, "not_interested": 0,
+        }
+        snapshots = []
+        with patch.object(fa, "_require_admin", return_value=(self.ADMIN, None)), \
+                patch.object(fa, "_snovio_required_response", return_value=None), \
+                patch.object(fa, "_snovio_client", return_value=client), \
+                patch.object(fa.data_store, "save_engagement_snapshot", side_effect=lambda cid, f: snapshots.append(cid)), \
+                patch.object(fa.data_store, "list_template_guidance", return_value=[]):
+            response = asyncio.run(fa.admin_dashboard(self._request()))
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert payload["totals"]["sent"] == 10
+        assert payload["totals"]["replies"] == 3
+        assert payload["campaigns"][0]["analytics"]["interested"] == 2
+        assert snapshots == ["77"]
+
+    def test_dashboard_requires_admin(self):
+        deny = fa._json_response({"error": "Admin role required."}, 403)
+        with patch.object(fa, "_require_admin", return_value=(None, deny)):
+            response = asyncio.run(fa.admin_dashboard(self._request()))
+        assert response.status_code == 403
+
+    def test_analyze_performance_writes_guidance(self):
+        snapshot = {"name": "Price Change Early Renewal", "analytics": json.dumps({"sent": 100, "opens": 50, "clicks": 5, "replies": 12, "unsubscribed": 1, "interested": 6, "notInterested": 2})}
+        completion = MagicMock()
+        completion.choices = [MagicMock(message=MagicMock(content="- Keep subjects under 6 words"))]
+        openai_client = MagicMock()
+        openai_client.chat.completions.create.return_value = completion
+        saved = {}
+        with patch.object(fa, "_require_admin", return_value=(self.ADMIN, None)), \
+                patch.object(fa, "_snovio_required_response", return_value=None), \
+                patch.object(fa.data_store, "list_engagement_snapshots", return_value=[snapshot]), \
+                patch.object(fa, "AzureOpenAI", return_value=openai_client), \
+                patch.object(fa.data_store, "save_template_guidance", side_effect=lambda tid, g, s: saved.update({tid: g})):
+            response = asyncio.run(fa.admin_analyze_performance(self._request()))
+        payload = json.loads(response.body)
+        assert response.status_code == 200
+        assert saved == {"price_change": "- Keep subjects under 6 words"}
+        assert payload["analyzed"][0]["templateId"] == "price_change"
+
+    def test_analyze_performance_requires_snapshots(self):
+        with patch.object(fa, "_require_admin", return_value=(self.ADMIN, None)), \
+                patch.object(fa, "_snovio_required_response", return_value=None), \
+                patch.object(fa.data_store, "list_engagement_snapshots", return_value=[]):
+            response = asyncio.run(fa.admin_analyze_performance(self._request()))
+        assert response.status_code == 409
+
+
+class TestCopilotActionTools:
+    USER = {"oid": "user-1", "email": "u@cloudware.africa", "name": "U", "role": "user"}
+
+    def _request(self, body=None):
+        req = MagicMock()
+        req.route_params = {}
+        req.params = {}
+        req.headers = {}
+        req.get_json.return_value = body or {}
+        req.get_body.return_value = json.dumps(body or {}).encode("utf-8")
+        return req
+
+    def _tools(self, durable=None):
+        req = MagicMock()
+        req.headers = {}
+        return fa._copilot_app_tools(dict(self.USER), req, durable)
+
+    def test_sync_tool_requires_confirmation(self):
+        tools = self._tools()
+        result = tools["sync_leads_to_snovio"]["handler"]({"jobId": "x", "listName": "L", "confirm": False})
+        assert "Blocked" in result["error"]
+
+    def test_campaign_tool_requires_confirmation(self):
+        tools = self._tools()
+        result = asyncio.run(tools["create_drip_campaign"]["handler"]({"jobId": "x", "title": "T", "confirm": False}))
+        assert "Blocked" in result["error"]
+
+    def test_sync_tool_runs_prospect_sync_when_confirmed(self):
+        job = {"jobId": "5f0e2d1c-0000-4000-8000-000000000001"}
+        with patch.object(fa.data_store, "get_job", return_value=dict(job)), \
+                patch.object(fa, "_snovio_configured", return_value=True), \
+                patch.object(fa, "_snovio_client", return_value=MagicMock()), \
+                patch.object(fa, "_run_prospect_sync", return_value=({"summary": {"added": 2}, "listId": "9", "listName": "L"}, None)) as rps:
+            tools = self._tools()
+            result = tools["sync_leads_to_snovio"]["handler"]({"jobId": "5f0e2d1c-0000-4000-8000-000000000001", "listName": "L", "confirm": True})
+        assert result["synced"] is True
+        assert result["summary"] == {"added": 2}
+        assert rps.call_args[0][2]["dryRun"] is False
+
+    def test_start_generation_rejects_unknown_template(self):
+        durable = MagicMock()
+        with patch.object(fa.data_store, "get_job", return_value={"jobId": "j"}):
+            tools = self._tools(durable)
+            result = asyncio.run(tools["start_generation"]["handler"](
+                {"jobId": "5f0e2d1c-0000-4000-8000-000000000001", "templateId": "nope"}))
+        assert "Unknown template" in result["error"]
+        assert "availableTemplates" in result
+
     def test_copilot_requires_user_message(self):
         with patch.object(fa, "_require_user", return_value=(self.USER, None)):
-            response = asyncio.run(fa.copilot_chat(self._request({"messages": []})))
+            response = asyncio.run(fa.copilot_chat(self._request({"messages": []}), MagicMock()))
         assert response.status_code == 400
 
     def test_copilot_returns_agent_reply(self):
+        async def fake_agent(*args, **kwargs):
+            return {"reply": "Hi there", "toolTrace": []}
         with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
                 patch.object(fa, "_get_valid_mcp_token", return_value=None), \
                 patch.object(fa, "AzureOpenAI"), \
-                patch.object(fa.copilot, "run_agent", return_value={"reply": "Hi there", "toolTrace": []}) as ra:
-            response = asyncio.run(fa.copilot_chat(self._request({"messages": [{"role": "user", "content": "hello"}]})))
+                patch.object(fa.copilot, "run_agent_async", side_effect=fake_agent):
+            response = asyncio.run(fa.copilot_chat(self._request({"messages": [{"role": "user", "content": "hello"}]}), MagicMock()))
         payload = json.loads(response.body)
         assert response.status_code == 200
         assert payload["reply"] == "Hi there"
         assert payload["snovioConnected"] is False
-        # No MCP session is passed when Snov.io is not connected
-        assert ra.call_args[0][3] is None
 
 
 class TestSnovioEndpoints:

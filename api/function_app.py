@@ -7,6 +7,7 @@ Endpoints:
   GET  /api/templates     — List available prompt templates
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -268,7 +269,9 @@ def _require_job_owner(req: func.HttpRequest, job_id: str):
     """Return (user-with-job, None) or (None, error response).
 
     A job belongs to the caller when a Jobs row exists under their oid — point
-    lookup, no cross-user scan. Unknown/foreign jobs read as 404 (not 403) to
+    lookup, no cross-user scan. Admins may act on ANY job (delegation: running
+    campaigns on behalf of other users); the job's real owner oid is preserved
+    in user["job"]["ownerOid"]. Unknown/foreign jobs read as 404 (not 403) to
     avoid leaking other users' job ids.
     """
     user, err = _require_user(req)
@@ -276,6 +279,10 @@ def _require_job_owner(req: func.HttpRequest, job_id: str):
         return None, err
     try:
         job = data_store.get_job(user["oid"], job_id)
+        if job:
+            job["ownerOid"] = user["oid"]
+        elif user.get("role") == "admin":
+            job = data_store.find_job(job_id)
     except Exception as error:
         logger.warning("Job ownership lookup failed for %s: %s", job_id, error)
         return None, _json_response({"error": "Job lookup failed."}, 500)
@@ -616,15 +623,36 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
         logger.info("Stored %s (%d leads) as %s [template=%s]", filename, total_leads, blob_name, template["id"])
 
         # Record the job in the caller's workspace (history + ownership checks).
+        # Admins may run a campaign on behalf of another user (delegation): the job
+        # is recorded in the TARGET user's workspace with an audit trail.
         user = _current_user(req)
         if user:
+            owner_oid = user["oid"]
+            extra_fields: dict = {}
+            on_behalf_of = str((req.form or {}).get("on_behalf_of") or "").strip().lower()
+            if on_behalf_of and on_behalf_of != user["email"].lower():
+                if user["role"] != "admin":
+                    return func.HttpResponse(
+                        json.dumps({"error": "Only admins can run campaigns on behalf of another user."}),
+                        status_code=403, mimetype="application/json",
+                    )
+                target = next((u for u in data_store.list_users() if str(u.get("email", "")).lower() == on_behalf_of), None)
+                if not target:
+                    return func.HttpResponse(
+                        json.dumps({"error": f"No user found with email {on_behalf_of}."}),
+                        status_code=404, mimetype="application/json",
+                    )
+                owner_oid = str(target.get("oid") or target.get("RowKey"))
+                extra_fields = {"delegatedBy": user["email"], "delegatedAt": datetime.now(timezone.utc).isoformat()}
+                logger.info("Admin %s uploading job %s on behalf of %s", user["email"], job_id, on_behalf_of)
             try:
-                data_store.record_job(user["oid"], job_id, {
+                data_store.record_job(owner_oid, job_id, {
                     "templateId": template["id"],
                     "templateName": template["name"],
                     "fileName": filename,
                     "totalLeads": total_leads,
                     "status": "uploaded",
+                    **extra_fields,
                 })
             except Exception as error:
                 logger.warning("Job record failed for %s: %s", job_id, error)
@@ -785,7 +813,7 @@ async def generate_emails(req: func.HttpRequest, client) -> func.HttpResponse:
         await client.start_new("orchestrate_emails", client_input=orchestrator_input, instance_id=job_id)
         logger.info("Started generation for %s [template=%s, map=%s]", job_id, template["id"], column_map)
         try:
-            data_store.update_job(user["oid"], job_id, {
+            data_store.update_job(user["job"].get("ownerOid", user["oid"]), job_id, {
                 "status": "generating",
                 "templateId": template["id"],
                 "templateName": template["name"],
@@ -947,12 +975,27 @@ def process_lead_activity(leadInput: dict) -> dict:
         user_prompt = user_prompt_builder(lead_data)
         parse_response = template["parse_response"]
 
+        # Learning loop: inject performance guidance distilled from live Snov.io
+        # engagement (replies/sentiment) for this template, when available.
+        system_prompt = template["system_prompt"]
+        try:
+            guidance_row = data_store.get_template_guidance(template["id"])
+            guidance_text = str(guidance_row.get("guidance") or "") if isinstance(guidance_row, dict) else ""
+            if guidance_text.strip():
+                system_prompt = (
+                    f"{system_prompt}\n\nPERFORMANCE GUIDANCE (derived from real engagement "
+                    f"data for this campaign type — follow unless it conflicts with the rules above):\n"
+                    f"{guidance_text.strip()[:1500]}"
+                )
+        except Exception as guidance_error:
+            logger.debug("Guidance lookup skipped for %s: %s", template["id"], guidance_error)
+
         # gpt-5.x "mini" deployments are reasoning models: hidden reasoning tokens
         # count against max_completion_tokens, so a low cap can truncate output and
         # yield too few emails ("Expected N emails, got M"). Use a generous budget and
         # retry a few times, since occasional non-compliance is expected from the model.
         messages = [
-            {"role": "system", "content": template["system_prompt"]},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         max_attempts = 3
@@ -1914,8 +1957,12 @@ def _list_row_to_lead(row: dict) -> dict:
 # ===========================================================================
 # In-app copilot — natural-language operations over the app + the user's Snov.io
 # ===========================================================================
-def _copilot_app_tools(user: dict) -> dict:
-    """Read-only app tools the copilot can call for the signed-in user."""
+def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None) -> dict:
+    """App tools the copilot can call for the signed-in user.
+
+    Read tools are always safe; ACTION tools (generation, sync, campaign) require
+    a confirm flag the model may only set after an explicit user go-ahead in chat.
+    """
     def list_templates_tool(_args):
         return {"templates": [
             {"id": t["id"], "name": t["name"], "emails": t.get("num_emails")}
@@ -1926,17 +1973,27 @@ def _copilot_app_tools(user: dict) -> dict:
         jobs = data_store.list_jobs(user["oid"], limit=20)
         return {"jobs": [
             {"jobId": j.get("jobId"), "template": j.get("templateName"), "file": j.get("fileName"),
-             "leads": j.get("totalLeads"), "status": j.get("status"), "createdAt": j.get("createdAt")}
+             "leads": j.get("totalLeads"), "status": j.get("status"), "createdAt": j.get("createdAt"),
+             "delegatedBy": j.get("delegatedBy")}
             for j in jobs
         ]}
 
+    def _own_job(job_id: str) -> dict | None:
+        """Job lookup honouring admin delegation."""
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
+            return None
+        job = data_store.get_job(user["oid"], job_id)
+        if job:
+            job["ownerOid"] = user["oid"]
+            return job
+        if user.get("role") == "admin":
+            return data_store.find_job(job_id)
+        return None
+
     def job_drafts_tool(args):
         job_id = str(args.get("jobId") or "")
-        if not re.fullmatch(r"[0-9a-fA-F-]{36}", job_id):
-            return {"error": "jobId must be a job UUID from list_my_jobs."}
-        jobs = {str(j.get("jobId")): j for j in data_store.list_jobs(user["oid"], limit=100)}
-        if job_id not in jobs:
-            return {"error": "That job does not belong to you."}
+        if not _own_job(job_id):
+            return {"error": "That job does not belong to you (jobId must come from list_my_jobs)."}
         try:
             dataframe = parse_csv(_download_job_csv(job_id))
         except Exception:
@@ -1944,6 +2001,123 @@ def _copilot_app_tools(user: dict) -> dict:
         headers = [str(c) for c in dataframe.columns]
         preview = dataframe.head(3).astype(str).to_dict(orient="records")
         return {"columns": headers, "rowCount": len(dataframe), "sampleRows": preview}
+
+    async def start_generation_tool(args):
+        job_id = str(args.get("jobId") or "")
+        template_id = str(args.get("templateId") or "")
+        job = _own_job(job_id)
+        if not job:
+            return {"error": "Job not found in your workspace — attach a lead file first."}
+        try:
+            template = get_template(template_id)
+        except KeyError:
+            return {"error": f"Unknown template '{template_id}'.",
+                    "availableTemplates": [t["id"] for t in list_templates()]}
+        if durable_client is None:
+            return {"error": "Generation is unavailable in this context."}
+        if not _blob_exists(INPUT_CONTAINER, f"{job_id}.csv"):
+            return {"error": "The uploaded file for this job is missing — attach it again."}
+        column_map = None
+        required_fields = template.get("required_fields")
+        if required_fields:
+            dataframe = parse_csv(_download_blob(INPUT_CONTAINER, f"{job_id}.csv"))
+            headers = [str(h) for h in dataframe.columns]
+            openai_client = AzureOpenAI(
+                api_key=AZURE_OPENAI_API_KEY, azure_endpoint=AZURE_OPENAI_ENDPOINT,
+                api_version="2024-12-01-preview",
+            )
+            detection = detect_columns(headers, client=openai_client,
+                                       deployment=AZURE_OPENAI_DEPLOYMENT, required_fields=required_fields)
+            raw_map = {}
+            for field in detection.get("fields", []):
+                if field.get("derivedFromFullName") and detection.get("fullNameIndex") is not None:
+                    raw_map[field["field"]] = f"full:{detection['fullNameIndex']}"
+                elif field.get("index") is not None:
+                    raw_map[field["field"]] = field["index"]
+            column_map, missing = _build_column_map(raw_map, required_fields)
+            if missing:
+                return {"error": "The file is missing required columns for this template: " + ", ".join(missing)}
+        await durable_client.start_new("orchestrate_emails", client_input={
+            "job_id": job_id, "column_map": column_map, "template_config": {"id": template["id"]},
+        }, instance_id=job_id)
+        try:
+            data_store.update_job(job.get("ownerOid", user["oid"]), job_id, {
+                "status": "generating", "templateId": template["id"], "templateName": template["name"],
+                "startedAt": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as error:
+            logger.warning("Copilot job update failed: %s", error)
+        return {"started": True, "jobId": job_id, "template": template["name"],
+                "leads": job.get("totalLeads"), "note": "Poll get_job_status until Completed."}
+
+    async def job_status_tool(args):
+        job_id = str(args.get("jobId") or "")
+        job = _own_job(job_id)
+        if not job:
+            return {"error": "Job not found in your workspace."}
+        result = {"jobId": job_id, "status": job.get("status"), "template": job.get("templateName")}
+        if durable_client is not None:
+            # Wait server-side (up to ~60s) so the agent doesn't burn steps polling.
+            deadline = asyncio.get_event_loop().time() + 60
+            while True:
+                try:
+                    status = await durable_client.get_status(job_id)
+                    runtime = getattr(getattr(status, "runtime_status", None), "name", None) or str(getattr(status, "runtime_status", ""))
+                    if runtime:
+                        result["status"] = runtime
+                except Exception:
+                    break
+                if result["status"] in {"Completed", "Failed", "Terminated"} or asyncio.get_event_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(3)
+        return result
+
+    def sync_tool(args):
+        if not args.get("confirm"):
+            return {"error": "Blocked: set confirm=true only after the user explicitly approved syncing in chat."}
+        job_id = str(args.get("jobId") or "")
+        if not _own_job(job_id):
+            return {"error": "Job not found in your workspace."}
+        if not _snovio_configured(req):
+            return {"error": "Snov.io API credentials are not connected — connect in step 4 first."}
+        list_name = str(args.get("listName") or "").strip()[:50]
+        client = _snovio_client(req)
+        report, err_resp = _run_prospect_sync(client, job_id, {
+            "dryRun": False, "listName": list_name, "autoCreateList": True,
+        })
+        if err_resp is not None:
+            return {"error": "Sync was rejected.", "status": getattr(err_resp, "status_code", None)}
+        return {"synced": True, "summary": report.get("summary"), "listId": report.get("listId"),
+                "listName": report.get("listName") or list_name}
+
+    async def campaign_tool(args):
+        if not args.get("confirm"):
+            return {"error": "Blocked: set confirm=true only after the user explicitly approved campaign creation in chat."}
+        job_id = str(args.get("jobId") or "")
+        if not _own_job(job_id):
+            return {"error": "Job not found in your workspace."}
+        if not _snovio_configured(req):
+            return {"error": "Snov.io API credentials are not connected — connect in step 4 first."}
+        title = str(args.get("title") or "").strip()[:120]
+        sender_ids = [str(s) for s in (args.get("senderAccountIds") or []) if str(s)]
+        if not sender_ids:
+            try:
+                senders = _snovio_client(req).get_sender_accounts()
+                sender_ids = [str(senders[0].get("id"))] if senders else []
+            except Exception:
+                sender_ids = []
+        if not sender_ids:
+            return {"error": "No Snov.io sender account is connected — add one in Snov.io first."}
+        body = {"dryRun": False, "campaignTitle": title, "listName": title,
+                "senderAccountIds": sender_ids, "delayDays": int(args.get("delayDays") or 3)}
+        fake_req = _CopilotToolRequest(req, body, {"jobId": job_id})
+        response = await create_snovio_journey(fake_req)
+        payload = _response_json(response)
+        if int(getattr(response, "status_code", 500) or 500) >= 400:
+            return {"error": payload.get("error") or "Campaign creation failed.",
+                    "detail": payload.get("action") or "", "missingFields": (payload.get("customFieldReadiness") or {}).get("missing")}
+        return {"created": True, "campaignId": payload.get("campaignId"), "status": payload.get("status"),
+                "touches": payload.get("numTouches"), "syncSummary": (payload.get("sync") or {}).get("summary")}
 
     return {
         "list_templates": {
@@ -1957,15 +2131,84 @@ def _copilot_app_tools(user: dict) -> dict:
             "handler": list_jobs_tool,
         },
         "get_job_output": {
-            "description": "Inspect a job's generated output: columns, row count, and a small sample (including Subject_Touch/Body_Touch drafts).",
+            "description": "Inspect a job's generated output: columns, row count, and a small sample (including Subject_Touch/Body_Touch drafts). Use this to show the user sample drafts before asking for sync approval.",
             "parameters": {"type": "object", "properties": {"jobId": {"type": "string", "description": "job UUID from list_my_jobs"}}, "required": ["jobId"]},
             "handler": job_drafts_tool,
+        },
+        "start_generation": {
+            "description": "Start drafting emails for an uploaded job with a chosen template. Columns are auto-mapped; fails with a clear message if required columns are missing.",
+            "parameters": {"type": "object", "properties": {
+                "jobId": {"type": "string", "description": "job UUID of the attached/uploaded lead file"},
+                "templateId": {"type": "string", "description": "template id from list_templates"},
+            }, "required": ["jobId", "templateId"]},
+            "handler": start_generation_tool,
+        },
+        "get_job_status": {
+            "description": "Check whether generation for a job is Running, Completed or Failed. Waits up to a minute server-side, so one or two calls are usually enough.",
+            "parameters": {"type": "object", "properties": {"jobId": {"type": "string"}}, "required": ["jobId"]},
+            "handler": job_status_tool,
+        },
+        "sync_leads_to_snovio": {
+            "description": "ACTION: sync a completed job's leads (with drafted emails) into a Snov.io list. Requires confirm=true, which you may only set after the user explicitly approved in chat having seen sample drafts.",
+            "parameters": {"type": "object", "properties": {
+                "jobId": {"type": "string"},
+                "listName": {"type": "string", "description": "Snov.io list name, max 50 chars"},
+                "confirm": {"type": "boolean", "description": "true ONLY after explicit user approval in this conversation"},
+            }, "required": ["jobId", "listName", "confirm"]},
+            "handler": sync_tool,
+        },
+        "create_drip_campaign": {
+            "description": "ACTION: create a DRAFT Snov.io drip campaign from a completed job (syncs leads + builds the touch sequence). Requires confirm=true, only after explicit user approval in chat. Nothing is sent automatically.",
+            "parameters": {"type": "object", "properties": {
+                "jobId": {"type": "string"},
+                "title": {"type": "string", "description": "campaign title (also used as list name)"},
+                "delayDays": {"type": "integer", "description": "days between touches, default 3"},
+                "confirm": {"type": "boolean", "description": "true ONLY after explicit user approval in this conversation"},
+            }, "required": ["jobId", "title", "confirm"]},
+            "handler": campaign_tool,
         },
     }
 
 
+class _CopilotToolRequest:
+    """Minimal HttpRequest stand-in so copilot tools can reuse route handlers."""
+
+    def __init__(self, base_req: func.HttpRequest, body: dict, route_params: dict):
+        self.headers = getattr(base_req, "headers", {}) or {}
+        self.route_params = route_params
+        self.params = {}
+        self._body = body
+
+    def get_json(self):
+        return self._body
+
+    def get_body(self):
+        return json.dumps(self._body).encode("utf-8")
+
+
+def _response_json(response) -> dict:
+    """Parse an HttpResponse body produced by our routes (test- and prod-safe)."""
+    body = None
+    get_body = getattr(response, "get_body", None)
+    if callable(get_body):
+        try:
+            body = get_body()
+        except Exception:
+            body = None
+    if body is None:
+        body = getattr(response, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        body = body.decode("utf-8", errors="replace")
+    try:
+        parsed = json.loads(body or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 @app.route(route="copilot/chat", methods=["POST"])
-async def copilot_chat(req: func.HttpRequest) -> func.HttpResponse:
+@app.durable_client_input(client_name="client")
+async def copilot_chat(req: func.HttpRequest, client) -> func.HttpResponse:
     """Run one turn of the in-app copilot for the signed-in user."""
     user, err = _require_user(req)
     if err:
@@ -1989,12 +2232,12 @@ async def copilot_chat(req: func.HttpRequest) -> func.HttpResponse:
             azure_endpoint=AZURE_OPENAI_ENDPOINT,
             api_version="2024-12-01-preview",
         )
-        outcome = copilot.run_agent(
+        outcome = await copilot.run_agent_async(
             openai_client,
             AZURE_OPENAI_DEPLOYMENT,
             history,
             mcp_session,
-            _copilot_app_tools(user),
+            _copilot_app_tools(user, req, client),
         )
         return _json_response({
             "reply": outcome["reply"],
@@ -2004,6 +2247,183 @@ async def copilot_chat(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as error:
         logger.exception("Copilot turn failed")
         return _json_response({"error": f"Copilot failed: {error}"}, 500)
+
+
+# ===========================================================================
+# Admin dashboard + engagement learning loop
+# ===========================================================================
+@app.route(route="dashboard/overview", methods=["GET"])
+async def admin_dashboard(req: func.HttpRequest) -> func.HttpResponse:
+    """Aggregate Snov.io feedback for admins: credits, sends, engagement, sentiment.
+
+    Also persists a per-campaign engagement snapshot that feeds the learning loop.
+    """
+    _, err = _require_admin(req)
+    if err:
+        return err
+    missing = _snovio_required_response(req)
+    if missing:
+        return missing
+    params = _query_params(req)
+    date_to = params.get("dateTo") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_from = params.get("dateFrom") or (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+    try:
+        client = _snovio_client(req)
+        balance = client.get_balance()
+        campaigns = client.get_user_campaigns()
+        campaign_rows = []
+        totals = {"sent": 0, "delivered": 0, "opens": 0, "clicks": 0, "replies": 0,
+                  "unsubscribed": 0, "interested": 0, "maybe": 0, "notInterested": 0}
+        for campaign in campaigns[:25]:
+            campaign_id = str(campaign.get("id") or "")
+            row = {
+                "id": campaign_id,
+                "name": campaign.get("campaign"),
+                "status": campaign.get("status"),
+                "listId": campaign.get("list_id"),
+            }
+            try:
+                stats = client.get_campaign_analytics({
+                    "campaign_id": campaign_id, "date_from": date_from, "date_to": date_to,
+                })
+                row["analytics"] = {
+                    "sent": stats.get("emails_sent", 0),
+                    "delivered": stats.get("delivered", 0),
+                    "deliveredRate": stats.get("delivered_rate"),
+                    "bounced": stats.get("bounced", 0),
+                    "opens": stats.get("email_opens", 0),
+                    "opensRate": stats.get("email_opens_rate"),
+                    "clicks": stats.get("link_clicks", 0),
+                    "replies": stats.get("email_replies", 0),
+                    "repliesRate": stats.get("email_replies_rate"),
+                    "unsubscribed": stats.get("unsubscribed", 0),
+                    "interested": stats.get("interested", 0),
+                    "maybe": stats.get("maybe", 0),
+                    "notInterested": stats.get("not_interested", 0),
+                }
+                totals["sent"] += int(stats.get("emails_sent") or 0)
+                totals["delivered"] += int(stats.get("delivered") or 0)
+                totals["opens"] += int(stats.get("email_opens") or 0)
+                totals["clicks"] += int(stats.get("link_clicks") or 0)
+                totals["replies"] += int(stats.get("email_replies") or 0)
+                totals["unsubscribed"] += int(stats.get("unsubscribed") or 0)
+                totals["interested"] += int(stats.get("interested") or 0)
+                totals["maybe"] += int(stats.get("maybe") or 0)
+                totals["notInterested"] += int(stats.get("not_interested") or 0)
+                try:
+                    data_store.save_engagement_snapshot(campaign_id, {
+                        "name": str(campaign.get("campaign") or ""),
+                        "status": str(campaign.get("status") or ""),
+                        "dateFrom": date_from, "dateTo": date_to,
+                        "analytics": row["analytics"],
+                    })
+                except Exception as snapshot_error:
+                    logger.warning("Engagement snapshot failed for %s: %s", campaign_id, snapshot_error)
+            except SnovioAPIError as stats_error:
+                row["analyticsError"] = str(stats_error)[:200]
+            campaign_rows.append(row)
+        guidance = []
+        try:
+            guidance = [
+                {"templateId": g.get("RowKey") or g.get("templateId"), "guidance": g.get("guidance"), "updatedAt": g.get("updatedAt")}
+                for g in data_store.list_template_guidance()
+            ]
+        except Exception:
+            pass
+        return _json_response({
+            "dateFrom": date_from, "dateTo": date_to,
+            "balance": (balance.get("data") or balance) if isinstance(balance, dict) else balance,
+            "totals": totals,
+            "campaigns": campaign_rows,
+            "templateGuidance": guidance,
+        })
+    except SnovioAPIError as error:
+        return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
+
+
+@app.route(route="dashboard/analyze-performance", methods=["POST"])
+async def admin_analyze_performance(req: func.HttpRequest) -> func.HttpResponse:
+    """Learning loop: turn live engagement stats into per-template guidance.
+
+    Campaign names map to template names by our own convention, so engagement can
+    be attributed per template. An LLM pass distills the stats into guidance that
+    process_lead_activity injects into future generations for that template.
+    """
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    missing = _snovio_required_response(req)
+    if missing:
+        return missing
+    try:
+        snapshots = data_store.list_engagement_snapshots(limit=100)
+    except Exception:
+        snapshots = []
+    if not snapshots:
+        return _json_response({"error": "No engagement snapshots yet — open the dashboard first (it collects them)."}, 409)
+
+    templates = {t["name"]: t["id"] for t in list_templates()}
+    per_template: dict[str, list[dict]] = {}
+    for snap in snapshots:
+        name = str(snap.get("name") or "")
+        template_id = templates.get(name)
+        if not template_id:
+            continue
+        try:
+            analytics = json.loads(snap.get("analytics") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            analytics = {}
+        per_template.setdefault(template_id, []).append(analytics)
+
+    if not per_template:
+        return _json_response({"error": "No snapshots map to app templates yet (campaign names must match template names)."}, 409)
+
+    openai_client = AzureOpenAI(
+        api_key=AZURE_OPENAI_API_KEY,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_version="2024-12-01-preview",
+    )
+    results = []
+    for template_id, stats_list in per_template.items():
+        aggregate = {
+            "campaigns": len(stats_list),
+            "sent": sum(int(s.get("sent") or 0) for s in stats_list),
+            "opens": sum(int(s.get("opens") or 0) for s in stats_list),
+            "clicks": sum(int(s.get("clicks") or 0) for s in stats_list),
+            "replies": sum(int(s.get("replies") or 0) for s in stats_list),
+            "unsubscribed": sum(int(s.get("unsubscribed") or 0) for s in stats_list),
+            "interested": sum(int(s.get("interested") or 0) for s in stats_list),
+            "notInterested": sum(int(s.get("notInterested") or 0) for s in stats_list),
+        }
+        if aggregate["sent"] < 1:
+            results.append({"templateId": template_id, "skipped": "no sends yet"})
+            continue
+        prompt = (
+            "You are optimising B2B email sequences. Based on these aggregate engagement "
+            f"stats for the '{template_id}' campaign template:\n{json.dumps(aggregate)}\n"
+            "Write 3-5 short, concrete writing guidelines the email generator should follow "
+            "next time to improve replies and interested-sentiment (subject style, length, CTA, tone). "
+            "Note: replies and interested/notInterested sentiment are the trustworthy signals; opens are noisy. "
+            "If data volume is too low to conclude anything (fewer than ~50 sends), say so and give at most one "
+            "cautious guideline. Return plain text bullets only."
+        )
+        try:
+            completion = openai_client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                messages=[{"role": "user", "content": prompt}],
+                max_completion_tokens=2048,
+            )
+            guidance = (completion.choices[0].message.content or "").strip()
+            if guidance:
+                data_store.save_template_guidance(template_id, guidance, json.dumps(aggregate))
+                results.append({"templateId": template_id, "guidance": guidance, "stats": aggregate})
+            else:
+                results.append({"templateId": template_id, "skipped": "empty analysis"})
+        except Exception as error:
+            logger.exception("Guidance analysis failed for %s", template_id)
+            results.append({"templateId": template_id, "error": str(error)[:200]})
+    logger.info("Performance analysis run by %s: %d templates", admin["email"], len(results))
+    return _json_response({"analyzed": results})
 
 
 @app.route(route="snovio/balance", methods=["GET"])
@@ -2822,7 +3242,7 @@ async def get_status(req: func.HttpRequest, client) -> func.HttpResponse:
         # Lazily sync the terminal state onto the workspace job row.
         if runtime_status in ("Completed", "Failed") and user["job"].get("status") != runtime_status:
             try:
-                data_store.update_job(user["oid"], job_id, {
+                data_store.update_job(user["job"].get("ownerOid", user["oid"]), job_id, {
                     "status": runtime_status,
                     "completedAt": datetime.now(timezone.utc).isoformat(),
                     "totalLeads": response_body.get("totalLeads", user["job"].get("totalLeads", 0)),

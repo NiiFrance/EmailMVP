@@ -148,6 +148,68 @@ def list_jobs(oid: str, limit: int = 25) -> list[dict]:
     return jobs[:limit]
 
 
+def find_job(job_id: str) -> dict | None:
+    """Find a job across all users (admin delegation). Returns the entity
+    including its PartitionKey (the owner's oid), or None."""
+    entities = _table(JOBS_TABLE).query_entities(f"RowKey eq '{job_id}'")
+    for entity in entities:
+        row = _entity_to_dict(entity)
+        row["ownerOid"] = str(entity.get("PartitionKey", ""))
+        return row
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Engagement snapshots + per-template performance guidance (learning loop)
+# ---------------------------------------------------------------------------
+ENGAGEMENT_TABLE = "EngagementStats"
+
+
+def save_engagement_snapshot(campaign_id: str, fields: dict) -> None:
+    _table(ENGAGEMENT_TABLE).upsert_entity(
+        {
+            "PartitionKey": "snapshot",
+            "RowKey": f"{campaign_id}",
+            "campaignId": str(campaign_id),
+            "updatedAt": _now_iso(),
+            **{k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in fields.items()},
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def list_engagement_snapshots(limit: int = 100) -> list[dict]:
+    entities = _table(ENGAGEMENT_TABLE).query_entities("PartitionKey eq 'snapshot'")
+    rows = [_entity_to_dict(e) for e in entities]
+    rows.sort(key=lambda r: str(r.get("updatedAt", "")), reverse=True)
+    return rows[:limit]
+
+
+def save_template_guidance(template_id: str, guidance: str, stats_summary: str = "") -> None:
+    _table(ENGAGEMENT_TABLE).upsert_entity(
+        {
+            "PartitionKey": "guidance",
+            "RowKey": template_id,
+            "guidance": guidance,
+            "statsSummary": stats_summary,
+            "updatedAt": _now_iso(),
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def get_template_guidance(template_id: str) -> dict | None:
+    try:
+        return _entity_to_dict(_table(ENGAGEMENT_TABLE).get_entity("guidance", template_id))
+    except ResourceNotFoundError:
+        return None
+
+
+def list_template_guidance() -> list[dict]:
+    entities = _table(ENGAGEMENT_TABLE).query_entities("PartitionKey eq 'guidance'")
+    return [_entity_to_dict(e) for e in entities]
+
+
 # ---------------------------------------------------------------------------
 # Snov.io credentials — PartitionKey "snovio", RowKey = oid
 # ---------------------------------------------------------------------------

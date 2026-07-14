@@ -356,6 +356,8 @@
         const formData = new FormData();
         formData.append("file", selectedFile);
         formData.append("prompt_id", templateSelect.value);
+        const delegateSelect = document.getElementById("delegate-select");
+        if (delegateSelect && delegateSelect.value) formData.append("on_behalf_of", delegateSelect.value);
         try {
             const resp = await fetch("/api/upload", { method: "POST", body: formData });
             const data = await resp.json();
@@ -1486,7 +1488,7 @@
         const thinking = copilotBubble("assistant", "Thinking\u2026");
         copilotSend.disabled = true;
         try {
-            const resp = await fetch("/api/copilot/chat", {
+            const resp = await snovioFetch("/api/copilot/chat", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ messages: copilotHistory.slice(-12) }),
             });
@@ -1511,13 +1513,60 @@
     if (copilotFab) copilotFab.addEventListener("click", () => {
         copilotPanel.hidden = !copilotPanel.hidden;
         if (!copilotPanel.hidden && !copilotMessages.childElementCount) {
-            copilotBubble("assistant", "Hi! I can search Snov.io for leads, manage your prospect lists (including deleting old ones), check verification, and answer questions about your campaigns here. What do you need?");
+            copilotBubble("assistant", "Hi! Attach a lead list with \uD83D\uDCCE and I can draft a full campaign for you (you approve before anything reaches Snov.io). I can also search Snov.io for new leads, manage your prospect lists, and answer questions about your campaigns.");
         }
         if (!copilotPanel.hidden) copilotInput.focus();
     });
     if (copilotClose) copilotClose.addEventListener("click", () => { copilotPanel.hidden = true; });
     if (copilotSend) copilotSend.addEventListener("click", copilotSendMessage);
     if (copilotInput) copilotInput.addEventListener("keydown", (e) => { if (e.key === "Enter") copilotSendMessage(); });
+
+    // Immersive mode (#13): toggle the panel between corner and near-fullscreen.
+    const copilotExpand = document.getElementById("copilot-expand");
+    let copilotImmersive = false;
+    if (copilotExpand) copilotExpand.addEventListener("click", () => {
+        copilotImmersive = !copilotImmersive;
+        if (copilotImmersive) {
+            copilotPanel.style.width = "min(880px, 96vw)";
+            copilotPanel.style.height = "calc(100vh - 48px)";
+            copilotPanel.style.bottom = "24px";
+            copilotExpand.title = "Shrink";
+        } else {
+            copilotPanel.style.width = "min(420px, 92vw)";
+            copilotPanel.style.height = "min(560px, 72vh)";
+            copilotPanel.style.bottom = "92px";
+            copilotExpand.title = "Expand";
+        }
+    });
+
+    // Lead-list attach (#13): upload in the background, then hand the jobId to the agent.
+    const copilotAttach = document.getElementById("copilot-attach");
+    const copilotFile = document.getElementById("copilot-file");
+    if (copilotAttach && copilotFile) {
+        copilotAttach.addEventListener("click", () => copilotFile.click());
+        copilotFile.addEventListener("change", async () => {
+            const file = copilotFile.files && copilotFile.files[0];
+            copilotFile.value = "";
+            if (!file) return;
+            const note = copilotBubble("user", `\uD83D\uDCCE Attaching ${file.name}\u2026`);
+            try {
+                const fd = new FormData();
+                fd.append("file", file);
+                fd.append("prompt_id", "leads");
+                const resp = await fetch("/api/upload", { method: "POST", body: fd });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || "Upload failed.");
+                const summary = `\uD83D\uDCCE Attached lead file "${file.name}" \u2014 uploaded as jobId ${data.jobId} (${data.totalLeads} lead(s)). Columns: ${(data.columns || []).map((c) => c.header).filter(Boolean).join(", ").slice(0, 300)}`;
+                note.textContent = summary;
+                copilotHistory.push({ role: "user", content: summary });
+                copilotBubble("assistant", "Got the file. Which campaign template should I draft with? (ask me to list templates if unsure)");
+                copilotHistory.push({ role: "assistant", content: "Got the file. Which campaign template should I draft with?" });
+            } catch (e) {
+                note.textContent = `\uD83D\uDCCE Attach failed: ${e.message || e}`;
+            }
+        });
+    }
+
 
 
     if (snovioJourneyPreviewBtn) snovioJourneyPreviewBtn.addEventListener("click", () => runSnovioJourney(true));
@@ -1582,10 +1631,29 @@
             if (!resp.ok) return;
             currentUser = await resp.json();
             renderUserChip(currentUser);
+            populateDelegatePicker();
             renderHome();
         } catch (err) {
             // Network hiccup — the SWA route rules enforce login at the page level.
         }
+    }
+
+    // Admin delegation (#14): let admins run a campaign in another user's workspace.
+    async function populateDelegatePicker() {
+        const row = document.getElementById("delegate-row");
+        const select = document.getElementById("delegate-select");
+        if (!row || !select || !currentUser || currentUser.role !== "admin") return;
+        try {
+            const resp = await fetch("/api/users");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            (data.users || []).forEach((u) => {
+                if (u.email && u.oid !== currentUser.oid) {
+                    select.appendChild(new Option(`${u.name || u.email} (${u.email})`, u.email));
+                }
+            });
+            row.hidden = select.options.length <= 1;
+        } catch (e) { /* picker stays hidden */ }
     }
 
     function renderUserChip(me) {
@@ -1615,9 +1683,88 @@
     function switchManageTab(tab) {
         document.getElementById("manage-campaigns").hidden = tab !== "campaigns";
         document.getElementById("manage-users").hidden = tab !== "users";
+        const dashEl = document.getElementById("manage-dashboard");
+        if (dashEl) dashEl.hidden = tab !== "dashboard";
         document.getElementById("manage-tab-campaigns").classList.toggle("active", tab === "campaigns");
         document.getElementById("manage-tab-users").classList.toggle("active", tab === "users");
+        const dashTab = document.getElementById("manage-tab-dashboard");
+        if (dashTab) dashTab.classList.toggle("active", tab === "dashboard");
+        if (tab === "dashboard") loadDashboard();
     }
+
+    // ── Admin dashboard (#12) + learning loop (#15) ──
+    async function loadDashboard() {
+        const status = document.getElementById("dash-status");
+        const cards = document.getElementById("dash-cards");
+        const table = document.getElementById("dash-table");
+        const guidanceEl = document.getElementById("dash-guidance");
+        if (!status) return;
+        status.textContent = "Loading Snov.io analytics\u2026";
+        try {
+            const resp = await snovioFetch("/api/dashboard/overview");
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Dashboard failed to load.");
+            const b = data.balance || {};
+            const t = data.totals || {};
+            const card = (label, value) =>
+                `<div style="background:var(--panel,#1A1A1A);border:1px solid #2C2C2C;border-radius:12px;padding:12px;">` +
+                `<div style="font-size:22px;font-weight:800;">${escapeHtml(String(value ?? "\u2014"))}</div>` +
+                `<div style="font-size:12px;color:#A8A6A2;">${escapeHtml(label)}</div></div>`;
+            cards.innerHTML =
+                card("Snov.io credits", b.balance) +
+                card("Recipients used", b.unique_recipients_used ?? b.recipients_used) +
+                card("Emails sent", t.sent) + card("Delivered", t.delivered) +
+                card("Opens", t.opens) + card("Replies", t.replies) +
+                card("Interested", t.interested) + card("Unsubscribed", t.unsubscribed);
+            let html = "<thead><tr><th>Campaign</th><th>Status</th><th>Sent</th><th>Delivered</th><th>Opens</th><th>Clicks</th><th>Replies</th><th>Interested</th><th>Not interested</th></tr></thead><tbody>";
+            (data.campaigns || []).forEach((c) => {
+                const a = c.analytics || {};
+                html += `<tr><td>${escapeHtml(c.name || "")}</td><td>${escapeHtml(c.status || "")}</td>` +
+                    `<td>${a.sent ?? "\u2014"}</td><td>${a.delivered ?? "\u2014"}</td><td>${a.opens ?? "\u2014"}</td>` +
+                    `<td>${a.clicks ?? "\u2014"}</td><td>${a.replies ?? "\u2014"}</td><td>${a.interested ?? "\u2014"}</td><td>${a.notInterested ?? "\u2014"}</td></tr>`;
+            });
+            table.innerHTML = html + "</tbody>";
+            renderGuidance(data.templateGuidance || []);
+            status.textContent = `Window ${data.dateFrom} \u2192 ${data.dateTo} \u00b7 ${(data.campaigns || []).length} campaign(s)`;
+        } catch (e) {
+            status.textContent = e.message || "Dashboard failed.";
+        }
+    }
+
+    function renderGuidance(items) {
+        const guidanceEl = document.getElementById("dash-guidance");
+        if (!guidanceEl) return;
+        if (!items.length) { guidanceEl.innerHTML = "<div class='file-detail-txt'>No performance guidance learned yet \u2014 click \u201cAnalyze &amp; learn\u201d once campaigns have real engagement.</div>"; return; }
+        let html = "<div style='font-weight:700;margin-bottom:8px;'>Learned per-template guidance (applied to future generations)</div>";
+        items.forEach((g) => {
+            html += `<details style="margin-bottom:8px;"><summary><strong>${escapeHtml(g.templateId || "")}</strong> \u00b7 updated ${escapeHtml((g.updatedAt || "").slice(0, 10))}</summary>` +
+                `<pre style="white-space:pre-wrap;font-family:inherit;color:#A8A6A2;font-size:12.5px;margin:8px 0 0;">${escapeHtml(g.guidance || "")}</pre></details>`;
+        });
+        guidanceEl.innerHTML = html;
+    }
+
+    const dashRefreshBtn = document.getElementById("dash-refresh-btn");
+    const dashAnalyzeBtn = document.getElementById("dash-analyze-btn");
+    if (dashRefreshBtn) dashRefreshBtn.addEventListener("click", loadDashboard);
+    if (dashAnalyzeBtn) dashAnalyzeBtn.addEventListener("click", async () => {
+        const status = document.getElementById("dash-status");
+        dashAnalyzeBtn.disabled = true;
+        status.textContent = "Analyzing engagement and updating template guidance\u2026";
+        try {
+            const resp = await snovioFetch("/api/dashboard/analyze-performance", { method: "POST" });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || "Analysis failed.");
+            const learned = (data.analyzed || []).filter((r) => r.guidance).length;
+            status.textContent = `Analysis complete \u2014 guidance updated for ${learned} template(s).`;
+            loadDashboard();
+        } catch (e) {
+            status.textContent = e.message || "Analysis failed.";
+        } finally {
+            dashAnalyzeBtn.disabled = false;
+        }
+    });
+    const dashTabBtn = document.getElementById("manage-tab-dashboard");
+    if (dashTabBtn) dashTabBtn.addEventListener("click", () => switchManageTab("dashboard"));
 
     async function loadManageCampaigns() {
         const listEl = document.getElementById("campaign-list");

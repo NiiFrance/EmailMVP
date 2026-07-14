@@ -1,5 +1,6 @@
 """Tests for the in-app copilot agent loop."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -68,17 +69,24 @@ def test_run_agent_executes_mcp_tool():
 
 def test_dispatch_blocks_non_allowlisted_mcp_tool():
     session = MagicMock()
-    result = copilot._dispatch("snovio__li_send_invite", {}, session, {})
+    result = asyncio.run(copilot._dispatch("snovio__li_send_invite", {}, session, {}))
     assert "not permitted" in result
     session.call_tool.assert_not_called()
 
 
 def test_dispatch_reports_missing_connection():
-    assert "not connected" in copilot._dispatch("snovio__app_get_lists", {}, None, {})
+    assert "not connected" in asyncio.run(copilot._dispatch("snovio__app_get_lists", {}, None, {}))
 
 
 def test_dispatch_tool_exception_becomes_error_string():
     def boom(_args):
         raise RuntimeError("nope")
-    result = copilot._dispatch("app__x", {}, None, {"x": {"description": "", "handler": boom}})
+    result = asyncio.run(copilot._dispatch("app__x", {}, None, {"x": {"description": "", "handler": boom}}))
     assert result.startswith("TOOL ERROR:")
+
+
+def test_dispatch_awaits_async_handlers():
+    async def async_handler(_args):
+        return {"ok": True}
+    result = asyncio.run(copilot._dispatch("app__async_tool", {}, None, {"async_tool": {"description": "", "handler": async_handler}}))
+    assert json.loads(result) == {"ok": True}

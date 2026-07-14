@@ -69,6 +69,7 @@ The Reliance deployment (`main`) carries its own fully Reliance-branded prompt s
 - **Sign-in**: SWA built-in Entra ID auth (custom single-tenant app registration shared by all three SWAs, one redirect URI + client secret per app). Anonymous requests redirect to `/login.html`.
 - **Workspaces**: every job is recorded against the signed-in user; status/download/Snov.io routes enforce ownership (foreign jobs read as 404). The Home dashboard lists the user's history with open-to-resume and a “continue where you left off” banner.
 - **Roles**: `ADMIN_EMAILS` app setting bootstraps permanent admins; additional admins are promoted in-app (Manage → Users). Admins manage the campaign library; users cannot.
+- **Delegation**: admins can upload and run a campaign *on behalf of* another user (picker in Step 2, or `on_behalf_of` form field). The job lands in the target user's workspace with `delegatedBy`/`delegatedAt` audit fields, and admins can drive any job end-to-end (generate, status, drafts, sync).
 - **Snov.io credentials**: entered once, validated, then stored encrypted per user — future logins auto-connect. Disconnect forgets them.
 
 ## API Surface
@@ -101,11 +102,20 @@ The Reliance deployment (`main`) carries its own fully Reliance-branded prompt s
 | `/api/snovio/webhook` | `POST` | Receives signed Snov.io webhook events |
 | `/api/snovio/suppressions` | `POST` | Adds emails/domains to a Snov.io Do-not-email list |
 | `/api/snovio/recipient-status` | `POST` | Pauses, activates, or unsubscribes a campaign recipient |
+| `/api/snovio/mcp/connect` · `/callback` · `/status` · `/disconnect` | `GET`/`POST` | Per-user OAuth connection to the Snov.io MCP server (140 tools) |
+| `/api/snovio/search-leads` | `POST` | AI lead sourcing: natural-language prospect search via Snov.io MCP |
+| `/api/snovio/import-leads` | `POST` | Imports sourced prospects as a new lead file/job |
+| `/api/copilot/chat` | `POST` | In-app agent: attach lead files, draft campaigns, sync/create drafts in Snov.io (confirmation-gated), plus Snov.io MCP tools |
+| `/api/dashboard/overview` | `GET` | Admin: Snov.io credits, per-campaign engagement analytics, learned guidance (also persists engagement snapshots) |
+| `/api/dashboard/analyze-performance` | `POST` | Admin: learning loop — distills engagement stats into per-template writing guidance via LLM |
+
+> Note: dashboard routes deliberately avoid an `/api/admin/…` prefix — the Azure Functions host silently 404s HTTP routes whose first segment is `admin` (reserved).
 
 ### Upload Form Fields
 
 - `file`: CSV or Excel (.xlsx) file
 - `prompt_id`: any campaign id from `/api/campaigns` (e.g. `cold_email`, `csp_renewal_with_license`, `leads`)
+- `on_behalf_of` *(optional, admins only)*: email of the user to create the job for (delegation)
 
 ## Column Detection
 
@@ -135,7 +145,8 @@ A single-page app with a branded public sign-in page and a four-step wizard:
 - **/login.html** — designed landing page (hero, product preview, feature strip) with “Sign in with Microsoft”
 - **Home** — workspace dashboard: stats, campaign history with open-to-resume, continue-where-you-left-off banner, Snov.io connection status
 - **Steps 1–4** — Choose a campaign (grouped cards) → Upload leads (drag-drop, format guidance, detected-columns preview, mapping confirmation) → Review & edit every drafted touch → Send to Snov.io (list sync, drip-campaign creation, verification, suppression — with hover tooltips throughout)
-- **Manage** *(admins)* — campaign library editor and user role management
+- **Copilot** (✨) — immersive chat panel (⛶ to expand): attach a lead list with 📎 and the agent drafts a full campaign with any template, shows sample drafts, and only syncs to Snov.io / creates a **draft** drip campaign after you explicitly approve. Also does AI lead sourcing and prospect-list management through the Snov.io MCP connection.
+- **Manage** *(admins)* — campaign library editor, user role management, and the **Dashboard** tab: Snov.io credits, emails sent/delivered/opens/replies/sentiment per campaign, plus “Analyze & learn”, which turns real engagement into per-template writing guidance automatically applied to future generations (guidance only forms once a template has actual sends)
 - Sidebar shows the signed-in user chip with role badge and sign-out
 
 ## Project Structure

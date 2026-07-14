@@ -176,6 +176,12 @@
                         </div>
                     </div>
 
+                    <!-- admin: run on behalf of another user -->
+                    <div id="delegate-row" hidden style="margin-bottom:14px;display:flex;gap:10px;align-items:center;">
+                        <label class="field-label" for="delegate-select" style="margin:0;">Run for</label>
+                        <select id="delegate-select" data-tip="Admins can run this campaign in another user's workspace"><option value="">Myself</option></select>
+                    </div>
+
                     <!-- file format guidance -->
                     <details class="upload-tips" id="lead-search-panel">
                         <summary>Find leads in Snov.io instead (no file needed)</summary>
@@ -491,6 +497,7 @@
                     <div class="manage-tabs">
                         <button id="manage-tab-campaigns" class="manage-tab active" type="button">Campaigns</button>
                         <button id="manage-tab-users" class="manage-tab" type="button">Users</button>
+                        <button id="manage-tab-dashboard" class="manage-tab" type="button">Dashboard</button>
                     </div>
 
                     <div id="manage-campaigns">
@@ -534,6 +541,17 @@
                     <div id="manage-users" hidden>
                         <div id="user-list" class="user-list"></div>
                     </div>
+
+                    <div id="manage-dashboard" hidden>
+                        <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+                            <button id="dash-refresh-btn" class="btn btn-dark" type="button">Refresh dashboard</button>
+                            <button id="dash-analyze-btn" class="btn btn-secondary" type="button" data-tip="Turn live engagement stats into per-template writing guidance used by future generations">Analyze &amp; learn</button>
+                            <span id="dash-status" class="file-detail-txt"></span>
+                        </div>
+                        <div id="dash-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px;"></div>
+                        <div style="max-height:320px;overflow:auto;"><table class="cols-table" id="dash-table"></table></div>
+                        <div id="dash-guidance" style="margin-top:16px;"></div>
+                    </div>
                 </section>
 
             </div>
@@ -549,13 +567,16 @@
             <span style="font-size:18px;">&#10024;</span>
             <div style="flex:1;">
                 <div style="font-weight:700;color:#fff;">Copilot</div>
-                <div id="copilot-sub" style="font-size:12px;color:#A8A6A2;">Lists, leads &amp; campaign questions</div>
+                <div id="copilot-sub" style="font-size:12px;color:#A8A6A2;">Leads, drafts, sync &amp; campaign questions</div>
             </div>
+            <button id="copilot-expand" type="button" title="Expand" style="background:none;border:none;color:#A8A6A2;font-size:16px;cursor:pointer;">&#x26F6;</button>
             <button id="copilot-close" type="button" style="background:none;border:none;color:#A8A6A2;font-size:20px;cursor:pointer;">&times;</button>
         </div>
         <div id="copilot-messages" style="flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;font-size:13.5px;line-height:1.55;color:#eee;"></div>
         <div style="padding:12px;border-top:1px solid #2C2C2C;display:flex;gap:8px;">
-            <input id="copilot-input" type="text" placeholder="e.g. Which of my lists has the most prospects?"
+            <input id="copilot-file" type="file" accept=".csv,.xlsx" hidden>
+            <button id="copilot-attach" type="button" title="Attach a lead list" style="background:#0E0E0E;border:1px solid #2C2C2C;border-radius:10px;color:#A8A6A2;padding:10px 12px;cursor:pointer;">&#128206;</button>
+            <input id="copilot-input" type="text" placeholder="e.g. Draft a price-change campaign for the attached leads"
                 style="flex:1;background:#0E0E0E;border:1px solid #2C2C2C;border-radius:10px;color:#fff;padding:10px 12px;font-size:13.5px;">
             <button id="copilot-send" type="button" class="btn btn-primary" style="padding:10px 16px;">Send</button>
         </div>
