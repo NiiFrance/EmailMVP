@@ -565,6 +565,14 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                     mimetype="application/json",
                 )
         except Exception as e:
+            extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else "unknown"
+            logger.warning(
+                "Upload parse rejected: extension=%s bytes=%d error_type=%s error=%s",
+                extension,
+                len(file_bytes),
+                type(e).__name__,
+                str(e)[:500],
+            )
             return func.HttpResponse(
                 json.dumps({"error": f"Invalid file: {str(e)}"}),
                 status_code=400,
@@ -600,11 +608,9 @@ async def upload_csv(req: func.HttpRequest, client) -> func.HttpResponse:
                     "fullNameIndex": None,
                 }
 
-        # Always store as CSV in blob storage (convert Excel if needed)
-        if filename.lower().endswith(".xlsx"):
-            csv_bytes = dataframe_to_csv_bytes(df_check)
-        else:
-            csv_bytes = file_bytes
+        # Normalize every accepted file to UTF-8 CSV once. This prevents later
+        # activities from having to reinterpret the user's source encoding.
+        csv_bytes = dataframe_to_csv_bytes(df_check)
 
         job_id = str(uuid.uuid4())
         blob_name = f"{job_id}.csv"

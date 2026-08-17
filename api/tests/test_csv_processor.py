@@ -92,6 +92,25 @@ class TestParseCSV:
         assert list(df.columns) == ["A", "B", "C"]
         assert df.iloc[0, 0] == "1"
 
+    def test_parses_windows_1252_smart_punctuation(self):
+        csv_bytes = "Name,Notes\nAda,Director’s renewal\n".encode("cp1252")
+
+        df = parse_csv(csv_bytes)
+
+        assert df.iloc[0, 1] == "Director’s renewal"
+
+    @pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-32"])
+    def test_parses_unicode_bom_encodings(self, encoding):
+        csv_bytes = "Name,City\nZoë,Lagos\n".encode(encoding)
+
+        df = parse_csv(csv_bytes)
+
+        assert df.iloc[0].tolist() == ["Zoë", "Lagos"]
+
+    def test_rejects_unsupported_encoding_without_replacing_data(self):
+        with pytest.raises(ValueError, match="Save or export the file as UTF-8 or Windows-1252"):
+            parse_csv(b"Name,Notes\nAda,invalid \x81 byte\n")
+
     def test_preserves_strings(self):
         csv_bytes = b"A,B\n001,true\n"
         df = parse_csv(csv_bytes)
@@ -420,6 +439,15 @@ class TestParseFile:
         df = parse_file(csv_bytes, "test.csv")
         assert len(df) == 1
         assert list(df.columns) == ["A", "B", "C"]
+
+    def test_windows_1252_csv_normalizes_to_utf8(self):
+        source = "Name,Notes\nAda,Director’s renewal\n".encode("cp1252")
+
+        normalized = dataframe_to_csv_bytes(parse_file(source, "leads.csv"))
+
+        assert normalized.startswith(b"\xef\xbb\xbf")
+        assert "Director’s renewal" in normalized.decode("utf-8-sig")
+        assert b"\x92" not in normalized
 
     def test_parse_file_xlsx(self, tmp_path):
         """Round-trip: create an xlsx, then parse it."""
