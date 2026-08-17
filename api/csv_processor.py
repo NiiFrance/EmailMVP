@@ -1,12 +1,38 @@
 """CSV / Excel parsing and assembly utilities for the Email MVP."""
 
 import io
+import logging
 import re
 import pandas as pd
 
 
 # Legacy constant kept for backwards compatibility with old tests/code
 OUTPUT_START_COL_INDEX = 74
+logger = logging.getLogger("emailmvp")
+
+
+def _decode_csv_bytes(csv_bytes: bytes) -> str:
+    """Decode CSV bytes without silently replacing user data."""
+    if csv_bytes.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        encodings = ("utf-32",)
+    elif csv_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+        encodings = ("utf-16",)
+    else:
+        encodings = ("utf-8-sig", "cp1252")
+
+    last_error: UnicodeDecodeError | None = None
+    for encoding in encodings:
+        try:
+            decoded = csv_bytes.decode(encoding)
+            if encoding != "utf-8-sig":
+                logger.info("Decoded CSV using %s encoding", encoding)
+            return decoded
+        except UnicodeDecodeError as error:
+            last_error = error
+
+    raise ValueError(
+        "Unsupported CSV text encoding. Save or export the file as UTF-8 or Windows-1252, then try again."
+    ) from last_error
 
 
 def _excel_col_letter(index: int) -> str:
@@ -22,7 +48,8 @@ def _excel_col_letter(index: int) -> str:
 
 def parse_csv(csv_bytes: bytes) -> pd.DataFrame:
     """Parse raw CSV bytes into a DataFrame, preserving all columns."""
-    return pd.read_csv(io.BytesIO(csv_bytes), dtype=str, keep_default_na=False)
+    csv_text = _decode_csv_bytes(csv_bytes)
+    return pd.read_csv(io.StringIO(csv_text), dtype=str, keep_default_na=False)
 
 
 def parse_excel(excel_bytes: bytes) -> pd.DataFrame:
