@@ -1040,6 +1040,18 @@ class TestSnovioEndpoints:
         assert payload["accepted"] is True
         assert json.loads(output.set.call_args.args[0])["payload"]["event_action"] == "sent"
 
+    def test_admin_webhook_pipeline_test_enqueues_synthetic_event(self):
+        output = MagicMock()
+        with patch.object(fa, "_require_admin", return_value=({"email": "admin@example.com"}, None)):
+            response = asyncio.run(fa.test_snovio_webhook_pipeline(self._request(), output))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 202
+        assert payload["eventId"].startswith("test-")
+        queued = json.loads(output.set.call_args.args[0])
+        assert queued["eventId"] == payload["eventId"]
+        assert queued["payload"]["requestedBy"] == "admin@example.com"
+
 
 class TestConfiguration:
     def test_batch_size_default(self):
