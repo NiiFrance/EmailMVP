@@ -3501,6 +3501,24 @@ async def configure_snovio_webhooks(req: func.HttpRequest) -> func.HttpResponse:
     return _json_response({"configured": True, "registeredEvents": len(created_ids)}, 201)
 
 
+@app.route(route="snovio/webhook-settings/test", methods=["POST"])
+@app.queue_output(arg_name="webhookEvent", queue_name=SNOVIO_WEBHOOK_QUEUE, connection="AzureWebJobsStorage")
+async def test_snovio_webhook_pipeline(req: func.HttpRequest, webhookEvent) -> func.HttpResponse:
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    event_id = f"test-{uuid.uuid4()}"
+    webhookEvent.set(json.dumps({
+        "eventId": event_id,
+        "payload": {
+            "event_object": "test",
+            "event_action": "pipeline_check",
+            "requestedBy": admin["email"],
+        },
+    }, separators=(",", ":")))
+    return _json_response({"accepted": True, "eventId": event_id}, 202)
+
+
 @app.route(route="snovio/webhooks", methods=["GET"])
 async def list_snovio_webhooks(req: func.HttpRequest) -> func.HttpResponse:
     gate = _require_allowed_domain(req)

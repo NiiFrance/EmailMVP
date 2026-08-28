@@ -181,6 +181,7 @@
     const settingsWebhookBadge = document.getElementById("settings-webhook-badge");
     const settingsWebhookStatus = document.getElementById("settings-webhook-status");
     const settingsWebhookConfigure = document.getElementById("settings-webhook-configure");
+    const settingsWebhookTest = document.getElementById("settings-webhook-test");
     let settingsLastFocus = null;
 
     // ── Helpers ──
@@ -282,6 +283,21 @@
             settingsWebhookStatus.textContent = error.message || "Could not configure event updates.";
         } finally {
             settingsWebhookConfigure.disabled = false;
+        }
+    });
+
+    if (settingsWebhookTest) settingsWebhookTest.addEventListener("click", async () => {
+        settingsWebhookTest.disabled = true;
+        settingsWebhookStatus.textContent = "Sending a test event through the queue...";
+        try {
+            const response = await fetch("/api/snovio/webhook-settings/test", { method: "POST" });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Webhook pipeline test failed.");
+            settingsWebhookStatus.textContent = `Test event ${data.eventId} accepted. Check Application Insights if it does not process.`;
+        } catch (error) {
+            settingsWebhookStatus.textContent = error.message || "Webhook pipeline test failed.";
+        } finally {
+            settingsWebhookTest.disabled = false;
         }
     });
 
