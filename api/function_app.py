@@ -2082,7 +2082,9 @@ def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None, m
             name = str(tool.get("name") or "")
             description = str(tool.get("description") or "")
             haystack = f"{name} {description}".lower()
-            if terms and not all(term in haystack for term in terms):
+            normalized_terms = {term.rstrip("s") for term in terms if term.rstrip("s")}
+            matched_terms = {term for term in normalized_terms if term in haystack}
+            if normalized_terms and not matched_terms:
                 continue
             policy = snovio_policy.classify_tool(name)
             matches.append({
@@ -2092,9 +2094,16 @@ def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None, m
                 "requiresConfirmation": policy.requires_confirmation,
                 "adminOnly": policy.admin_only,
                 "executable": policy.executable,
+                "_score": (
+                    len(matched_terms) * 10
+                    + (30 if "_".join(terms) in name.lower() else 0)
+                    + (5 if name.lower().startswith("app_get_") or name.lower().startswith("app_list_") else 0)
+                ),
             })
+        matches.sort(key=lambda item: (-item["_score"], item["name"]))
         offset = max(0, int(args.get("offset") or 0))
-        results = matches[offset:offset + 20]
+        results = [{key: value for key, value in item.items() if key != "_score"}
+                   for item in matches[offset:offset + 20]]
         return {"tools": results, "count": len(results), "total": len(matches),
                 "offset": offset, "hasMore": offset + len(results) < len(matches), "query": query}
 
