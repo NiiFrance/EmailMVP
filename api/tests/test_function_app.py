@@ -829,11 +829,11 @@ class TestCopilotActionTools:
 
     def test_non_admin_cannot_propose_outbound_mcp_action(self):
         session = MagicMock()
-        session.list_tools.return_value = [{"name": "app_send_linkedin_message", "description": "", "inputSchema": {}}]
+        session.list_tools.return_value = [{"name": "li_send_message", "description": "", "inputSchema": {}}]
         tools = self._tools(mcp_session=session)
 
         result = tools["execute_snovio_tool"]["handler"]({
-            "toolName": "app_send_linkedin_message", "arguments": {"profile_url": "https://linkedin.example"},
+            "toolName": "li_send_message", "arguments": {"profile_url": "https://linkedin.example"},
         })
 
         assert "administrators" in result["error"]
