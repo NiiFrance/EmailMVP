@@ -32,6 +32,10 @@
       "allowedRoles": ["anonymous", "authenticated"]
     },
     {
+      "route": "/api/snovio/webhook/*",
+      "allowedRoles": ["anonymous"]
+    },
+    {
       "route": "/assets/*",
       "allowedRoles": ["anonymous", "authenticated"]
     },
