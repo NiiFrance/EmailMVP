@@ -10,6 +10,12 @@ targetScope = 'resourceGroup'
 @description('Environment name used for resource naming')
 param environmentName string
 
+@description('Brand-specific application display name used in OAuth and Copilot')
+param appDisplayName string = 'Email Campaign Generator'
+
+@description('Public Static Web App origin, for example https://example.azurestaticapps.net')
+param publicAppOrigin string = ''
+
 @description('Primary location for all resources')
 param location string = 'eastus2'
 
@@ -64,6 +70,12 @@ param snovioSessionEncryptionKey string = ''
 @description('Lifetime in seconds of a user-supplied Snov.io credential session')
 param snovioSessionTtlSeconds string = '3600'
 
+@description('Lifetime in seconds of a single-use Snov.io MCP OAuth state')
+param snovioMcpStateTtlSeconds string = '600'
+
+@description('Storage Queue name for accepted Snov.io webhook events')
+param snovioWebhookQueue string = 'snovio-webhooks'
+
 @description('Default number of days between Snov.io journey campaign touches')
 param snovioDefaultDelayDays string = '3'
 
@@ -109,6 +121,8 @@ var snovioAppSettings = concat([
   { name: 'SNOVIO_ALLOW_UNKNOWN_VERIFICATION', value: snovioAllowUnknownVerification }
   { name: 'SNOVIO_LOW_CREDIT_THRESHOLD', value: snovioLowCreditThreshold }
   { name: 'SNOVIO_SESSION_TTL_SECONDS', value: snovioSessionTtlSeconds }
+  { name: 'SNOVIO_MCP_STATE_TTL_SECONDS', value: snovioMcpStateTtlSeconds }
+  { name: 'SNOVIO_WEBHOOK_QUEUE', value: snovioWebhookQueue }
   { name: 'SNOVIO_DEFAULT_DELAY_DAYS', value: snovioDefaultDelayDays }
   { name: 'SNOVIO_CAMPAIGN_TIMEZONE', value: snovioCampaignTimezone }
   { name: 'SNOVIO_CAMPAIGN_ARCHIVE_MONTHS', value: snovioCampaignArchiveMonths }
@@ -370,6 +384,8 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'AZURE_OPENAI_ENDPOINT', value: azureOpenAiEndpointSetting }
         { name: 'AZURE_OPENAI_API_KEY', value: azureOpenAiApiKeySetting }
         { name: 'AZURE_OPENAI_DEPLOYMENT', value: azureOpenAiDeployment }
+        { name: 'APP_DISPLAY_NAME', value: appDisplayName }
+        { name: 'PUBLIC_APP_ORIGIN', value: publicAppOrigin }
         { name: 'CSV_INPUT_CONTAINER', value: 'csv-input' }
         { name: 'CSV_OUTPUT_CONTAINER', value: 'csv-output' }
         { name: 'BATCH_SIZE', value: batchSize }
