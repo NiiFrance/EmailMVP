@@ -703,6 +703,134 @@ class TestAdminDelegation:
         assert user["job"]["ownerOid"] == "user-1"
 
 
+class TestJobHistoryArchive:
+    USER = {"oid": "user-1", "email": "u@cloudware.africa", "name": "U", "role": "user"}
+
+    @staticmethod
+    def _request(body=None, route_params=None, params=None):
+        req = MagicMock()
+        req.route_params = route_params or {}
+        req.params = params or {}
+        req.headers = {}
+        req.get_json.return_value = body or {}
+        req.get_body.return_value = json.dumps(body or {}).encode("utf-8")
+        return req
+
+    def test_list_jobs_excludes_archived_and_returns_archived_count(self):
+        active = [{"RowKey": "job-1", "status": "Completed", "archived": False}]
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "list_jobs", return_value=active) as list_jobs, \
+                patch.object(fa.data_store, "count_jobs", return_value=2) as count_jobs:
+            response = asyncio.run(fa.list_my_jobs(self._request()))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["jobs"][0]["jobId"] == "job-1"
+        assert payload["archivedCount"] == 2
+        list_jobs.assert_called_once_with("user-1", limit=25, archived=False)
+        count_jobs.assert_called_once_with("user-1", archived=True)
+
+    def test_list_archived_jobs_uses_archived_filter(self):
+        archived = [{"RowKey": "job-2", "status": "Failed", "archived": True}]
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "list_jobs", return_value=archived) as list_jobs, \
+                patch.object(fa.data_store, "count_jobs", return_value=1):
+            response = asyncio.run(fa.list_my_jobs(self._request(params={"archived": "true"})))
+        payload = json.loads(response.body)
+
+        assert payload["jobs"][0]["archived"] is True
+        list_jobs.assert_called_once_with("user-1", limit=25, archived=True)
+
+    def test_storage_filters_archived_before_limit(self):
+        entities = [
+            {"RowKey": f"archived-{index}", "createdAt": f"2026-08-{index + 1:02d}", "archived": True}
+            for index in range(30)
+        ] + [
+            {"RowKey": "active-1", "createdAt": "2026-07-01", "archived": False},
+            {"RowKey": "active-2", "createdAt": "2026-07-02"},
+        ]
+        table = MagicMock()
+        table.query_entities.return_value = entities
+        with patch.object(fa.data_store, "_table", return_value=table):
+            active = fa.data_store.list_jobs("user-1", limit=25, archived=False)
+            archived = fa.data_store.list_jobs("user-1", limit=25, archived=True)
+            archived_count = fa.data_store.count_jobs("user-1", archived=True)
+
+        assert [job["RowKey"] for job in active] == ["active-2", "active-1"]
+        assert len(archived) == 25
+        assert archived_count == 30
+
+    @pytest.mark.parametrize("status", ["Completed", "Failed"])
+    def test_archive_allows_drafted_and_failed_jobs(self, status):
+        job = {"RowKey": "job-1", "status": status, "archived": False}
+        user_row = {"lastContext": json.dumps({"jobId": "other-job", "step": "step3"})}
+        req = self._request(route_params={"jobId": "job-1"})
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "get_job", return_value=job), \
+                patch.object(fa.data_store, "set_job_archived") as archive, \
+                patch.object(fa.data_store, "get_user", return_value=user_row), \
+                patch.object(fa.data_store, "set_user_context") as set_context, \
+                patch.object(fa, "_blob_service") as blob_service:
+            response = asyncio.run(fa.archive_job_history(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload == {"jobId": "job-1", "archived": True}
+        archive.assert_called_once_with("user-1", "job-1", True)
+        set_context.assert_not_called()
+        blob_service.assert_not_called()
+
+    @pytest.mark.parametrize("status", ["Running", "Queued", "Terminated", "Mystery"])
+    def test_archive_rejects_active_and_unknown_statuses(self, status):
+        req = self._request(route_params={"jobId": "job-1"})
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "get_job", return_value={"RowKey": "job-1", "status": status}), \
+                patch.object(fa.data_store, "set_job_archived") as archive:
+            response = asyncio.run(fa.archive_job_history(req))
+
+        assert response.status_code == 409
+        archive.assert_not_called()
+
+    def test_archive_clears_matching_resume_context(self):
+        req = self._request(route_params={"jobId": "job-1"})
+        context = {"jobId": "job-1", "step": "step3", "templateId": "leads"}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "get_job", return_value={"RowKey": "job-1", "status": "Completed"}), \
+                patch.object(fa.data_store, "set_job_archived"), \
+                patch.object(fa.data_store, "get_user", return_value={"lastContext": json.dumps(context)}), \
+                patch.object(fa.data_store, "set_user_context") as set_context:
+            response = asyncio.run(fa.archive_job_history(req))
+
+        assert response.status_code == 200
+        set_context.assert_called_once_with("user-1", {})
+
+    def test_archive_is_owner_only_even_for_admin(self):
+        admin = {**self.USER, "oid": "admin-1", "role": "admin"}
+        req = self._request(route_params={"jobId": "foreign-job"})
+        with patch.object(fa, "_require_user", return_value=(admin, None)), \
+                patch.object(fa.data_store, "get_job", return_value=None) as get_job, \
+                patch.object(fa.data_store, "find_job") as find_job:
+            response = asyncio.run(fa.archive_job_history(req))
+
+        assert response.status_code == 404
+        get_job.assert_called_once_with("admin-1", "foreign-job")
+        find_job.assert_not_called()
+
+    def test_restore_archived_job(self):
+        req = self._request(body={"archived": False}, route_params={"jobId": "job-1"})
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "get_job", return_value={
+                    "RowKey": "job-1", "status": "Completed", "archived": True,
+                }), \
+                patch.object(fa.data_store, "set_job_archived") as archive:
+            response = asyncio.run(fa.restore_job_history(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload == {"jobId": "job-1", "archived": False}
+        archive.assert_called_once_with("user-1", "job-1", False)
+
+
 class TestAdminDashboardRoutes:
     ADMIN = {"oid": "admin-1", "email": "boss@cloudware.africa", "name": "Boss", "role": "admin"}
 
