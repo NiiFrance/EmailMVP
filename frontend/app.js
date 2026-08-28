@@ -168,6 +168,20 @@
     const snovioJourneyClick = document.getElementById("snovio-journey-click");
     const snovioJourneyPreviewBtn = document.getElementById("snovio-journey-preview-btn");
     const snovioJourneyCreateBtn = document.getElementById("snovio-journey-create-btn");
+    const settingsDrawer = document.getElementById("settings-drawer");
+    const settingsPanel = settingsDrawer ? settingsDrawer.querySelector(".settings-panel") : null;
+    const settingsButtons = [document.getElementById("sidebar-settings-btn"), document.getElementById("mobile-settings-btn")].filter(Boolean);
+    const settingsCloseBtn = document.getElementById("settings-close-btn");
+    const settingsBackdrop = document.getElementById("settings-backdrop");
+    const step4OpenSettings = document.getElementById("step4-open-settings");
+    const settingsApiStatus = document.getElementById("settings-api-status");
+    const settingsApiBadge = document.getElementById("settings-api-badge");
+    const settingsMcpBadge = document.getElementById("settings-mcp-badge");
+    const settingsWebhookSection = document.getElementById("settings-webhook-section");
+    const settingsWebhookBadge = document.getElementById("settings-webhook-badge");
+    const settingsWebhookStatus = document.getElementById("settings-webhook-status");
+    const settingsWebhookConfigure = document.getElementById("settings-webhook-configure");
+    let settingsLastFocus = null;
 
     // ── Helpers ──
     function formatElapsed(ms) {
@@ -190,6 +204,86 @@
             homeSnovPill.textContent = state === "connected" ? "Connected" : (state === "disconnected" ? "Not connected" : "—");
         }
     }
+
+    function setConnectionBadge(badge, connected, error) {
+        if (!badge) return;
+        badge.classList.toggle("connected", !!connected);
+        badge.classList.toggle("error", !!error);
+        badge.textContent = error ? "Needs attention" : (connected ? "Connected" : "Not connected");
+    }
+
+    async function openSettings() {
+        if (!settingsDrawer) return;
+        settingsLastFocus = document.activeElement;
+        settingsDrawer.hidden = false;
+        settingsButtons.forEach((button) => button.setAttribute("aria-expanded", "true"));
+        document.body.style.overflow = "hidden";
+        if (currentUser) document.getElementById("settings-user-name").textContent = `${currentUser.name || currentUser.email} · ${currentUser.role || "user"}`;
+        settingsPanel.focus();
+        await Promise.all([
+            loadSnovioOptions(),
+            refreshMcpStatus(),
+            currentUser && currentUser.role === "admin" ? refreshWebhookSettings() : Promise.resolve(),
+        ]);
+    }
+
+    function closeSettings() {
+        if (!settingsDrawer || settingsDrawer.hidden) return;
+        settingsDrawer.hidden = true;
+        settingsButtons.forEach((button) => button.setAttribute("aria-expanded", "false"));
+        document.body.style.overflow = "";
+        if (settingsLastFocus && typeof settingsLastFocus.focus === "function") settingsLastFocus.focus();
+    }
+
+    settingsButtons.forEach((button) => button.addEventListener("click", openSettings));
+    if (step4OpenSettings) step4OpenSettings.addEventListener("click", openSettings);
+    if (settingsCloseBtn) settingsCloseBtn.addEventListener("click", closeSettings);
+    if (settingsBackdrop) settingsBackdrop.addEventListener("click", closeSettings);
+    document.addEventListener("keydown", (event) => {
+        if (!settingsDrawer || settingsDrawer.hidden) return;
+        if (event.key === "Escape") { closeSettings(); return; }
+        if (event.key !== "Tab") return;
+        const focusable = [...settingsPanel.querySelectorAll('button:not([disabled]):not([hidden]), input:not([disabled]), a[href]')]
+            .filter((element) => element.offsetParent !== null);
+        if (!focusable.length) return;
+        const first = focusable[0], last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    });
+
+    async function refreshWebhookSettings() {
+        if (!settingsWebhookSection || !currentUser || currentUser.role !== "admin") return;
+        settingsWebhookSection.hidden = false;
+        try {
+            const response = await fetch("/api/snovio/webhook-settings");
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Webhook status is unavailable.");
+            setConnectionBadge(settingsWebhookBadge, !!data.configured, false);
+            settingsWebhookStatus.textContent = data.configured
+                ? `${data.registeredEvents || 0} event subscriptions are active.`
+                : "Event updates have not been configured.";
+            settingsWebhookConfigure.textContent = data.configured ? "Rotate and reconfigure" : "Configure event updates";
+        } catch (error) {
+            setConnectionBadge(settingsWebhookBadge, false, true);
+            settingsWebhookStatus.textContent = error.message || "Webhook status is unavailable.";
+        }
+    }
+
+    if (settingsWebhookConfigure) settingsWebhookConfigure.addEventListener("click", async () => {
+        settingsWebhookConfigure.disabled = true;
+        settingsWebhookStatus.textContent = "Registering event subscriptions with Snov.io...";
+        try {
+            const response = await snovioFetch("/api/snovio/webhook-settings", { method: "POST" });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || "Could not configure event updates.");
+            await refreshWebhookSettings();
+        } catch (error) {
+            setConnectionBadge(settingsWebhookBadge, false, true);
+            settingsWebhookStatus.textContent = error.message || "Could not configure event updates.";
+        } finally {
+            settingsWebhookConfigure.disabled = false;
+        }
+    });
 
     // ── Templates (Step 1) ──
     async function loadTemplates() {
@@ -851,7 +945,8 @@
     }
     function setSnovioConnected(connected) {
         if (snovioDisconnectBtn) snovioDisconnectBtn.hidden = !connected;
-        if (snovioConnectBtn) snovioConnectBtn.textContent = connected ? "Reconnect" : "Connect account";
+        if (snovioConnectBtn) snovioConnectBtn.textContent = connected ? "Update credentials" : "Test and save";
+        setConnectionBadge(settingsApiBadge, connected, false);
     }
     function renderSnovioReport(title, payload) {
         snovioReport.hidden = false;
@@ -1106,22 +1201,28 @@
             const preflight = preflightResp ? await preflightResp.json() : null;
             snovioOptions = options;
             renderSnovioOptions(options);
-            setSnovioConnected(!!status.sessionActive);
+            setSnovioConnected(!!status.configured);
             if (!status.configured) {
                 const msg = status.sessionActive ? "Session error \u2014 reconnect" : "Not connected \u2014 enter your Snov.io API keys above.";
                 snovioStatus.textContent = msg;
                 if (homeSnovText) homeSnovText.textContent = "Not connected yet — connect during the final step.";
                 setSidebarSnov("disconnected", "Snov.io — not connected");
+                snovioStatus.textContent = "Not connected. Open Settings to add your Snov.io API credentials.";
+                if (settingsApiStatus) settingsApiStatus.textContent = "Enter your API User ID and API Secret, then test and save.";
+                if (homeSnovText) homeSnovText.textContent = "Not connected yet. Open Settings to connect once.";
                 return;
             }
             const source = status.credentialSource === "session" ? "your session" : (status.credentialSource === "account" ? "your account" : "server config");
             const balance = preflight && preflight.balance && preflight.balance.data ? preflight.balance.data.balance : "ready";
+            if (settingsApiStatus) settingsApiStatus.textContent = `Saved for ${source} · ${status.sessionClientIdMasked || "API ID protected"} · balance ${balance}`;
             snovioStatus.textContent = `Ready \u00b7 ${source} \u00b7 balance ${balance}`;
             if (homeSnovText) homeSnovText.textContent = `Connected via ${source}. Balance ${balance}.`;
             setSidebarSnov("connected", "Snov.io — connected");
             if (preflight) renderSnovioReport("Preflight", preflight);
         } catch (err) {
             snovioStatus.textContent = "Unavailable";
+            if (settingsApiStatus) settingsApiStatus.textContent = "Snov.io status is temporarily unavailable.";
+            setConnectionBadge(settingsApiBadge, false, true);
             if (homeSnovText) homeSnovText.textContent = "Snov.io status unavailable.";
             setSidebarSnov("disconnected", "Snov.io — unavailable");
         } finally {
@@ -1223,21 +1324,31 @@
     async function connectSnovio() {
         const clientId = snovioClientId.value.trim();
         const clientSecret = snovioClientSecret.value.trim();
-        if (!clientId || !clientSecret) { renderSnovioReport("Snov.io", { error: "Client ID and Client Secret are required." }); return; }
+        if (!clientId || !clientSecret) {
+            settingsApiStatus.textContent = "API User ID and API Secret are required.";
+            setConnectionBadge(settingsApiBadge, false, true);
+            return;
+        }
         setSnovioBusy(true);
+        settingsApiStatus.textContent = "Validating credentials with Snov.io...";
         try {
-            const response = await fetch("/api/snovio/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, clientSecret }) });
+            const response = await fetch("/api/snovio/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clientId, clientSecret, remember: true }) });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error || "Unable to connect to Snov.io.");
             snovioSessionId = data.sessionId;
             sessionStorage.setItem("snovioSessionId", snovioSessionId);
             snovioClientSecret.value = ""; snovioClientId.value = "";
             setSnovioConnected(true);
+            settingsApiStatus.textContent = `Connected and saved · ${data.clientIdMasked || "API ID protected"}`;
             await loadSnovioOptions();
-        } catch (err) { renderSnovioReport("Snov.io", { error: err.message }); }
+        } catch (err) {
+            settingsApiStatus.textContent = err.message || "Unable to connect to Snov.io.";
+            setConnectionBadge(settingsApiBadge, false, true);
+        }
         finally { setSnovioBusy(false); }
     }
     async function disconnectSnovio() {
+        if (!window.confirm("Forget the saved Snov.io API credentials for your account?")) return;
         setSnovioBusy(true);
         try { await snovioFetch("/api/snovio/session", { method: "DELETE" }); }
         catch (err) { /* ignore */ }
@@ -1245,6 +1356,7 @@
             snovioSessionId = null;
             sessionStorage.removeItem("snovioSessionId");
             setSnovioConnected(false);
+            settingsApiStatus.textContent = "Saved API credentials were removed.";
             setSnovioBusy(false);
             await loadSnovioOptions();
         }
@@ -1332,10 +1444,15 @@
             const data = resp.ok ? await resp.json() : {};
             const connected = !!data.connected;
             mcpStatusEl.textContent = connected ? "Signed in to Snov.io \u2713" : "Not signed in yet";
-            if (mcpConnectBtn) mcpConnectBtn.textContent = connected ? "Reconnect Snov.io" : "Connect Snov.io (no keys needed)";
+            setConnectionBadge(settingsMcpBadge, connected, false);
+            if (mcpConnectBtn) mcpConnectBtn.textContent = connected ? "Reconnect Snov.io Copilot" : "Connect Snov.io Copilot";
             if (mcpDisconnectBtn) mcpDisconnectBtn.hidden = !connected;
             return connected;
-        } catch (e) { mcpStatusEl.textContent = ""; return false; }
+        } catch (e) {
+            mcpStatusEl.textContent = "Snov.io Copilot status is unavailable.";
+            setConnectionBadge(settingsMcpBadge, false, true);
+            return false;
+        }
     }
 
     if (mcpConnectBtn) mcpConnectBtn.addEventListener("click", async () => {
@@ -1362,7 +1479,13 @@
         refreshMcpStatus();
     });
     window.addEventListener("message", (e) => {
-        if (e.data && e.data.snovioMcp === "done") refreshMcpStatus();
+        if (e.origin === window.location.origin && e.data && e.data.snovioMcp === "done") refreshMcpStatus();
+    });
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden && settingsDrawer && !settingsDrawer.hidden) {
+            loadSnovioOptions();
+            refreshMcpStatus();
+        }
     });
     refreshMcpStatus();
 
@@ -1462,6 +1585,7 @@
     const copilotPanel = document.getElementById("copilot-panel");
     const copilotClose = document.getElementById("copilot-close");
     const copilotMessages = document.getElementById("copilot-messages");
+    const copilotConfirmations = document.getElementById("copilot-confirmations");
     const copilotInput = document.getElementById("copilot-input");
     const copilotSend = document.getElementById("copilot-send");
     const copilotHistory = [];
@@ -1475,6 +1599,52 @@
         copilotMessages.appendChild(div);
         copilotMessages.scrollTop = copilotMessages.scrollHeight;
         return div;
+    }
+
+    function renderCopilotConfirmations(items) {
+        if (!copilotConfirmations) return;
+        copilotConfirmations.innerHTML = "";
+        (items || []).forEach((item) => {
+            if (!item.confirmationId) return;
+            const card = document.createElement("div");
+            card.className = "copilot-confirmation";
+            const title = document.createElement("strong");
+            title.textContent = "Confirm Snov.io action";
+            const summary = document.createElement("p");
+            summary.textContent = item.summary || item.toolName || "Snov.io action";
+            const actions = document.createElement("div");
+            actions.className = "copilot-confirmation-actions";
+            const confirm = document.createElement("button");
+            confirm.type = "button";
+            confirm.className = "copilot-confirm-yes";
+            confirm.textContent = "Confirm exact action";
+            const cancel = document.createElement("button");
+            cancel.type = "button";
+            cancel.className = "copilot-confirm-cancel";
+            cancel.textContent = "Cancel";
+            cancel.addEventListener("click", () => card.remove());
+            confirm.addEventListener("click", async () => {
+                confirm.disabled = true;
+                cancel.disabled = true;
+                summary.textContent = "Executing the confirmed action...";
+                try {
+                    const response = await fetch(`/api/copilot/confirm/${encodeURIComponent(item.confirmationId)}`, {
+                        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error || "The confirmed action failed.");
+                    card.remove();
+                    copilotBubble("assistant", `Confirmed action completed: ${data.summary || data.toolName || "Snov.io action"}.`);
+                } catch (error) {
+                    summary.textContent = error.message || "The confirmed action failed.";
+                    confirm.disabled = false;
+                    cancel.disabled = false;
+                }
+            });
+            actions.append(confirm, cancel);
+            card.append(title, summary, actions);
+            copilotConfirmations.appendChild(card);
+        });
     }
 
     async function copilotSendMessage() {
@@ -1494,6 +1664,7 @@
             if (!resp.ok) throw new Error(data.error || "Copilot failed.");
             thinking.textContent = data.reply || "(no reply)";
             copilotHistory.push({ role: "assistant", content: data.reply || "" });
+            renderCopilotConfirmations(data.confirmations || []);
             if (data.toolTrace && data.toolTrace.length) {
                 const trace = document.createElement("div");
                 trace.style.cssText = "align-self:flex-start;font-size:11px;color:#6E6C68;";
@@ -1582,6 +1753,10 @@
             if (!resp.ok) return;
             currentUser = await resp.json();
             renderUserChip(currentUser);
+            if (settingsWebhookSection) settingsWebhookSection.hidden = currentUser.role !== "admin";
+            if (document.getElementById("settings-user-name")) {
+                document.getElementById("settings-user-name").textContent = `${currentUser.name || currentUser.email} · ${currentUser.role || "user"}`;
+            }
             renderHome();
         } catch (err) {
             // Network hiccup — the SWA route rules enforce login at the page level.
