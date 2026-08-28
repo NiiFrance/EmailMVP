@@ -913,7 +913,7 @@
             announceHistory(`${name} was moved to Archived campaigns.`, false);
             await loadMyJobs(false);
             if (archivedCampaigns.open) await loadArchivedJobs();
-            archivedCampaigns.focus();
+            archivedCampaigns.querySelector("summary").focus();
         } catch (error) {
             announceHistory(error.message || "Could not remove this campaign.", true);
             button.disabled = false;
