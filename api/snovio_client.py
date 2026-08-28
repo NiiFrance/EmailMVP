@@ -8,11 +8,13 @@ first rollout milestones.
 from __future__ import annotations
 
 import json
+import random
 import time
 from collections import deque
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -37,6 +39,12 @@ class SnovioClient:
     base_url: str = "https://api.snov.io"
     requests_per_minute: int = 60
     timeout_seconds: int = 30
+    max_retries: int = 3
+    retry_base_seconds: float = 0.5
+    retry_max_seconds: float = 15.0
+    token_loader: Callable[[], tuple[str, float] | None] | None = None
+    token_saver: Callable[[str, float], None] | None = None
+    rate_reserver: Callable[[], float] | None = None
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -57,6 +65,12 @@ class SnovioClient:
         now = time.time()
         if self._access_token and now < self._token_expires_at - 60:
             return self._access_token
+        if self.token_loader:
+            cached = self.token_loader()
+            if cached and cached[0] and now < float(cached[1]) - 60:
+                self._access_token = str(cached[0])
+                self._token_expires_at = float(cached[1])
+                return self._access_token
 
         payload = self._request(
             "POST",
@@ -76,6 +90,8 @@ class SnovioClient:
         expires_in = int(payload.get("expires_in", 3600))
         self._access_token = str(token)
         self._token_expires_at = now + expires_in
+        if self.token_saver:
+            self.token_saver(self._access_token, self._token_expires_at)
         return self._access_token
 
     def get_balance(self) -> dict[str, Any]:
@@ -159,6 +175,12 @@ class SnovioClient:
             raise ValueError("campaign_id is required.")
         return self._request("GET", f"/v2/campaigns/{campaign_id}/progress")
 
+    def get_campaign_all_replies(self, campaign_id: str | int) -> dict[str, Any]:
+        """Return email and LinkedIn replies for a campaign."""
+        if not campaign_id:
+            raise ValueError("campaign_id is required.")
+        return self._request("GET", f"/v2/campaigns/{campaign_id}/all-replies")
+
     def get_campaign_activity(self, activity: str, campaign_id: str, offset: int | None = None) -> Any:
         paths = {
             "sent": "/v1/emails-sent",
@@ -224,7 +246,9 @@ class SnovioClient:
         return self._request("GET", "/v2/li-profiles-by-urls/result", params={"task_hash": task_hash})
 
     def get_profile_by_email(self, email: str) -> dict[str, Any]:
-        return self._request("POST", "/v1/get-profile-by-email", data={"email": email})
+        if not email:
+            raise ValueError("email is required.")
+        return self._request("GET", "/v1/get-profile-by-email", params={"email": email})
 
     # -- v2 sender accounts & schedules -------------------------------------
     def get_sender_accounts(self) -> list[dict[str, Any]]:
@@ -282,8 +306,8 @@ class SnovioClient:
         )
 
     def change_campaign_state(self, campaign_id: str | int, action: str) -> dict[str, Any]:
-        """Transition a campaign state: start, pause, resume, complete, archived."""
-        allowed = {"start", "pause", "resume", "complete", "archived"}
+        """Transition a campaign state using the documented v2 action names."""
+        allowed = {"launch", "pause", "resume", "complete", "archive"}
         if action not in allowed:
             raise ValueError(f"action must be one of {sorted(allowed)}.")
         if not campaign_id:
@@ -327,17 +351,46 @@ class SnovioClient:
 
         request = Request(url, data=body, headers=headers, method=method.upper())
 
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                return self._decode_response(response.read())
-        except HTTPError as error:
-            raise SnovioAPIError(self._error_message(error.read()), status_code=error.code) from error
-        except URLError as error:
-            raise SnovioAPIError(f"Snov.io request failed: {error.reason}") from error
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    return self._decode_response(response.read())
+            except HTTPError as error:
+                retryable = error.code == 429 or error.code in {500, 502, 503, 504}
+                if retryable and attempt < self.max_retries:
+                    time.sleep(self._retry_delay(attempt, error.headers.get("Retry-After") if error.headers else None))
+                    continue
+                raise SnovioAPIError(self._error_message(error.read()), status_code=error.code) from error
+            except URLError as error:
+                if attempt < self.max_retries:
+                    time.sleep(self._retry_delay(attempt))
+                    continue
+                raise SnovioAPIError(f"Snov.io request failed: {error.reason}") from error
+
+        raise SnovioAPIError("Snov.io request failed after retries.")
+
+    def _retry_delay(self, attempt: int, retry_after: str | None = None) -> float:
+        if retry_after:
+            try:
+                return min(self.retry_max_seconds, max(0.0, float(retry_after)))
+            except ValueError:
+                try:
+                    parsed = parsedate_to_datetime(retry_after)
+                    return min(self.retry_max_seconds, max(0.0, parsed.timestamp() - time.time()))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        base = min(self.retry_max_seconds, self.retry_base_seconds * (2 ** attempt))
+        return min(self.retry_max_seconds, base + random.uniform(0, base * 0.25))
 
     def _wait_for_rate_limit_slot(self) -> None:
         if self.requests_per_minute <= 0:
             return
+        if self.rate_reserver:
+            while True:
+                delay = max(0.0, float(self.rate_reserver()))
+                if delay <= 0:
+                    return
+                time.sleep(delay)
 
         with self._lock:
             now = time.monotonic()

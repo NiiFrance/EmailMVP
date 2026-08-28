@@ -17,7 +17,7 @@ def _tool_call(call_id, name, arguments):
     return SimpleNamespace(id=call_id, function=SimpleNamespace(name=name, arguments=json.dumps(arguments)))
 
 
-def test_build_tool_specs_filters_mcp_allowlist():
+def test_build_tool_specs_exposes_only_app_controlled_tools():
     mcp_tools = [
         {"name": "app_get_lists", "description": "lists", "inputSchema": {"type": "object", "properties": {}}},
         {"name": "li_send_invite", "description": "linkedin", "inputSchema": {}},  # not allowlisted
@@ -25,7 +25,7 @@ def test_build_tool_specs_filters_mcp_allowlist():
     app_tools = {"list_templates": {"description": "templates", "parameters": {"type": "object", "properties": {}}, "handler": lambda a: {}}}
     specs = copilot.build_tool_specs(mcp_tools, app_tools)
     names = [s["function"]["name"] for s in specs]
-    assert "snovio__app_get_lists" in names
+    assert "snovio__app_get_lists" not in names
     assert "app__list_templates" in names
     assert all("li_send_invite" not in n for n in names)
 
@@ -53,29 +53,38 @@ def test_run_agent_executes_app_tool_then_replies():
     assert out["toolTrace"][0]["tool"] == "app__list_templates"
 
 
-def test_run_agent_executes_mcp_tool():
+def test_run_agent_collects_confirmation_without_trace_arguments():
     client = MagicMock()
     client.chat.completions.create.side_effect = [
-        _fake_response(tool_calls=[_tool_call("c1", "snovio__app_get_lists", {})]),
-        _fake_response(content="You have 2 lists."),
+        _fake_response(tool_calls=[_tool_call("c1", "app__execute_snovio_tool", {"toolName": "app_delete_list"})]),
+        _fake_response(content="Please confirm."),
     ]
-    session = MagicMock()
-    session.list_tools.return_value = [{"name": "app_get_lists", "description": "", "inputSchema": {}}]
-    session.call_tool.return_value = {"content": [{"type": "text", "text": "[{\"name\": \"A\"}]"}]}
-    out = copilot.run_agent(client, "gpt-test", [{"role": "user", "content": "my lists?"}], session, {})
-    assert out["reply"] == "You have 2 lists."
-    session.call_tool.assert_called_once_with("app_get_lists", {})
+    app_tools = {"execute_snovio_tool": {
+        "description": "execute", "parameters": {"type": "object", "properties": {}},
+        "handler": lambda args: {
+            "confirmationRequired": True, "confirmationId": "confirm-1",
+            "toolName": "app_delete_list", "category": "destructive",
+            "summary": "Delete list 42", "expiresAt": 1234,
+        },
+    }}
+    out = copilot.run_agent(client, "gpt-test", [{"role": "user", "content": "delete it"}], MagicMock(), app_tools)
+    assert out["reply"] == "Please confirm."
+    assert out["confirmations"][0]["confirmationId"] == "confirm-1"
+    assert "arguments" not in out["toolTrace"][0]
+    assert "result" not in out["toolTrace"][0]
 
 
 def test_dispatch_blocks_non_allowlisted_mcp_tool():
     session = MagicMock()
     result = asyncio.run(copilot._dispatch("snovio__li_send_invite", {}, session, {}))
-    assert "not permitted" in result
+    assert "Direct MCP calls are not permitted" in result
     session.call_tool.assert_not_called()
 
 
 def test_dispatch_reports_missing_connection():
-    assert "not connected" in asyncio.run(copilot._dispatch("snovio__app_get_lists", {}, None, {}))
+    assert "Direct MCP calls are not permitted" in asyncio.run(
+        copilot._dispatch("snovio__app_get_lists", {}, None, {})
+    )
 
 
 def test_dispatch_tool_exception_becomes_error_string():

@@ -2,8 +2,12 @@
 
 import asyncio
 import base64
+import hashlib
 import json
+import re
 import sys
+import time
+from datetime import datetime, timezone
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
@@ -16,10 +20,11 @@ import pytest
 
 
 class DummyHttpResponse:
-    def __init__(self, body=None, status_code=200, mimetype=None):
+    def __init__(self, body=None, status_code=200, mimetype=None, headers=None):
         self.body = body
         self.status_code = status_code
         self.mimetype = mimetype
+        self.headers = headers or {}
 
 
 _azure = ModuleType("azure")
@@ -31,7 +36,7 @@ _azure_functions.HttpRequest = MagicMock()
 
 _azure_durable = ModuleType("azure.durable_functions")
 _mock_dfapp_instance = MagicMock()
-for _decorator_name in ("route", "orchestration_trigger", "activity_trigger", "durable_client_input"):
+for _decorator_name in ("route", "orchestration_trigger", "activity_trigger", "durable_client_input", "queue_output", "queue_trigger"):
     getattr(_mock_dfapp_instance, _decorator_name).return_value = lambda f: f
 _azure_durable.DFApp = MagicMock(return_value=_mock_dfapp_instance)
 _azure_durable.DurableOrchestrationContext = MagicMock()
@@ -46,6 +51,7 @@ _azure_identity = ModuleType("azure.identity")
 _azure_identity.DefaultAzureCredential = MagicMock()
 
 _azure_core = ModuleType("azure.core")
+_azure_core.MatchConditions = MagicMock(IfNotModified="if-not-modified")
 _azure_core_exceptions = ModuleType("azure.core.exceptions")
 
 
@@ -54,6 +60,8 @@ class _ResourceNotFoundError(Exception):
 
 
 _azure_core_exceptions.ResourceNotFoundError = _ResourceNotFoundError
+_azure_core_exceptions.ResourceExistsError = type("ResourceExistsError", (Exception,), {})
+_azure_core_exceptions.ResourceModifiedError = type("ResourceModifiedError", (Exception,), {})
 
 _azure_data = ModuleType("azure.data")
 _azure_data_tables = ModuleType("azure.data.tables")
@@ -480,7 +488,11 @@ class TestSnovioMcpRoutes:
         assert saved["clientId"] == "client-42"
 
     def test_callback_exchanges_code_and_stores_tokens(self):
-        state_row = {"oid": "user-1", "codeVerifier": "ver", "redirectUri": "https://app.example.com/api/snovio/mcp/callback", "clientId": "client-42"}
+        state_row = {
+            "oid": "user-1", "codeVerifier": "ver",
+            "redirectUri": "https://app.example.com/api/snovio/mcp/callback", "clientId": "client-42",
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
         stored = {}
         with patch.object(fa.data_store, "pop_mcp_state", return_value=state_row), \
                 patch.object(fa.snovio_mcp, "exchange_code", return_value={"access_token": "at", "refresh_token": "rt", "expires_in": 3600}) as ex, \
@@ -501,6 +513,27 @@ class TestSnovioMcpRoutes:
         with patch.object(fa.data_store, "pop_mcp_state", return_value=state_row):
             response = asyncio.run(fa.snovio_mcp_callback(self._request(params={"state": "s1", "code": "c1"})))
         assert "malformed" in str(response.body).lower()
+
+    def test_callback_rejects_expired_state(self):
+        state_row = {
+            "oid": "user-1", "codeVerifier": "v", "redirectUri": "r", "clientId": "c",
+            "createdAt": "2000-01-01T00:00:00+00:00",
+        }
+        with patch.object(fa.data_store, "pop_mcp_state", return_value=state_row), \
+                patch.object(fa.snovio_mcp, "exchange_code") as exchange:
+            response = asyncio.run(fa.snovio_mcp_callback(self._request(params={"state": "s1", "code": "c1"})))
+        assert "expired" in str(response.body).lower()
+        exchange.assert_not_called()
+
+    def test_callback_escapes_error_and_targets_exact_origin(self):
+        req = self._request(params={"error": '<script>alert("x")</script>'})
+        with patch.object(fa, "_public_origin", return_value="https://app.example.com"):
+            response = asyncio.run(fa.snovio_mcp_callback(req))
+        body = str(response.body)
+        assert "<script>alert" not in body
+        assert "&lt;script&gt;alert" in body
+        assert "postMessage({snovioMcp:'done'},\"https://app.example.com\")" in body
+        assert "postMessage({snovioMcp:'done'},'*')" not in body
 
     def test_status_reports_disconnected_without_tokens(self):
         with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
@@ -750,32 +783,113 @@ class TestCopilotActionTools:
         req.get_body.return_value = json.dumps(body or {}).encode("utf-8")
         return req
 
-    def _tools(self, durable=None):
+    def _tools(self, durable=None, mcp_session=None, user=None):
         req = MagicMock()
         req.headers = {}
-        return fa._copilot_app_tools(dict(self.USER), req, durable)
+        return fa._copilot_app_tools(dict(user or self.USER), req, durable, mcp_session)
 
-    def test_sync_tool_requires_confirmation(self):
+    def test_catalog_search_exposes_live_tools_with_policy(self):
+        session = MagicMock()
+        session.list_tools.return_value = [
+            {"name": "app_get_lists", "description": "List prospect lists", "inputSchema": {}},
+            {"name": "app_delete_list", "description": "Delete a prospect list", "inputSchema": {}},
+        ]
+        tools = self._tools(mcp_session=session)
+
+        result = tools["search_snovio_tools"]["handler"]({"query": "prospect list"})
+
+        assert result["count"] == 2
+        assert result["tools"][0]["category"] == "read"
+        assert result["tools"][1]["requiresConfirmation"] is True
+
+    def test_read_mcp_tool_executes_without_confirmation(self):
+        session = MagicMock()
+        session.list_tools.return_value = [{"name": "app_get_lists", "description": "", "inputSchema": {}}]
+        session.call_tool.return_value = {"content": [{"type": "text", "text": "[]"}]}
+        tools = self._tools(mcp_session=session)
+
+        result = tools["execute_snovio_tool"]["handler"]({"toolName": "app_get_lists", "arguments": {}})
+
+        assert result["result"] == "[]"
+        session.call_tool.assert_called_once_with("app_get_lists", {})
+
+    def test_write_mcp_tool_creates_confirmation_without_execution(self):
+        session = MagicMock()
+        session.list_tools.return_value = [{"name": "app_delete_list", "description": "", "inputSchema": {}}]
+        with patch.object(fa.data_store, "save_mcp_confirmation") as save:
+            tools = self._tools(mcp_session=session)
+            result = tools["execute_snovio_tool"]["handler"]({
+                "toolName": "app_delete_list", "arguments": {"listId": "42"},
+            })
+
+        assert result["confirmationRequired"] is True
+        assert result["category"] == "destructive"
+        save.assert_called_once()
+        session.call_tool.assert_not_called()
+
+    def test_non_admin_cannot_propose_outbound_mcp_action(self):
+        session = MagicMock()
+        session.list_tools.return_value = [{"name": "app_send_linkedin_message", "description": "", "inputSchema": {}}]
+        tools = self._tools(mcp_session=session)
+
+        result = tools["execute_snovio_tool"]["handler"]({
+            "toolName": "app_send_linkedin_message", "arguments": {"profile_url": "https://linkedin.example"},
+        })
+
+        assert "administrators" in result["error"]
+        session.call_tool.assert_not_called()
+
+    def test_confirm_executes_stored_action_once(self):
+        row = {
+            "toolName": "app_delete_list", "arguments": '{"listId":"42"}',
+            "summary": "Delete list 42", "category": "destructive", "expiresAt": time.time() + 60,
+        }
+        session = MagicMock()
+        session.call_tool.return_value = {"content": [{"type": "text", "text": "deleted"}]}
+        req = self._request({"confirm": True})
+        req.route_params = {"confirmationId": "confirm-1"}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "consume_mcp_confirmation", return_value=row) as consume, \
+                patch.object(fa, "_get_valid_mcp_token", return_value="token"), \
+                patch.object(fa.snovio_mcp, "SnovioMCPSession", return_value=session):
+            response = asyncio.run(fa.copilot_confirm_action(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        assert payload["executed"] is True
+        consume.assert_called_once_with("confirm-1", "user-1")
+        session.call_tool.assert_called_once_with("app_delete_list", {"listId": "42"})
+
+    def test_confirm_rejects_expired_action(self):
+        row = {"toolName": "app_delete_list", "arguments": "{}", "expiresAt": time.time() - 1}
+        req = self._request({"confirm": True})
+        req.route_params = {"confirmationId": "expired"}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "consume_mcp_confirmation", return_value=row):
+            response = asyncio.run(fa.copilot_confirm_action(req))
+        assert response.status_code == 410
+
+    def test_sync_tool_rejects_unknown_job_before_proposal(self):
         tools = self._tools()
-        result = tools["sync_leads_to_snovio"]["handler"]({"jobId": "x", "listName": "L", "confirm": False})
-        assert "Blocked" in result["error"]
+        result = tools["sync_leads_to_snovio"]["handler"]({"jobId": "x", "listName": "L"})
+        assert "not found" in result["error"].lower()
 
-    def test_campaign_tool_requires_confirmation(self):
+    def test_campaign_tool_rejects_unknown_job_before_proposal(self):
         tools = self._tools()
-        result = asyncio.run(tools["create_drip_campaign"]["handler"]({"jobId": "x", "title": "T", "confirm": False}))
-        assert "Blocked" in result["error"]
+        result = asyncio.run(tools["create_drip_campaign"]["handler"]({"jobId": "x", "title": "T"}))
+        assert "not found" in result["error"].lower()
 
-    def test_sync_tool_runs_prospect_sync_when_confirmed(self):
+    def test_sync_tool_creates_exact_confirmation_without_syncing(self):
         job = {"jobId": "5f0e2d1c-0000-4000-8000-000000000001"}
         with patch.object(fa.data_store, "get_job", return_value=dict(job)), \
                 patch.object(fa, "_snovio_configured", return_value=True), \
-                patch.object(fa, "_snovio_client", return_value=MagicMock()), \
-                patch.object(fa, "_run_prospect_sync", return_value=({"summary": {"added": 2}, "listId": "9", "listName": "L"}, None)) as rps:
+                patch.object(fa.data_store, "save_mcp_confirmation") as save, \
+                patch.object(fa, "_run_prospect_sync") as rps:
             tools = self._tools()
-            result = tools["sync_leads_to_snovio"]["handler"]({"jobId": "5f0e2d1c-0000-4000-8000-000000000001", "listName": "L", "confirm": True})
-        assert result["synced"] is True
-        assert result["summary"] == {"added": 2}
-        assert rps.call_args[0][2]["dryRun"] is False
+            result = tools["sync_leads_to_snovio"]["handler"]({"jobId": "5f0e2d1c-0000-4000-8000-000000000001", "listName": "L"})
+        assert result["confirmationRequired"] is True
+        save.assert_called_once()
+        rps.assert_not_called()
 
     def test_start_generation_rejects_unknown_template(self):
         durable = MagicMock()
@@ -791,10 +905,31 @@ class TestCopilotActionTools:
             response = asyncio.run(fa.copilot_chat(self._request({"messages": []}), MagicMock()))
         assert response.status_code == 400
 
+    def test_copilot_rate_limit_returns_retry_after(self):
+        req = self._request({"messages": [{"role": "user", "content": "hello"}]})
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "reserve_snovio_rate_slot", return_value=4.2), \
+                patch.object(fa.data_store, "acquire_copilot_turn") as acquire:
+            response = asyncio.run(fa.copilot_chat(req, MagicMock()))
+        assert response.status_code == 429
+        assert response.headers["Retry-After"] == "5"
+        acquire.assert_not_called()
+
+    def test_copilot_rejects_concurrent_turn(self):
+        req = self._request({"messages": [{"role": "user", "content": "hello"}]})
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "reserve_snovio_rate_slot", return_value=0.0), \
+                patch.object(fa.data_store, "acquire_copilot_turn", return_value=False):
+            response = asyncio.run(fa.copilot_chat(req, MagicMock()))
+        assert response.status_code == 409
+
     def test_copilot_returns_agent_reply(self):
         async def fake_agent(*args, **kwargs):
-            return {"reply": "Hi there", "toolTrace": []}
+            return {"reply": "Hi there", "toolTrace": [], "confirmations": []}
         with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "reserve_snovio_rate_slot", return_value=0.0), \
+                patch.object(fa.data_store, "acquire_copilot_turn", return_value=True), \
+                patch.object(fa.data_store, "release_copilot_turn") as release, \
                 patch.object(fa, "_get_valid_mcp_token", return_value=None), \
                 patch.object(fa, "AzureOpenAI"), \
                 patch.object(fa.copilot, "run_agent_async", side_effect=fake_agent):
@@ -803,6 +938,7 @@ class TestCopilotActionTools:
         assert response.status_code == 200
         assert payload["reply"] == "Hi there"
         assert payload["snovioConnected"] is False
+        release.assert_called_once()
 
 
 class TestSnovioEndpoints:
@@ -834,6 +970,20 @@ class TestSnovioEndpoints:
         assert payload["sessionClientIdMasked"] is None
         assert payload["apiBaseUrl"] == "https://api.snov.io"
         assert "clientSecret" not in payload
+
+    def test_client_uses_hashed_key_and_encrypted_shared_token_cache(self):
+        with patch.object(fa, "_resolve_snovio_credentials", return_value=("client-id", "client-secret", "account")), \
+                patch.object(fa, "_encrypt_session_secret", return_value=("encrypted-token", True)), \
+                patch.object(fa.data_store, "save_snovio_access_token") as save_token, \
+                patch.object(fa.data_store, "reserve_snovio_rate_slot", return_value=0.0) as reserve:
+            client = fa._snovio_client(self._request())
+            client.token_saver("access-token", 1234.0)
+            assert client.rate_reserver() == 0.0
+
+        credential_key = fa._snovio_credential_key("client-id", "client-secret")
+        assert credential_key not in {"client-id", "client-secret"}
+        save_token.assert_called_once_with(credential_key, "encrypted-token", 1234.0, True)
+        reserve.assert_called_once_with(credential_key, fa.SNOVIO_REQUESTS_PER_MINUTE)
 
     @patch.object(fa, "_store_snovio_session", return_value={"sessionId": "sess-1", "expiresAt": "2030-01-01T00:00:00+00:00", "clientIdMasked": "abcd\u2026wxyz"})
     @patch.object(fa, "SnovioClient")
@@ -1006,6 +1156,28 @@ class TestSnovioEndpoints:
         assert payload["schedules"][0]["name"] == "UA Monday"
         assert payload["customFields"][0]["label"] == "Subject_Touch1"
 
+    @patch.object(fa, "_snovio_client")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_analytics_defaults_dates_and_includes_multichannel_replies(self, mock_configured, mock_client_factory):
+        mock_client = MagicMock()
+        mock_client.get_campaign_analytics.return_value = {"emails_sent": 1}
+        mock_client.get_campaign_progress.return_value = {"progress": 50}
+        mock_client.get_campaign_activity.return_value = []
+        mock_client.get_campaign_all_replies.return_value = {"data": [{"channel": "linkedin"}]}
+        mock_client_factory.return_value = mock_client
+        req = self._request(params={"campaignId": "555", "includeActivity": "true"})
+
+        response = asyncio.run(fa.get_snovio_analytics(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 200
+        filters = mock_client.get_campaign_analytics.call_args.args[0]
+        assert filters["campaign_id"] == "555"
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", filters["date_from"])
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", filters["date_to"])
+        assert payload["allReplies"]["data"][0]["channel"] == "linkedin"
+        mock_client.get_campaign_all_replies.assert_called_once_with("555")
+
     @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Company\na@example.com,Ada,Contoso\n")
     @patch.object(fa, "_snovio_client")
     @patch.object(fa, "_snovio_configured", return_value=True)
@@ -1160,20 +1332,72 @@ class TestSnovioEndpoints:
         mock_client.create_prospect_list.assert_not_called()
         mock_client.add_prospect_to_list.assert_not_called()
 
-    @patch.object(fa, "_upload_blob")
-    def test_webhook_requires_shared_secret_and_persists_event(self, mock_upload):
+    def test_webhook_validates_token_and_enqueues_event(self):
         req = self._request(
             body={"event_object": "campaign_email", "event_action": "sent"},
-            params={"token": "secret"},
+            route_params={"callbackToken": "secret"},
+            headers={"content-type": "application/json"},
         )
+        output = MagicMock()
 
-        with patch.object(fa, "SNOVIO_WEBHOOK_SECRET", "secret"):
-            response = asyncio.run(fa.receive_snovio_webhook(req))
+        with patch.object(fa.data_store, "get_snovio_webhook_config", return_value={
+            "tokenHash": hashlib.sha256(b"secret").hexdigest(),
+        }):
+            response = asyncio.run(fa.receive_snovio_webhook(req, output))
         payload = json.loads(response.body)
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert payload["accepted"] is True
+        queued = json.loads(output.set.call_args.args[0])
+        assert queued["payload"]["event_action"] == "sent"
+
+    @patch.object(fa, "_upload_blob")
+    @patch.object(fa, "_blob_exists", return_value=False)
+    def test_webhook_processor_persists_event_once(self, mock_exists, mock_upload):
+        message = MagicMock()
+        message.get_body.return_value = json.dumps({"eventId": "evt-1", "payload": {"id": "evt-1"}}).encode()
+
+        fa.process_snovio_webhook(message)
+
+        mock_exists.assert_called_once_with(fa.OUTPUT_CONTAINER, "snovio-webhooks/evt-1.json")
         mock_upload.assert_called_once()
+
+    def test_webhook_setup_registers_events_without_returning_token(self):
+        client = MagicMock()
+        client.create_webhook.side_effect = [
+            {"data": {"id": str(index)}} for index, _ in enumerate(fa.DEFAULT_SNOVIO_WEBHOOK_EVENTS, start=1)
+        ]
+        req = self._request()
+        with patch.object(fa, "_require_admin", return_value=({"email": "admin@example.com"}, None)), \
+                patch.object(fa, "_snovio_required_response", return_value=None), \
+                patch.object(fa, "_public_origin", return_value="https://app.example.com"), \
+                patch.object(fa, "_snovio_client", return_value=client), \
+                patch.object(fa.data_store, "get_snovio_webhook_config", return_value=None), \
+                patch.object(fa.data_store, "save_snovio_webhook_config") as save:
+            response = asyncio.run(fa.configure_snovio_webhooks(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 201
+        assert payload == {"configured": True, "registeredEvents": len(fa.DEFAULT_SNOVIO_WEBHOOK_EVENTS)}
+        assert "token" not in json.dumps(payload).lower()
+        assert client.create_webhook.call_count == len(fa.DEFAULT_SNOVIO_WEBHOOK_EVENTS)
+        token_hash, webhook_ids = save.call_args.args
+        assert len(token_hash) == 64
+        assert len(webhook_ids) == len(fa.DEFAULT_SNOVIO_WEBHOOK_EVENTS)
+
+    def test_webhook_setup_rolls_back_partial_registration(self):
+        client = MagicMock()
+        client.create_webhook.side_effect = [{"data": {"id": "one"}}, fa.SnovioAPIError("failed")]
+        with patch.object(fa, "_require_admin", return_value=({"email": "admin@example.com"}, None)), \
+                patch.object(fa, "_snovio_required_response", return_value=None), \
+                patch.object(fa, "_public_origin", return_value="https://app.example.com"), \
+                patch.object(fa, "_snovio_client", return_value=client), \
+                patch.object(fa.data_store, "save_snovio_webhook_config") as save:
+            response = asyncio.run(fa.configure_snovio_webhooks(self._request()))
+
+        assert response.status_code == 502
+        client.delete_webhook.assert_called_once_with("one")
+        save.assert_not_called()
 
 
 class TestConfiguration:

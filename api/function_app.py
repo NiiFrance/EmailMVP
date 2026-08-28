@@ -8,10 +8,12 @@ Endpoints:
 """
 
 import asyncio
+import html
 import json
 import logging
 import os
 import re
+import secrets
 import uuid
 import base64
 import hashlib
@@ -45,6 +47,7 @@ from column_mapper import resolve_columns, detect_columns, _friendly_field
 from snovio_client import SnovioAPIError, SnovioClient, SnovioConfigError
 import data_store
 import snovio_mcp
+import snovio_policy
 import copilot
 import time
 from snovio_workflows import (
@@ -96,7 +99,13 @@ SNOVIO_SESSION_CONTAINER = os.environ.get("SNOVIO_SESSION_CONTAINER", "snovio-se
 SNOVIO_DEFAULT_DELAY_DAYS = int(os.environ.get("SNOVIO_DEFAULT_DELAY_DAYS", "3"))
 SNOVIO_CAMPAIGN_TIMEZONE = os.environ.get("SNOVIO_CAMPAIGN_TIMEZONE", "")
 SNOVIO_CAMPAIGN_ARCHIVE_MONTHS = int(os.environ.get("SNOVIO_CAMPAIGN_ARCHIVE_MONTHS", "3"))
+SNOVIO_MCP_STATE_TTL_SECONDS = int(os.environ.get("SNOVIO_MCP_STATE_TTL_SECONDS", "600"))
+APP_DISPLAY_NAME = os.environ.get("APP_DISPLAY_NAME", "Cloudware Email Campaign Generator").strip()
+SNOVIO_WEBHOOK_QUEUE = os.environ.get("SNOVIO_WEBHOOK_QUEUE", "snovio-webhooks")
+COPILOT_REQUESTS_PER_MINUTE = int(os.environ.get("COPILOT_REQUESTS_PER_MINUTE", "10"))
+COPILOT_TURN_TTL_SECONDS = int(os.environ.get("COPILOT_TURN_TTL_SECONDS", "180"))
 MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_WEBHOOK_SIZE_BYTES = 256 * 1024
 ADMIN_EMAILS = {e.strip().lower() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip()}
 # Multi-tenant domain allowlist: comma-separated email domains permitted to use
 # the app (e.g. "relianceinfosystems.com,cloudware.africa"). Empty = allow all
@@ -106,6 +115,17 @@ ALLOWED_EMAIL_DOMAINS = {
 }
 
 logger = logging.getLogger("emailmvp")
+
+DEFAULT_SNOVIO_WEBHOOK_EVENTS = (
+    ("campaign_email", "sent"),
+    ("campaign_email", "bounced"),
+    ("campaign_reply", "received"),
+    ("campaign_reply", "autoreply_received"),
+    ("campaign_li_reply", "received"),
+    ("campaign_li", "connection_request_accepted"),
+    ("prospect", "campaign_finished"),
+    ("email_verification", "verified"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +160,8 @@ def _blob_exists(container: str, blob_name: str) -> bool:
         return False
 
 
-def _json_response(payload: dict | list, status_code: int = 200) -> func.HttpResponse:
-    return func.HttpResponse(json.dumps(payload), status_code=status_code, mimetype="application/json")
+def _json_response(payload: dict | list, status_code: int = 200, headers: dict | None = None) -> func.HttpResponse:
+    return func.HttpResponse(json.dumps(payload), status_code=status_code, mimetype="application/json", headers=headers)
 
 
 def _request_json(req: func.HttpRequest) -> dict:
@@ -335,13 +355,51 @@ def _snovio_required_response(req: func.HttpRequest | None = None) -> func.HttpR
     return _json_response({"configured": False, "error": "Snov.io credentials are not configured."}, 503)
 
 
+def _snovio_credential_key(client_id: str, client_secret: str) -> str:
+    return hashlib.sha256(f"{client_id}\0{client_secret}".encode("utf-8")).hexdigest()
+
+
 def _snovio_client(req: func.HttpRequest | None = None) -> SnovioClient:
     client_id, client_secret, _ = _resolve_snovio_credentials(req)
+    credential_key = _snovio_credential_key(client_id, client_secret)
+
+    def load_token() -> tuple[str, float] | None:
+        try:
+            row = data_store.get_snovio_access_token(credential_key)
+            if not row:
+                return None
+            token = _decrypt_session_secret(
+                str(row.get("accessToken") or ""), bool(row.get("tokenEncrypted"))
+            )
+            return token, float(row.get("expiresAt") or 0)
+        except Exception as error:
+            logger.warning("Shared Snov.io token load failed: %s", type(error).__name__)
+            return None
+
+    def save_token(token: str, expires_at: float) -> None:
+        try:
+            token_value, token_encrypted = _encrypt_session_secret(token)
+            data_store.save_snovio_access_token(
+                credential_key, token_value, expires_at, token_encrypted
+            )
+        except Exception as error:
+            logger.warning("Shared Snov.io token save failed: %s", type(error).__name__)
+
+    def reserve_rate_slot() -> float:
+        try:
+            return data_store.reserve_snovio_rate_slot(credential_key, SNOVIO_REQUESTS_PER_MINUTE)
+        except Exception as error:
+            logger.warning("Shared Snov.io rate reservation failed: %s", type(error).__name__)
+            return 0.0
+
     return SnovioClient(
         client_id=client_id,
         client_secret=client_secret,
         base_url=SNOVIO_API_BASE_URL,
         requests_per_minute=SNOVIO_REQUESTS_PER_MINUTE,
+        token_loader=load_token,
+        token_saver=save_token,
+        rate_reserver=reserve_rate_slot,
     )
 
 
@@ -1556,9 +1614,22 @@ def _mcp_client_id(req: func.HttpRequest) -> str:
     row = data_store.get_mcp_client_registration(host)
     if row and row.get("clientId") and row.get("redirectUri") == redirect_uri:
         return str(row["clientId"])
-    client_id = snovio_mcp.register_client("Cloudware Email Campaign Generator", redirect_uri)
+    client_id = snovio_mcp.register_client(APP_DISPLAY_NAME, redirect_uri)
     data_store.save_mcp_client_registration(host, client_id, redirect_uri)
     return client_id
+
+
+def _mcp_state_expired(row: dict) -> bool:
+    created_at = str(row.get("createdAt") or "")
+    if not created_at:
+        return True
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - created > timedelta(seconds=SNOVIO_MCP_STATE_TTL_SECONDS)
 
 
 def _store_mcp_tokens(oid: str, payload: dict, client_id: str) -> None:
@@ -1632,15 +1703,17 @@ async def snovio_mcp_callback(req: func.HttpRequest) -> func.HttpResponse:
 
     def _page(message: str, ok: bool) -> func.HttpResponse:
         color = "#1a7f37" if ok else "#b10e20"
-        html = (
+        safe_message = html.escape(message, quote=True)
+        target_origin = json.dumps(_public_origin(req)).replace("</", "<\\/")
+        page_html = (
             "<!DOCTYPE html><html><head><title>Snov.io connection</title></head>"
             "<body style=\"font-family:system-ui;display:flex;align-items:center;justify-content:center;height:90vh;\">"
-            f"<div style=\"text-align:center;\"><h2 style=\"color:{color};\">{message}</h2>"
+            f"<div style=\"text-align:center;\"><h2 style=\"color:{color};\">{safe_message}</h2>"
             "<p>You can close this tab and return to the app.</p>"
-            "<script>try{if(window.opener){window.opener.postMessage({snovioMcp:'done'},'*');}}catch(e){}</script>"
+            f"<script>try{{if(window.opener){{window.opener.postMessage({{snovioMcp:'done'}},{target_origin});}}}}catch(e){{}}</script>"
             "</div></body></html>"
         )
-        return func.HttpResponse(html, status_code=200, mimetype="text/html")
+        return func.HttpResponse(page_html, status_code=200, mimetype="text/html")
 
     if oauth_error:
         return _page(f"Connection cancelled ({oauth_error}).", ok=False)
@@ -1652,6 +1725,8 @@ async def snovio_mcp_callback(req: func.HttpRequest) -> func.HttpResponse:
     oid = str(row.get("oid") or "")
     if not oid:
         return _page("This connection request is malformed — please retry from the app.", ok=False)
+    if _mcp_state_expired(row):
+        return _page("This connection link expired — please retry from the app.", ok=False)
     try:
         tokens = snovio_mcp.exchange_code(
             str(row.get("clientId")), str(row.get("redirectUri")), code, str(row.get("codeVerifier"))
@@ -1693,7 +1768,7 @@ async def snovio_mcp_tools(req: func.HttpRequest) -> func.HttpResponse:
     if not token:
         return _json_response({"error": "Snov.io is not connected. Use Connect Snov.io first."}, 409)
     try:
-        session = snovio_mcp.SnovioMCPSession(token)
+        session = snovio_mcp.SnovioMCPSession(token, APP_DISPLAY_NAME)
         tools = session.list_tools()
         return _json_response({
             "count": len(tools),
@@ -1732,7 +1807,7 @@ async def snovio_search_leads(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"error": "Describe the leads you want (prompt) or pass a taskId to page."}, 400)
 
     try:
-        session = snovio_mcp.SnovioMCPSession(token)
+        session = snovio_mcp.SnovioMCPSession(token, APP_DISPLAY_NAME)
         if task_id:
             search_args: dict = {"task_id": int(task_id), "page": page}
         else:
@@ -1903,7 +1978,7 @@ async def snovio_import_leads(req: func.HttpRequest) -> func.HttpResponse:
     list_name = (str(payload.get("listName") or "").strip() or f"Sourced leads {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}")[:50]
 
     try:
-        session = snovio_mcp.SnovioMCPSession(token)
+        session = snovio_mcp.SnovioMCPSession(token, APP_DISPLAY_NAME)
         created_raw = session.call_tool("app_create_list", {"name": list_name, "type": "people"})
         created = _mcp_json(created_raw)
         list_id = None
@@ -1963,12 +2038,97 @@ def _list_row_to_lead(row: dict) -> dict:
 # ===========================================================================
 # In-app copilot — natural-language operations over the app + the user's Snov.io
 # ===========================================================================
-def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None) -> dict:
+def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None, mcp_session=None) -> dict:
     """App tools the copilot can call for the signed-in user.
 
     Read tools are always safe; ACTION tools (generation, sync, campaign) require
     a confirm flag the model may only set after an explicit user go-ahead in chat.
     """
+    mcp_catalog: list[dict] | None = None
+
+    def get_mcp_catalog() -> list[dict]:
+        nonlocal mcp_catalog
+        if mcp_session is None:
+            return []
+        if mcp_catalog is None:
+            mcp_catalog = mcp_session.list_tools()
+        return mcp_catalog
+
+    def search_snovio_tools(args):
+        if mcp_session is None:
+            return {"error": "Snov.io Copilot is not connected. Open Settings to connect it."}
+        query = str(args.get("query") or "").strip().lower()
+        terms = [term for term in re.split(r"\W+", query) if term]
+        matches = []
+        for tool in get_mcp_catalog():
+            name = str(tool.get("name") or "")
+            description = str(tool.get("description") or "")
+            haystack = f"{name} {description}".lower()
+            if terms and not all(term in haystack for term in terms):
+                continue
+            policy = snovio_policy.classify_tool(name)
+            matches.append({
+                "name": name,
+                "description": description[:300],
+                "category": policy.category,
+                "requiresConfirmation": policy.requires_confirmation,
+                "adminOnly": policy.admin_only,
+                "executable": policy.executable,
+            })
+        offset = max(0, int(args.get("offset") or 0))
+        results = matches[offset:offset + 20]
+        return {"tools": results, "count": len(results), "total": len(matches),
+                "offset": offset, "hasMore": offset + len(results) < len(matches), "query": query}
+
+    def get_snovio_tool_schema(args):
+        tool_name = str(args.get("toolName") or "")
+        tool = next((item for item in get_mcp_catalog() if item.get("name") == tool_name), None)
+        if not tool:
+            return {"error": "Tool not found in the current Snov.io MCP catalog."}
+        policy = snovio_policy.classify_tool(tool_name)
+        return {
+            "name": tool_name,
+            "description": str(tool.get("description") or "")[:1000],
+            "inputSchema": tool.get("inputSchema") or {"type": "object", "properties": {}},
+            "policy": {
+                "category": policy.category,
+                "requiresConfirmation": policy.requires_confirmation,
+                "adminOnly": policy.admin_only,
+                "executable": policy.executable,
+            },
+        }
+
+    def execute_snovio_tool(args):
+        if mcp_session is None:
+            return {"error": "Snov.io Copilot is not connected. Open Settings to connect it."}
+        tool_name = str(args.get("toolName") or "")
+        tool_arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+        if not any(item.get("name") == tool_name for item in get_mcp_catalog()):
+            return {"error": "Tool not found in the current Snov.io MCP catalog."}
+        policy = snovio_policy.classify_tool(tool_name)
+        if not policy.executable:
+            return {"error": "This Snov.io tool has not been security-reviewed yet."}
+        if policy.admin_only and user.get("role") != "admin":
+            return {"error": "This Snov.io action is restricted to app administrators."}
+        if policy.requires_confirmation:
+            confirmation_id = secrets.token_urlsafe(32)
+            expires_at = time.time() + 600
+            summary = snovio_policy.summarize_action(tool_name, tool_arguments)
+            data_store.save_mcp_confirmation(
+                confirmation_id, user["oid"], tool_name, tool_arguments,
+                summary, policy.category, expires_at,
+            )
+            return {
+                "confirmationRequired": True,
+                "confirmationId": confirmation_id,
+                "toolName": tool_name,
+                "category": policy.category,
+                "summary": summary,
+                "expiresAt": expires_at,
+            }
+        result = mcp_session.call_tool(tool_name, tool_arguments)
+        return {"toolName": tool_name, "result": snovio_mcp.tool_result_text(result)[:9000]}
+
     def list_templates_tool(_args):
         return {"templates": [
             {"id": t["id"], "name": t["name"], "emails": t.get("num_emails")}
@@ -2079,53 +2239,72 @@ def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None) -
         return result
 
     def sync_tool(args):
-        if not args.get("confirm"):
-            return {"error": "Blocked: set confirm=true only after the user explicitly approved syncing in chat."}
         job_id = str(args.get("jobId") or "")
         if not _own_job(job_id):
             return {"error": "Job not found in your workspace."}
         if not _snovio_configured(req):
             return {"error": "Snov.io API credentials are not connected — connect in step 4 first."}
         list_name = str(args.get("listName") or "").strip()[:50]
-        client = _snovio_client(req)
-        report, err_resp = _run_prospect_sync(client, job_id, {
-            "dryRun": False, "listName": list_name, "autoCreateList": True,
-        })
-        if err_resp is not None:
-            return {"error": "Sync was rejected.", "status": getattr(err_resp, "status_code", None)}
-        return {"synced": True, "summary": report.get("summary"), "listId": report.get("listId"),
-                "listName": report.get("listName") or list_name}
+        confirmation_id = secrets.token_urlsafe(32)
+        confirmation_args = {"jobId": job_id, "listName": list_name}
+        expires_at = time.time() + 600
+        summary = f"Sync job {job_id[:8]} to Snov.io list {list_name or '(new list)'}"
+        data_store.save_mcp_confirmation(
+            confirmation_id, user["oid"], "app_internal_sync_leads", confirmation_args,
+            summary, "write", expires_at,
+        )
+        return {"confirmationRequired": True, "confirmationId": confirmation_id,
+                "toolName": "app_internal_sync_leads", "category": "write",
+                "summary": summary, "expiresAt": expires_at}
 
     async def campaign_tool(args):
-        if not args.get("confirm"):
-            return {"error": "Blocked: set confirm=true only after the user explicitly approved campaign creation in chat."}
         job_id = str(args.get("jobId") or "")
         if not _own_job(job_id):
             return {"error": "Job not found in your workspace."}
         if not _snovio_configured(req):
             return {"error": "Snov.io API credentials are not connected — connect in step 4 first."}
         title = str(args.get("title") or "").strip()[:120]
-        sender_ids = [str(s) for s in (args.get("senderAccountIds") or []) if str(s)]
-        if not sender_ids:
-            try:
-                senders = _snovio_client(req).get_sender_accounts()
-                sender_ids = [str(senders[0].get("id"))] if senders else []
-            except Exception:
-                sender_ids = []
-        if not sender_ids:
-            return {"error": "No Snov.io sender account is connected — add one in Snov.io first."}
-        body = {"dryRun": False, "campaignTitle": title, "listName": title,
-                "senderAccountIds": sender_ids, "delayDays": int(args.get("delayDays") or 3)}
-        fake_req = _CopilotToolRequest(req, body, {"jobId": job_id})
-        response = await create_snovio_journey(fake_req)
-        payload = _response_json(response)
-        if int(getattr(response, "status_code", 500) or 500) >= 400:
-            return {"error": payload.get("error") or "Campaign creation failed.",
-                    "detail": payload.get("action") or "", "missingFields": (payload.get("customFieldReadiness") or {}).get("missing")}
-        return {"created": True, "campaignId": payload.get("campaignId"), "status": payload.get("status"),
-                "touches": payload.get("numTouches"), "syncSummary": (payload.get("sync") or {}).get("summary")}
+        if not title:
+            return {"error": "A campaign title is required."}
+        confirmation_id = secrets.token_urlsafe(32)
+        confirmation_args = {
+            "jobId": job_id, "title": title,
+            "delayDays": max(0, min(30, int(args.get("delayDays") or 3))),
+        }
+        expires_at = time.time() + 600
+        summary = f"Create draft Snov.io campaign '{title}' from job {job_id[:8]}"
+        data_store.save_mcp_confirmation(
+            confirmation_id, user["oid"], "app_internal_create_drip_campaign", confirmation_args,
+            summary, "write", expires_at,
+        )
+        return {"confirmationRequired": True, "confirmationId": confirmation_id,
+                "toolName": "app_internal_create_drip_campaign", "category": "write",
+                "summary": summary, "expiresAt": expires_at}
 
     return {
+        "search_snovio_tools": {
+            "description": "Search the live Snov.io MCP catalog by capability. Use this before selecting a Snov.io action.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "Capability keywords, such as deals, LinkedIn invite, verify email, or list folders"},
+                "offset": {"type": "integer", "minimum": 0, "description": "Pagination offset; results are returned 20 at a time"},
+            }, "required": ["query"]},
+            "handler": search_snovio_tools,
+        },
+        "get_snovio_tool_schema": {
+            "description": "Get the exact arguments and security policy for one tool returned by search_snovio_tools.",
+            "parameters": {"type": "object", "properties": {
+                "toolName": {"type": "string"},
+            }, "required": ["toolName"]},
+            "handler": get_snovio_tool_schema,
+        },
+        "execute_snovio_tool": {
+            "description": "Execute an exact Snov.io MCP tool. Read actions run immediately; changes return a confirmation request for the user.",
+            "parameters": {"type": "object", "properties": {
+                "toolName": {"type": "string"},
+                "arguments": {"type": "object", "additionalProperties": True},
+            }, "required": ["toolName", "arguments"]},
+            "handler": execute_snovio_tool,
+        },
         "list_templates": {
             "description": "List the campaign templates available in this app (id, name, number of emails per lead).",
             "parameters": {"type": "object", "properties": {}},
@@ -2155,22 +2334,20 @@ def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None) -
             "handler": job_status_tool,
         },
         "sync_leads_to_snovio": {
-            "description": "ACTION: sync a completed job's leads (with drafted emails) into a Snov.io list. Requires confirm=true, which you may only set after the user explicitly approved in chat having seen sample drafts.",
+            "description": "PROPOSE ACTION: prepare an exact confirmation to sync a completed job's leads into a Snov.io list. The server will require the user to click Confirm before execution.",
             "parameters": {"type": "object", "properties": {
                 "jobId": {"type": "string"},
                 "listName": {"type": "string", "description": "Snov.io list name, max 50 chars"},
-                "confirm": {"type": "boolean", "description": "true ONLY after explicit user approval in this conversation"},
-            }, "required": ["jobId", "listName", "confirm"]},
+            }, "required": ["jobId", "listName"]},
             "handler": sync_tool,
         },
         "create_drip_campaign": {
-            "description": "ACTION: create a DRAFT Snov.io drip campaign from a completed job (syncs leads + builds the touch sequence). Requires confirm=true, only after explicit user approval in chat. Nothing is sent automatically.",
+            "description": "PROPOSE ACTION: prepare an exact confirmation to create a DRAFT Snov.io drip campaign. The server requires a user click before execution; nothing is sent automatically.",
             "parameters": {"type": "object", "properties": {
                 "jobId": {"type": "string"},
                 "title": {"type": "string", "description": "campaign title (also used as list name)"},
                 "delayDays": {"type": "integer", "description": "days between touches, default 3"},
-                "confirm": {"type": "boolean", "description": "true ONLY after explicit user approval in this conversation"},
-            }, "required": ["jobId", "title", "confirm"]},
+            }, "required": ["jobId", "title"]},
             "handler": campaign_tool,
         },
     }
@@ -2230,8 +2407,21 @@ async def copilot_chat(req: func.HttpRequest, client) -> func.HttpResponse:
     if not history or history[-1]["role"] != "user":
         return _json_response({"error": "messages must end with a user message."}, 400)
 
+    rate_key = "copilot-" + hashlib.sha256(user["oid"].encode("utf-8")).hexdigest()
+    retry_after = data_store.reserve_snovio_rate_slot(rate_key, COPILOT_REQUESTS_PER_MINUTE)
+    if retry_after > 0:
+        seconds = max(1, int(retry_after + 0.999))
+        return _json_response(
+            {"error": "Copilot request limit reached. Please wait before trying again."},
+            429,
+            headers={"Retry-After": str(seconds)},
+        )
+    turn_id = secrets.token_urlsafe(24)
+    if not data_store.acquire_copilot_turn(user["oid"], turn_id, COPILOT_TURN_TTL_SECONDS):
+        return _json_response({"error": "A Copilot request is already running for your account."}, 409)
+
     token = _get_valid_mcp_token(user["oid"])
-    mcp_session = snovio_mcp.SnovioMCPSession(token) if token else None
+    mcp_session = snovio_mcp.SnovioMCPSession(token, APP_DISPLAY_NAME) if token else None
     try:
         openai_client = AzureOpenAI(
             api_key=AZURE_OPENAI_API_KEY,
@@ -2243,16 +2433,94 @@ async def copilot_chat(req: func.HttpRequest, client) -> func.HttpResponse:
             AZURE_OPENAI_DEPLOYMENT,
             history,
             mcp_session,
-            _copilot_app_tools(user, req, client),
+            _copilot_app_tools(user, req, client, mcp_session),
+            system_prompt=copilot.SYSTEM_PROMPT.replace("Email Campaign Generator", APP_DISPLAY_NAME),
         )
         return _json_response({
             "reply": outcome["reply"],
             "toolTrace": outcome["toolTrace"],
+            "confirmations": outcome.get("confirmations") or [],
             "snovioConnected": bool(token),
         })
     except Exception as error:
         logger.exception("Copilot turn failed")
         return _json_response({"error": f"Copilot failed: {error}"}, 500)
+    finally:
+        data_store.release_copilot_turn(user["oid"], turn_id)
+
+
+@app.route(route="copilot/confirm/{confirmationId}", methods=["POST"])
+async def copilot_confirm_action(req: func.HttpRequest) -> func.HttpResponse:
+    """Execute one exact, previously proposed Snov.io MCP action once."""
+    user, err = _require_user(req)
+    if err:
+        return err
+    if not _parse_bool(_request_json(req).get("confirm"), default=False):
+        return _json_response({"error": "Explicit confirmation is required."}, 400)
+    confirmation_id = str((req.route_params or {}).get("confirmationId") or "")
+    row = data_store.consume_mcp_confirmation(confirmation_id, user["oid"])
+    if not row:
+        return _json_response({"error": "Confirmation not found, already used, or belongs to another user."}, 404)
+    if time.time() > float(row.get("expiresAt") or 0):
+        return _json_response({"error": "Confirmation expired. Ask Copilot to propose the action again."}, 410)
+    tool_name = str(row.get("toolName") or "")
+    policy = snovio_policy.classify_tool(tool_name)
+    internal_action = tool_name in {"app_internal_sync_leads", "app_internal_create_drip_campaign"}
+    if internal_action:
+        policy = snovio_policy.ToolPolicy("write", True)
+    if not policy.executable:
+        return _json_response({"error": "This Snov.io tool is not approved for execution."}, 403)
+    if policy.admin_only and user.get("role") != "admin":
+        return _json_response({"error": "This Snov.io action is restricted to app administrators."}, 403)
+    try:
+        arguments = json.loads(str(row.get("arguments") or "{}"))
+        if tool_name == "app_internal_sync_leads":
+            job_id = str(arguments.get("jobId") or "")
+            owner, owner_error = _require_job_owner(req, job_id)
+            if owner_error:
+                return owner_error
+            report, sync_error = _run_prospect_sync(_snovio_client(req), job_id, {
+                "dryRun": False,
+                "listName": str(arguments.get("listName") or "")[:50],
+                "autoCreateList": True,
+            })
+            if sync_error is not None:
+                return _json_response({"error": "Snov.io rejected the confirmed sync."}, 502)
+            return _json_response({"executed": True, "toolName": tool_name,
+                                   "summary": row.get("summary"), "result": report.get("summary")})
+        if tool_name == "app_internal_create_drip_campaign":
+            job_id = str(arguments.get("jobId") or "")
+            sender_accounts = _snovio_client(req).get_sender_accounts()
+            sender_ids = [str(sender_accounts[0].get("id"))] if sender_accounts else []
+            if not sender_ids:
+                return _json_response({"error": "No Snov.io sender account is connected."}, 409)
+            title = str(arguments.get("title") or "")[:120]
+            fake_req = _CopilotToolRequest(req, {
+                "dryRun": False, "campaignTitle": title, "listName": title,
+                "senderAccountIds": sender_ids, "delayDays": int(arguments.get("delayDays") or 3),
+            }, {"jobId": job_id})
+            response = await create_snovio_journey(fake_req)
+            payload = _response_json(response)
+            if int(getattr(response, "status_code", 500) or 500) >= 400:
+                return _json_response({"error": payload.get("error") or "Campaign creation failed."}, 502)
+            return _json_response({"executed": True, "toolName": tool_name,
+                                   "summary": row.get("summary"), "result": {
+                                       "campaignId": payload.get("campaignId"), "status": payload.get("status")}})
+
+        token = _get_valid_mcp_token(user["oid"])
+        if not token:
+            return _json_response({"error": "Snov.io Copilot is not connected. Open Settings to reconnect."}, 409)
+        result = snovio_mcp.SnovioMCPSession(token, APP_DISPLAY_NAME).call_tool(tool_name, arguments)
+        logger.info("Confirmed MCP action executed: tool=%s category=%s user=%s", tool_name, policy.category, user["email"])
+        return _json_response({
+            "executed": True,
+            "toolName": tool_name,
+            "summary": row.get("summary"),
+            "result": snovio_mcp.tool_result_text(result)[:9000],
+        })
+    except (json.JSONDecodeError, snovio_mcp.SnovioMCPError) as error:
+        logger.warning("Confirmed MCP action failed: tool=%s error=%s", tool_name, type(error).__name__)
+        return _json_response({"error": "Snov.io could not complete the confirmed action."}, 502)
 
 
 # ===========================================================================
@@ -3046,19 +3314,18 @@ async def get_snovio_analytics(req: func.HttpRequest) -> func.HttpResponse:
         return missing
     params = _query_params(req)
     campaign_id = params.get("campaignId", "")
-    filters = {}
+    date_to = params.get("dateTo") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_from = params.get("dateFrom") or (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+    filters = {"date_from": date_from, "date_to": date_to}
     if campaign_id:
         filters["campaign_id"] = campaign_id
-    if params.get("dateFrom"):
-        filters["date_from"] = params.get("dateFrom")
-    if params.get("dateTo"):
-        filters["date_to"] = params.get("dateTo")
     try:
         client = _snovio_client(req)
         response = {"analytics": client.get_campaign_analytics(filters)}
         if campaign_id:
             response["progress"] = client.get_campaign_progress(campaign_id)
             if _parse_bool(params.get("includeActivity"), default=False):
+                response["allReplies"] = client.get_campaign_all_replies(campaign_id)
                 response["activity"] = {
                     name: client.get_campaign_activity(name, campaign_id)
                     for name in ["sent", "opened", "clicked", "replies", "finished"]
@@ -3113,22 +3380,125 @@ async def change_snovio_recipient_status(req: func.HttpRequest) -> func.HttpResp
         return _json_response({"error": str(error)}, status_code)
 
 
-@app.route(route="snovio/webhook", methods=["POST"])
-async def receive_snovio_webhook(req: func.HttpRequest) -> func.HttpResponse:
-    """Receive Snov.io webhook events and persist them idempotently."""
-    if not SNOVIO_WEBHOOK_SECRET:
-        return _json_response({"error": "Snov.io webhook secret is not configured."}, 503)
-    params = _query_params(req)
-    provided = params.get("token") or getattr(req, "headers", {}).get("x-snovio-webhook-secret", "")
-    if not hmac.compare_digest(str(provided), SNOVIO_WEBHOOK_SECRET):
+@app.route(route="snovio/webhook/{callbackToken}", methods=["POST"])
+@app.queue_output(arg_name="webhookEvent", queue_name=SNOVIO_WEBHOOK_QUEUE, connection="AzureWebJobsStorage")
+async def receive_snovio_webhook(req: func.HttpRequest, webhookEvent) -> func.HttpResponse:
+    """Validate and enqueue a Snov.io event within its three-second deadline."""
+    config = data_store.get_snovio_webhook_config()
+    provided = str((req.route_params or {}).get("callbackToken") or "")
+    expected_hash = str((config or {}).get("tokenHash") or "")
+    provided_hash = hashlib.sha256(provided.encode("utf-8")).hexdigest()
+    if not expected_hash or not hmac.compare_digest(provided_hash, expected_hash):
         return _json_response({"error": "Invalid webhook token."}, 401)
-
-    payload = _request_json(req)
+    content_type = str((getattr(req, "headers", {}) or {}).get("content-type") or "").lower()
+    if "application/json" not in content_type:
+        return _json_response({"error": "Webhook content type must be application/json."}, 415)
+    body = req.get_body() or b""
+    if len(body) > MAX_WEBHOOK_SIZE_BYTES:
+        return _json_response({"error": "Webhook payload is too large."}, 413)
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _json_response({"error": "Webhook payload must be valid UTF-8 JSON."}, 400)
+    if not isinstance(payload, dict):
+        return _json_response({"error": "Webhook payload must be a JSON object."}, 400)
     canonical = json.dumps(payload, sort_keys=True)
     event_id = payload.get("event_id") or payload.get("id") or hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    webhookEvent.set(json.dumps({"eventId": str(event_id), "payload": payload}, separators=(",", ":")))
+    return _json_response({"accepted": True, "eventId": str(event_id)}, 202)
+
+
+@app.queue_trigger(arg_name="webhookEvent", queue_name=SNOVIO_WEBHOOK_QUEUE, connection="AzureWebJobsStorage")
+def process_snovio_webhook(webhookEvent) -> None:
+    """Persist queued events idempotently; Functions handles retries/poisoning."""
+    raw = webhookEvent.get_body()
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
+    event = json.loads(raw)
+    event_id = str(event.get("eventId") or "")
+    if not event_id:
+        raise ValueError("Queued Snov.io webhook has no eventId.")
     blob_name = f"snovio-webhooks/{event_id}.json"
-    _upload_blob(OUTPUT_CONTAINER, blob_name, json.dumps({"eventId": event_id, "payload": payload}, indent=2).encode("utf-8"))
-    return _json_response({"accepted": True, "eventId": event_id, "eventBlob": blob_name})
+    if _blob_exists(OUTPUT_CONTAINER, blob_name):
+        return
+    _upload_blob(OUTPUT_CONTAINER, blob_name, json.dumps(event, indent=2).encode("utf-8"))
+
+
+def _webhook_id(response: Any) -> str:
+    if isinstance(response, list) and response:
+        response = response[0]
+    if not isinstance(response, dict):
+        return ""
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    return str(data.get("id") or response.get("id") or "")
+
+
+@app.route(route="snovio/webhook-settings", methods=["GET"])
+async def get_snovio_webhook_settings(req: func.HttpRequest) -> func.HttpResponse:
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    config = data_store.get_snovio_webhook_config()
+    webhook_ids = []
+    try:
+        webhook_ids = json.loads(str((config or {}).get("webhookIds") or "[]"))
+    except json.JSONDecodeError:
+        pass
+    return _json_response({
+        "configured": bool((config or {}).get("tokenHash")),
+        "registeredEvents": len(webhook_ids),
+        "updatedAt": (config or {}).get("updatedAt"),
+        "queue": SNOVIO_WEBHOOK_QUEUE,
+    })
+
+
+@app.route(route="snovio/webhook-settings", methods=["POST"])
+async def configure_snovio_webhooks(req: func.HttpRequest) -> func.HttpResponse:
+    admin, err = _require_admin(req)
+    if err:
+        return err
+    missing = _snovio_required_response(req)
+    if missing:
+        return missing
+    origin = _public_origin(req)
+    if not origin.startswith("https://"):
+        return _json_response({"error": "PUBLIC_APP_ORIGIN must be configured before webhooks."}, 503)
+
+    callback_token = secrets.token_urlsafe(48)
+    endpoint_url = f"{origin}/api/snovio/webhook/{callback_token}"
+    client = _snovio_client(req)
+    created_ids: list[str] = []
+    try:
+        for event_object, event_action in DEFAULT_SNOVIO_WEBHOOK_EVENTS:
+            webhook_id = _webhook_id(client.create_webhook(event_object, event_action, endpoint_url))
+            if not webhook_id:
+                raise SnovioAPIError("Snov.io did not return a webhook id.")
+            created_ids.append(webhook_id)
+    except Exception as error:
+        for webhook_id in created_ids:
+            try:
+                client.delete_webhook(webhook_id)
+            except Exception:
+                pass
+        logger.warning("Webhook setup rolled back after %d registrations: %s", len(created_ids), type(error).__name__)
+        return _json_response({"error": "Snov.io webhook setup failed; partial registrations were rolled back."}, 502)
+
+    previous = data_store.get_snovio_webhook_config()
+    data_store.save_snovio_webhook_config(
+        hashlib.sha256(callback_token.encode("utf-8")).hexdigest(), created_ids
+    )
+    try:
+        old_ids = json.loads(str((previous or {}).get("webhookIds") or "[]"))
+    except json.JSONDecodeError:
+        old_ids = []
+    for webhook_id in old_ids:
+        if str(webhook_id) not in created_ids:
+            try:
+                client.delete_webhook(str(webhook_id))
+            except Exception:
+                logger.warning("Old Snov.io webhook cleanup failed: id=%s", webhook_id)
+    logger.info("Snov.io webhooks configured by %s: %d events", admin["email"], len(created_ids))
+    return _json_response({"configured": True, "registeredEvents": len(created_ids)}, 201)
 
 
 @app.route(route="snovio/webhooks", methods=["GET"])
