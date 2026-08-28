@@ -2,8 +2,10 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
@@ -16,10 +18,11 @@ import pytest
 
 
 class DummyHttpResponse:
-    def __init__(self, body=None, status_code=200, mimetype=None):
+    def __init__(self, body=None, status_code=200, mimetype=None, headers=None):
         self.body = body
         self.status_code = status_code
         self.mimetype = mimetype
+        self.headers = headers or {}
 
 
 _azure = ModuleType("azure")
@@ -31,7 +34,7 @@ _azure_functions.HttpRequest = MagicMock()
 
 _azure_durable = ModuleType("azure.durable_functions")
 _mock_dfapp_instance = MagicMock()
-for _decorator_name in ("route", "orchestration_trigger", "activity_trigger", "durable_client_input"):
+for _decorator_name in ("route", "orchestration_trigger", "activity_trigger", "durable_client_input", "queue_output", "queue_trigger"):
     getattr(_mock_dfapp_instance, _decorator_name).return_value = lambda f: f
 _azure_durable.DFApp = MagicMock(return_value=_mock_dfapp_instance)
 _azure_durable.DurableOrchestrationContext = MagicMock()
@@ -46,6 +49,7 @@ _azure_identity = ModuleType("azure.identity")
 _azure_identity.DefaultAzureCredential = MagicMock()
 
 _azure_core = ModuleType("azure.core")
+_azure_core.MatchConditions = MagicMock(IfNotModified="if-not-modified")
 _azure_core_exceptions = ModuleType("azure.core.exceptions")
 
 
@@ -54,6 +58,8 @@ class _ResourceNotFoundError(Exception):
 
 
 _azure_core_exceptions.ResourceNotFoundError = _ResourceNotFoundError
+_azure_core_exceptions.ResourceExistsError = type("ResourceExistsError", (Exception,), {})
+_azure_core_exceptions.ResourceModifiedError = type("ResourceModifiedError", (Exception,), {})
 
 _azure_data = ModuleType("azure.data")
 _azure_data_tables = ModuleType("azure.data.tables")
@@ -480,7 +486,11 @@ class TestSnovioMcpRoutes:
         assert saved["clientId"] == "client-42"
 
     def test_callback_exchanges_code_and_stores_tokens(self):
-        state_row = {"oid": "user-1", "codeVerifier": "ver", "redirectUri": "https://app.example.com/api/snovio/mcp/callback", "clientId": "client-42"}
+        state_row = {
+            "oid": "user-1", "codeVerifier": "ver",
+            "redirectUri": "https://app.example.com/api/snovio/mcp/callback", "clientId": "client-42",
+            "createdAt": datetime.now(timezone.utc).isoformat(),
+        }
         stored = {}
         with patch.object(fa.data_store, "pop_mcp_state", return_value=state_row), \
                 patch.object(fa.snovio_mcp, "exchange_code", return_value={"access_token": "at", "refresh_token": "rt", "expires_in": 3600}) as ex, \
@@ -633,15 +643,22 @@ class TestLeadSearchAndCopilotRoutes:
 
     def test_copilot_requires_user_message(self):
         with patch.object(fa, "_require_user", return_value=(self.USER, None)):
-            response = asyncio.run(fa.copilot_chat(self._request({"messages": []})))
+            response = asyncio.run(fa.copilot_chat(self._request({"messages": []}), MagicMock()))
         assert response.status_code == 400
 
     def test_copilot_returns_agent_reply(self):
+        async def fake_agent(*args, **kwargs):
+            return {"reply": "Hi there", "toolTrace": [], "confirmations": []}
         with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "reserve_snovio_rate_slot", return_value=0.0), \
+                patch.object(fa.data_store, "acquire_copilot_turn", return_value=True), \
+                patch.object(fa.data_store, "release_copilot_turn"), \
                 patch.object(fa, "_get_valid_mcp_token", return_value=None), \
                 patch.object(fa, "AzureOpenAI"), \
-                patch.object(fa.copilot, "run_agent", return_value={"reply": "Hi there", "toolTrace": []}) as ra:
-            response = asyncio.run(fa.copilot_chat(self._request({"messages": [{"role": "user", "content": "hello"}]})))
+                patch.object(fa.copilot, "run_agent_async", side_effect=fake_agent) as ra:
+            response = asyncio.run(fa.copilot_chat(
+                self._request({"messages": [{"role": "user", "content": "hello"}]}), MagicMock()
+            ))
         payload = json.loads(response.body)
         assert response.status_code == 200
         assert payload["reply"] == "Hi there"
@@ -1005,20 +1022,23 @@ class TestSnovioEndpoints:
         mock_client.create_prospect_list.assert_not_called()
         mock_client.add_prospect_to_list.assert_not_called()
 
-    @patch.object(fa, "_upload_blob")
-    def test_webhook_requires_shared_secret_and_persists_event(self, mock_upload):
+    def test_webhook_validates_token_and_enqueues_event(self):
         req = self._request(
             body={"event_object": "campaign_email", "event_action": "sent"},
-            params={"token": "secret"},
+            route_params={"callbackToken": "secret"},
+            headers={"content-type": "application/json"},
         )
+        output = MagicMock()
 
-        with patch.object(fa, "SNOVIO_WEBHOOK_SECRET", "secret"):
-            response = asyncio.run(fa.receive_snovio_webhook(req))
+        with patch.object(fa.data_store, "get_snovio_webhook_config", return_value={
+            "tokenHash": hashlib.sha256(b"secret").hexdigest(),
+        }):
+            response = asyncio.run(fa.receive_snovio_webhook(req, output))
         payload = json.loads(response.body)
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert payload["accepted"] is True
-        mock_upload.assert_called_once()
+        assert json.loads(output.set.call_args.args[0])["payload"]["event_action"] == "sent"
 
 
 class TestConfiguration:

@@ -17,7 +17,7 @@ import snovio_mcp
 
 logger = logging.getLogger("emailmvp.copilot")
 
-MAX_AGENT_STEPS = 8
+MAX_AGENT_STEPS = 12
 MAX_TOOL_RESULT_CHARS = 9000
 
 # Snov.io MCP tools the copilot may use (their own account, their own token).
@@ -44,37 +44,31 @@ MCP_TOOL_ALLOWLIST = {
 }
 
 SYSTEM_PROMPT = (
-    "You are the Cloudware Email Campaign Generator copilot. You help the signed-in "
-    "user manage Snov.io prospects, lists, and lead sourcing, and you answer questions "
-    "about their campaigns in this app.\n"
+    "You are the Email Campaign Generator copilot. You help the signed-in "
+    "user run campaigns end-to-end: source leads, draft emails from the app's templates, "
+    "review them, sync to Snov.io, and create drip campaigns \u2014 plus manage Snov.io "
+    "prospects and lists, and answer questions about their campaigns.\n"
     "Rules:\n"
     "- Snov.io tools act on the user's own Snov.io account. Prefer read operations; "
     "confirm before deleting anything the user did not explicitly name.\n"
-    "- You cannot generate emails, sync jobs, or create drip campaigns yourself; for "
-    "those, point the user to the campaign wizard (steps 1-4) and explain what to click.\n"
+    "- Workflow: when the user attaches a lead file the chat shows its jobId. Use "
+    "app__start_generation with their chosen template, poll app__get_job_status until "
+    "Completed, show 2-3 sample drafts via app__get_job_output, and ONLY after the user "
+    "explicitly approves in chat may you call app__sync_leads_to_snovio or "
+    "app__create_drip_campaign with confirm=true. Never set confirm=true without an "
+    "explicit go-ahead in the conversation.\n"
+    "- Campaigns are created as DRAFTS in Snov.io; nothing sends automatically.\n"
     "- Lists in this app map one-to-one to campaigns; each generated touch is stored "
     "in Subject_TouchN / Body_TouchN custom fields on prospects.\n"
     "- Be concise. Summarise tool results in plain language, never dump raw JSON.\n"
-    "- If Snov.io is not connected via OAuth, tell the user to click 'Connect Snov.io' "
-    "in step 4 of the wizard."
+    "- If Snov.io is not connected via OAuth, tell the user to open Settings and connect "
+    "the Snov.io Copilot connection."
 )
 
 
 def build_tool_specs(mcp_tools: list[dict[str, Any]], app_tools: dict[str, dict]) -> list[dict[str, Any]]:
-    """Convert MCP + app tool definitions into OpenAI function-calling specs."""
+    """Convert app-controlled tool definitions into OpenAI function specs."""
     specs: list[dict[str, Any]] = []
-    for tool in mcp_tools:
-        name = str(tool.get("name") or "")
-        if name not in MCP_TOOL_ALLOWLIST:
-            continue
-        specs.append({
-            "type": "function",
-            "function": {
-                "name": f"snovio__{name}",
-                "description": (tool.get("description") or "")[:1024],
-                "parameters": tool.get("inputSchema") or {"type": "object", "properties": {}},
-            },
-        })
     for name, definition in app_tools.items():
         specs.append({
             "type": "function",
@@ -95,16 +89,23 @@ def run_agent(
     app_tools: dict[str, dict],
     max_completion_tokens: int = 4096,
 ) -> dict[str, Any]:
-    """Run the tool-calling loop; returns {reply, toolTrace}."""
-    mcp_tools = []
-    if mcp_session is not None:
-        try:
-            mcp_tools = mcp_session.list_tools()
-        except snovio_mcp.SnovioMCPError as error:
-            logger.warning("Copilot could not list MCP tools: %s", error)
+    """Synchronous wrapper kept for callers without an event loop."""
+    import asyncio
+    return asyncio.run(run_agent_async(openai_client, deployment, history, mcp_session, app_tools, max_completion_tokens))
 
-    specs = build_tool_specs(mcp_tools, app_tools)
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+async def run_agent_async(
+    openai_client: Any,
+    deployment: str,
+    history: list[dict[str, str]],
+    mcp_session: "snovio_mcp.SnovioMCPSession | None",
+    app_tools: dict[str, dict],
+    max_completion_tokens: int = 4096,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> dict[str, Any]:
+    """Run the tool-calling loop; returns {reply, toolTrace}."""
+    specs = build_tool_specs([], app_tools)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if mcp_session is None:
         messages.append({
             "role": "system",
@@ -113,6 +114,7 @@ def run_agent(
     messages.extend(history)
 
     trace: list[dict[str, Any]] = []
+    confirmations: list[dict[str, Any]] = []
     for _ in range(MAX_AGENT_STEPS):
         response = openai_client.chat.completions.create(
             model=deployment,
@@ -123,7 +125,7 @@ def run_agent(
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
-            return {"reply": message.content or "", "toolTrace": trace}
+            return {"reply": message.content or "", "toolTrace": trace, "confirmations": confirmations}
 
         messages.append({
             "role": "assistant",
@@ -143,31 +145,39 @@ def run_agent(
                 arguments = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
                 arguments = {}
-            result = _dispatch(name, arguments, mcp_session, app_tools)
-            trace.append({"tool": name, "arguments": arguments, "result": result[:400]})
+            result = await _dispatch(name, arguments, mcp_session, app_tools)
+            trace.append({"tool": name, "status": "completed"})
+            try:
+                result_payload = json.loads(result)
+                if isinstance(result_payload, dict) and result_payload.get("confirmationRequired"):
+                    confirmations.append({
+                        "confirmationId": result_payload.get("confirmationId"),
+                        "toolName": result_payload.get("toolName"),
+                        "category": result_payload.get("category"),
+                        "summary": result_payload.get("summary"),
+                        "expiresAt": result_payload.get("expiresAt"),
+                    })
+            except (json.JSONDecodeError, TypeError):
+                pass
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result[:MAX_TOOL_RESULT_CHARS]})
 
     return {
         "reply": "I hit my step limit before finishing — please break the request into smaller steps.",
         "toolTrace": trace,
+        "confirmations": confirmations,
     }
 
 
-def _dispatch(
+async def _dispatch(
     name: str,
     arguments: dict[str, Any],
     mcp_session: "snovio_mcp.SnovioMCPSession | None",
     app_tools: dict[str, dict],
 ) -> str:
+    import inspect
     try:
         if name.startswith("snovio__"):
-            if mcp_session is None:
-                return "TOOL ERROR: Snov.io is not connected."
-            tool_name = name[len("snovio__"):]
-            if tool_name not in MCP_TOOL_ALLOWLIST:
-                return "TOOL ERROR: tool not permitted."
-            result = mcp_session.call_tool(tool_name, arguments)
-            return snovio_mcp.tool_result_text(result) or "(empty result)"
+            return "TOOL ERROR: Direct MCP calls are not permitted; use the app-controlled catalog tools."
         if name.startswith("app__"):
             tool_name = name[len("app__"):]
             definition = app_tools.get(tool_name)
@@ -175,6 +185,8 @@ def _dispatch(
                 return "TOOL ERROR: unknown app tool."
             handler: Callable[[dict[str, Any]], Any] = definition["handler"]
             outcome = handler(arguments)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
             return json.dumps(outcome, default=str)[:MAX_TOOL_RESULT_CHARS]
         return "TOOL ERROR: unknown tool namespace."
     except snovio_mcp.SnovioMCPError as error:

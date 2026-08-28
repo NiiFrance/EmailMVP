@@ -7,12 +7,15 @@ Uses the same managed-identity pattern as the blob helpers in function_app.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
-from azure.core.exceptions import ResourceNotFoundError
+from azure.core import MatchConditions
+from azure.core.exceptions import ResourceExistsError, ResourceModifiedError, ResourceNotFoundError
 from azure.data.tables import TableServiceClient, UpdateMode
 from azure.identity import DefaultAzureCredential
 
@@ -180,6 +183,81 @@ def delete_snovio_creds(oid: str) -> None:
         pass
 
 
+def save_snovio_access_token(
+    credential_key: str, token_value: str, expires_at: float, token_encrypted: bool
+) -> None:
+    _table(SNOVIO_CREDS_TABLE).upsert_entity(
+        {
+            "PartitionKey": "snovioresttoken",
+            "RowKey": credential_key,
+            "accessToken": token_value,
+            "expiresAt": float(expires_at),
+            "tokenEncrypted": token_encrypted,
+            "updatedAt": _now_iso(),
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def get_snovio_access_token(credential_key: str) -> dict | None:
+    try:
+        return _entity_to_dict(_table(SNOVIO_CREDS_TABLE).get_entity("snovioresttoken", credential_key))
+    except ResourceNotFoundError:
+        return None
+
+
+def reserve_snovio_rate_slot(credential_key: str, requests_per_minute: int) -> float:
+    """Atomically reserve a fixed-window request slot; return seconds to wait."""
+    if requests_per_minute <= 0:
+        return 0.0
+    table = _table(SNOVIO_CREDS_TABLE)
+    now = time.time()
+    for _ in range(8):
+        try:
+            entity = table.get_entity("snovioratelimit", credential_key)
+        except ResourceNotFoundError:
+            try:
+                table.create_entity({
+                    "PartitionKey": "snovioratelimit",
+                    "RowKey": credential_key,
+                    "windowStartedAt": now,
+                    "requestCount": 1,
+                    "updatedAt": _now_iso(),
+                })
+                return 0.0
+            except ResourceExistsError:
+                continue
+
+        window_started_at = float(entity.get("windowStartedAt") or now)
+        request_count = int(entity.get("requestCount") or 0)
+        elapsed = now - window_started_at
+        if elapsed >= 60 or elapsed < 0:
+            window_started_at = now
+            request_count = 0
+            elapsed = 0
+        if request_count >= requests_per_minute:
+            return max(0.05, 60 - elapsed)
+
+        updated = _entity_to_dict(entity)
+        updated.update({
+            "windowStartedAt": window_started_at,
+            "requestCount": request_count + 1,
+            "updatedAt": _now_iso(),
+        })
+        etag = getattr(entity, "metadata", {}).get("etag")
+        try:
+            table.update_entity(
+                updated,
+                mode=UpdateMode.REPLACE,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+            return 0.0
+        except ResourceModifiedError:
+            continue
+    return 0.25
+
+
 # ---------------------------------------------------------------------------
 # Snov.io MCP OAuth — client registration, per-user tokens, and CSRF states.
 # Stored in the SnovioCreds table under dedicated partitions.
@@ -261,6 +339,124 @@ def delete_mcp_tokens(oid: str) -> None:
     try:
         _table(SNOVIO_CREDS_TABLE).delete_entity("snoviomcp", oid)
     except ResourceNotFoundError:
+        pass
+
+
+def save_mcp_confirmation(
+    confirmation_id: str,
+    oid: str,
+    tool_name: str,
+    arguments: dict,
+    summary: str,
+    category: str,
+    expires_at: float,
+) -> None:
+    row_key = hashlib.sha256(confirmation_id.encode("utf-8")).hexdigest()
+    _table(SNOVIO_CREDS_TABLE).create_entity({
+        "PartitionKey": "snoviomcpconfirm",
+        "RowKey": row_key,
+        "oid": oid,
+        "toolName": tool_name,
+        "arguments": json.dumps(arguments, separators=(",", ":"), sort_keys=True),
+        "summary": summary,
+        "category": category,
+        "expiresAt": float(expires_at),
+        "createdAt": _now_iso(),
+    })
+
+
+def consume_mcp_confirmation(confirmation_id: str, oid: str) -> dict | None:
+    """Consume a confirmation once, without exposing its raw token in storage."""
+    row_key = hashlib.sha256(confirmation_id.encode("utf-8")).hexdigest()
+    table = _table(SNOVIO_CREDS_TABLE)
+    try:
+        entity = table.get_entity("snoviomcpconfirm", row_key)
+    except ResourceNotFoundError:
+        return None
+    if str(entity.get("oid") or "") != oid:
+        return None
+    etag = getattr(entity, "metadata", {}).get("etag")
+    try:
+        table.delete_entity(
+            "snoviomcpconfirm",
+            row_key,
+            etag=etag,
+            match_condition=MatchConditions.IfNotModified,
+        )
+    except (ResourceNotFoundError, ResourceModifiedError):
+        return None
+    return _entity_to_dict(entity)
+
+
+def save_snovio_webhook_config(token_hash: str, webhook_ids: list[str] | None = None) -> None:
+    _table(SNOVIO_CREDS_TABLE).upsert_entity(
+        {
+            "PartitionKey": "snoviowebhook",
+            "RowKey": "active",
+            "tokenHash": token_hash,
+            "webhookIds": json.dumps(webhook_ids or []),
+            "updatedAt": _now_iso(),
+        },
+        mode=UpdateMode.REPLACE,
+    )
+
+
+def get_snovio_webhook_config() -> dict | None:
+    try:
+        return _entity_to_dict(_table(SNOVIO_CREDS_TABLE).get_entity("snoviowebhook", "active"))
+    except ResourceNotFoundError:
+        return None
+
+
+def acquire_copilot_turn(oid: str, lock_id: str, ttl_seconds: int = 180) -> bool:
+    table = _table(SNOVIO_CREDS_TABLE)
+    row_key = hashlib.sha256(oid.encode("utf-8")).hexdigest()
+    now = time.time()
+    for _ in range(4):
+        try:
+            table.create_entity({
+                "PartitionKey": "copilotturn",
+                "RowKey": row_key,
+                "oid": oid,
+                "lockId": lock_id,
+                "expiresAt": now + ttl_seconds,
+                "createdAt": _now_iso(),
+            })
+            return True
+        except ResourceExistsError:
+            try:
+                entity = table.get_entity("copilotturn", row_key)
+            except ResourceNotFoundError:
+                continue
+            if float(entity.get("expiresAt") or 0) > now:
+                return False
+            etag = getattr(entity, "metadata", {}).get("etag")
+            try:
+                table.delete_entity(
+                    "copilotturn", row_key, etag=etag,
+                    match_condition=MatchConditions.IfNotModified,
+                )
+            except (ResourceNotFoundError, ResourceModifiedError):
+                continue
+    return False
+
+
+def release_copilot_turn(oid: str, lock_id: str) -> None:
+    table = _table(SNOVIO_CREDS_TABLE)
+    row_key = hashlib.sha256(oid.encode("utf-8")).hexdigest()
+    try:
+        entity = table.get_entity("copilotturn", row_key)
+    except ResourceNotFoundError:
+        return
+    if str(entity.get("lockId") or "") != lock_id:
+        return
+    etag = getattr(entity, "metadata", {}).get("etag")
+    try:
+        table.delete_entity(
+            "copilotturn", row_key, etag=etag,
+            match_condition=MatchConditions.IfNotModified,
+        )
+    except (ResourceNotFoundError, ResourceModifiedError):
         pass
 
 

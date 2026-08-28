@@ -137,8 +137,9 @@ def _http_json(url: str, body: bytes, headers: dict[str, str]) -> dict[str, Any]
 class SnovioMCPSession:
     """One short-lived MCP session: initialize once, then list/call tools."""
 
-    def __init__(self, access_token: str):
+    def __init__(self, access_token: str, client_name: str = "Email Campaign Generator"):
         self.access_token = access_token
+        self.client_name = client_name
         self.session_id: str | None = None
         self._request_id = 0
         self._initialized = False
@@ -168,7 +169,7 @@ class SnovioMCPSession:
         self._rpc("initialize", {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
-            "clientInfo": {"name": "cloudware-email-campaign-generator", "version": "1.0"},
+            "clientInfo": {"name": self.client_name, "version": "1.0"},
         })
         self._notify("notifications/initialized")
         self._initialized = True
