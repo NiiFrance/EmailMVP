@@ -654,6 +654,22 @@ class TestLeadSearchAndCopilotRoutes:
         assert "list ID is required" in result["error"]
         session.call_tool.assert_not_called()
 
+    def test_catalog_search_ranks_partial_natural_language_matches(self):
+        session = MagicMock()
+        session.list_tools.return_value = [
+            {"name": "app_create_list", "description": "Create a prospect list"},
+            {"name": "app_list_prospects", "description": "List prospects in a people list"},
+            {"name": "campaign_list", "description": "List campaigns"},
+        ]
+        tools = fa._copilot_app_tools(self.USER, self._request(), mcp_session=session)
+
+        result = tools["search_snovio_tools"]["handler"]({
+            "query": "inspect people in a list",
+        })
+
+        assert result["tools"][0]["name"] == "app_list_prospects"
+        assert result["total"] == 3
+
     def test_confirm_rejects_mcp_application_error(self):
         row = {
             "toolName": "app_create_list",
