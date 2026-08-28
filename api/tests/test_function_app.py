@@ -802,6 +802,22 @@ class TestCopilotActionTools:
         assert result["tools"][0]["category"] == "read"
         assert result["tools"][1]["requiresConfirmation"] is True
 
+    def test_catalog_search_ranks_partial_natural_language_matches(self):
+        session = MagicMock()
+        session.list_tools.return_value = [
+            {"name": "app_create_list", "description": "Create a prospect list"},
+            {"name": "app_list_prospects", "description": "List prospects in a people list"},
+            {"name": "campaign_list", "description": "List campaigns"},
+        ]
+        tools = self._tools(mcp_session=session)
+
+        result = tools["search_snovio_tools"]["handler"]({
+            "query": "inspect people in a list",
+        })
+
+        assert result["tools"][0]["name"] == "app_list_prospects"
+        assert result["total"] == 3
+
     def test_read_mcp_tool_executes_without_confirmation(self):
         session = MagicMock()
         session.list_tools.return_value = [{"name": "app_get_lists", "description": "", "inputSchema": {}}]
