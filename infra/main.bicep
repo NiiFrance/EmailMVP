@@ -76,6 +76,12 @@ param snovioMcpStateTtlSeconds string = '600'
 @description('Storage Queue name for accepted Snov.io webhook events')
 param snovioWebhookQueue string = 'snovio-webhooks'
 
+@description('Maximum Copilot requests per signed-in user per minute')
+param copilotRequestsPerMinute string = '10'
+
+@description('Seconds before an abandoned Copilot turn lease expires')
+param copilotTurnTtlSeconds string = '180'
+
 @description('Default number of days between Snov.io journey campaign touches')
 param snovioDefaultDelayDays string = '3'
 
@@ -123,6 +129,8 @@ var snovioAppSettings = concat([
   { name: 'SNOVIO_SESSION_TTL_SECONDS', value: snovioSessionTtlSeconds }
   { name: 'SNOVIO_MCP_STATE_TTL_SECONDS', value: snovioMcpStateTtlSeconds }
   { name: 'SNOVIO_WEBHOOK_QUEUE', value: snovioWebhookQueue }
+  { name: 'COPILOT_REQUESTS_PER_MINUTE', value: copilotRequestsPerMinute }
+  { name: 'COPILOT_TURN_TTL_SECONDS', value: copilotTurnTtlSeconds }
   { name: 'SNOVIO_DEFAULT_DELAY_DAYS', value: snovioDefaultDelayDays }
   { name: 'SNOVIO_CAMPAIGN_TIMEZONE', value: snovioCampaignTimezone }
   { name: 'SNOVIO_CAMPAIGN_ARCHIVE_MONTHS', value: snovioCampaignArchiveMonths }
