@@ -97,7 +97,8 @@ The Reliance deployment (`main`) carries its own fully Reliance-branded prompt s
 | `/api/snovio/options` | `GET` | Lists Snov.io lists, campaigns, sender accounts, schedules, custom fields, and template mappings |
 | `/api/snovio/preflight` | `GET` | Estimates credits and request volume before Snov.io actions |
 | `/api/jobs/{jobId}/snovio/verify` | `POST` | Starts email verification for generated rows |
-| `/api/jobs/{jobId}/snovio/sync` | `POST` | Dry-runs or syncs eligible rows into a Snov.io list |
+| `/api/jobs/{jobId}/snovio/sync` | `POST` | Dry-runs immediately; live sync returns `202` and queues the long-running operation |
+| `/api/jobs/{jobId}/snovio/sync/{operationId}` | `GET` | Owner-only queued sync status and completed report |
 | `/api/jobs/{jobId}/snovio/journey` | `POST` | Dry-runs or builds a multi-touch draft drip campaign from the generated emails |
 | `/api/jobs/{jobId}/snovio/enrich` | `POST` | Dry-runs or starts optional Snov.io enrichment tasks |
 | `/api/snovio/analytics` | `GET` | Proxies campaign analytics and progress |
@@ -249,7 +250,7 @@ pip install -r requirements.txt
 
 Snov.io settings are optional. If they are absent, `/api/snovio/status` reports the integration as disabled and the generation/download workflow continues unchanged.
 
-Snov.io sync is explicitly user-triggered after generation. Dry-run mode is available from the UI and backend, active campaign sync requires `confirmActiveCampaign=true`, and recipient verification is required by default before live sync.
+Snov.io sync is explicitly user-triggered after generation. Dry-run mode is immediate. Live sync is queued and the browser polls an owner-scoped status endpoint, so large jobs can outlive the Static Web Apps request timeout safely. Duplicate clicks reuse the active operation, and a created list ID is persisted before prospects are added so retries do not create another list. Active campaign sync requires `confirmActiveCampaign=true`; recipient verification is opt-in.
 
 The app campaign template selected before generation controls the emails GPT creates. The Snov.io campaign selected after generation is optional outreach context. When a Snov.io campaign is selected and its API payload includes `list_id`, sync uses that campaign list automatically. If no list is selected or inferred, the UI can request `autoCreateList=true`; dry-run reports the planned list name, while live sync creates a Snov.io prospect list with `POST /v1/lists` before adding prospects.
 
