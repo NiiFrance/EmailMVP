@@ -19,7 +19,7 @@ import base64
 import hashlib
 import hmac
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 import azure.functions as func
 import azure.durable_functions as df
@@ -102,6 +102,7 @@ SNOVIO_CAMPAIGN_ARCHIVE_MONTHS = int(os.environ.get("SNOVIO_CAMPAIGN_ARCHIVE_MON
 SNOVIO_MCP_STATE_TTL_SECONDS = int(os.environ.get("SNOVIO_MCP_STATE_TTL_SECONDS", "600"))
 APP_DISPLAY_NAME = os.environ.get("APP_DISPLAY_NAME", "Cloudware Email Campaign Generator").strip()
 SNOVIO_WEBHOOK_QUEUE = os.environ.get("SNOVIO_WEBHOOK_QUEUE", "snovio-webhooks")
+SNOVIO_SYNC_QUEUE = os.environ.get("SNOVIO_SYNC_QUEUE", "snovio-sync")
 COPILOT_REQUESTS_PER_MINUTE = int(os.environ.get("COPILOT_REQUESTS_PER_MINUTE", "10"))
 COPILOT_TURN_TTL_SECONDS = int(os.environ.get("COPILOT_TURN_TTL_SECONDS", "180"))
 MAX_CSV_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -359,8 +360,7 @@ def _snovio_credential_key(client_id: str, client_secret: str) -> str:
     return hashlib.sha256(f"{client_id}\0{client_secret}".encode("utf-8")).hexdigest()
 
 
-def _snovio_client(req: func.HttpRequest | None = None) -> SnovioClient:
-    client_id, client_secret, _ = _resolve_snovio_credentials(req)
+def _build_snovio_client(client_id: str, client_secret: str) -> SnovioClient:
     credential_key = _snovio_credential_key(client_id, client_secret)
 
     def load_token() -> tuple[str, float] | None:
@@ -401,6 +401,24 @@ def _snovio_client(req: func.HttpRequest | None = None) -> SnovioClient:
         token_saver=save_token,
         rate_reserver=reserve_rate_slot,
     )
+
+
+def _snovio_client(req: func.HttpRequest | None = None) -> SnovioClient:
+    client_id, client_secret, _ = _resolve_snovio_credentials(req)
+    return _build_snovio_client(client_id, client_secret)
+
+
+def _snovio_client_for_oid(oid: str) -> SnovioClient:
+    """Build a REST client for a queued operation without browser headers."""
+    row = data_store.get_snovio_creds(oid)
+    if row:
+        client_id = str(row.get("clientId") or "")
+        client_secret = _decrypt_session_secret(
+            str(row.get("clientSecret") or ""), bool(row.get("secretEncrypted"))
+        )
+        if client_id and client_secret:
+            return _build_snovio_client(client_id, client_secret)
+    return _build_snovio_client(SNOVIO_CLIENT_ID, SNOVIO_CLIENT_SECRET)
 
 
 # ---------------------------------------------------------------------------
@@ -2110,6 +2128,15 @@ def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None, m
             return {"error": "This Snov.io tool has not been security-reviewed yet."}
         if policy.admin_only and user.get("role") != "admin":
             return {"error": "This Snov.io action is restricted to app administrators."}
+        if tool_name in {"app_add_prospects_to_list", "app_database_search_prospects_add_to_list"}:
+            list_id = tool_arguments.get("list_id") or tool_arguments.get("listId")
+            if not list_id:
+                return {
+                    "error": (
+                        "A concrete Snov.io list ID is required. Create the list with "
+                        "app_create_list first, wait for its confirmed result, then add prospects."
+                    )
+                }
         if policy.requires_confirmation:
             confirmation_id = secrets.token_urlsafe(32)
             expires_at = time.time() + 600
@@ -2127,6 +2154,9 @@ def _copilot_app_tools(user: dict, req: func.HttpRequest, durable_client=None, m
                 "expiresAt": expires_at,
             }
         result = mcp_session.call_tool(tool_name, tool_arguments)
+        if result.get("isError"):
+            detail = snovio_mcp.tool_result_text(result).removeprefix("TOOL ERROR: ").strip()
+            return {"error": detail[:1000] or "Snov.io rejected the tool call."}
         return {"toolName": tool_name, "result": snovio_mcp.tool_result_text(result)[:9000]}
 
     def list_templates_tool(_args):
@@ -2474,6 +2504,13 @@ async def copilot_confirm_action(req: func.HttpRequest) -> func.HttpResponse:
         return _json_response({"error": "This Snov.io action is restricted to app administrators."}, 403)
     try:
         arguments = json.loads(str(row.get("arguments") or "{}"))
+        if tool_name in {"app_add_prospects_to_list", "app_database_search_prospects_add_to_list"}:
+            list_id = arguments.get("list_id") or arguments.get("listId")
+            if not list_id:
+                return _json_response({
+                    "error": "The confirmed action is missing a Snov.io list ID. Ask Copilot to create the list first.",
+                    "executed": False,
+                }, 400)
         if tool_name == "app_internal_sync_leads":
             job_id = str(arguments.get("jobId") or "")
             owner, owner_error = _require_job_owner(req, job_id)
@@ -2511,6 +2548,14 @@ async def copilot_confirm_action(req: func.HttpRequest) -> func.HttpResponse:
         if not token:
             return _json_response({"error": "Snov.io Copilot is not connected. Open Settings to reconnect."}, 409)
         result = snovio_mcp.SnovioMCPSession(token, APP_DISPLAY_NAME).call_tool(tool_name, arguments)
+        if result.get("isError"):
+            detail = snovio_mcp.tool_result_text(result).removeprefix("TOOL ERROR: ").strip()
+            logger.warning("Confirmed MCP action rejected: tool=%s category=%s", tool_name, policy.category)
+            return _json_response({
+                "error": detail[:1000] or "Snov.io rejected the confirmed action.",
+                "toolName": tool_name,
+                "executed": False,
+            }, 502)
         logger.info("Confirmed MCP action executed: tool=%s category=%s user=%s", tool_name, policy.category, user["email"])
         return _json_response({
             "executed": True,
@@ -2865,7 +2910,12 @@ async def get_snovio_verification_result(req: func.HttpRequest) -> func.HttpResp
         return _json_response({"error": str(error), "statusCode": error.status_code}, 502)
 
 
-def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tuple[dict, func.HttpResponse | None]:
+def _run_prospect_sync(
+    client: SnovioClient,
+    job_id: str,
+    payload: dict,
+    on_list_created: Callable[[str, Any], None] | None = None,
+) -> tuple[dict, func.HttpResponse | None]:
     """Resolve the target list, evaluate eligibility, and sync prospects.
 
     Shared by the sync and journey routes. Returns ``(report, error_response)``; when
@@ -2892,15 +2942,14 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
     campaigns = client.get_user_campaigns() if campaign_id else []
     campaign = find_campaign(campaigns, campaign_id) if campaign_id else None
     campaign_list_id = _snovio_campaign_list_id(campaign)
-    list_source = "selected" if list_id else ""
+    created_list = payload.get("_createdList")
+    list_source = "created" if list_id and created_list else ("selected" if list_id else "")
     if not list_id and campaign_list_id:
         list_id = campaign_list_id
         list_source = "campaign"
 
     list_name = _snovio_list_name(payload, job_id)
     planned_list_creation = not list_id and auto_create_list
-    created_list = None
-
     if not list_id and not auto_create_list:
         return {}, _json_response({
             "error": "listId is required unless autoCreateList=true or the selected campaign includes list_id.",
@@ -2955,6 +3004,8 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
         if not list_id:
             return {}, _json_response({"error": "Snov.io list was created but no list ID was returned.", "createdList": created_list}, 502)
         list_source = "created"
+        if on_list_created is not None:
+            on_list_created(list_id, created_list)
 
     for row_info, row_report in sync_candidates:
         row_index = row_info["rowIndex"]
@@ -3038,17 +3089,53 @@ def _run_prospect_sync(client: SnovioClient, job_id: str, payload: dict) -> tupl
 
 
 @app.route(route="jobs/{jobId}/snovio/sync", methods=["POST"])
-async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
+@app.queue_output(arg_name="syncOperation", queue_name=SNOVIO_SYNC_QUEUE, connection="AzureWebJobsStorage")
+async def sync_job_to_snovio(req: func.HttpRequest, syncOperation=None) -> func.HttpResponse:
     """Dry-run or execute post-generation prospect sync into a Snov.io list."""
     missing = _snovio_required_response(req)
     if missing:
         return missing
 
     job_id = req.route_params.get("jobId", "")
-    _, owner_err = _require_job_owner(req, job_id)
+    owner, owner_err = _require_job_owner(req, job_id)
     if owner_err:
         return owner_err
     payload = _request_json(req)
+    if not _parse_bool(payload.get("dryRun"), default=True):
+        if syncOperation is None:
+            return _json_response({"error": "The Snov.io sync queue is unavailable."}, 503)
+        operation_id = uuid.uuid4().hex
+        request_blob = f"snovio-sync-operations/{owner['oid']}/{operation_id}.json"
+        claim = data_store.claim_snovio_sync_operation(
+            owner["oid"], job_id, operation_id, request_blob
+        )
+        if not claim.get("acquired"):
+            existing_id = str(claim.get("operationId") or "")
+            if existing_id:
+                return _json_response({
+                    "operationId": existing_id,
+                    "status": str(claim.get("status") or "queued"),
+                    "statusUrl": f"/api/jobs/{job_id}/snovio/sync/{existing_id}",
+                    "message": "This sync is already in progress.",
+                }, 202)
+            return _json_response({"error": "The sync could not be queued. Please try again."}, 409)
+        _upload_blob(
+            OUTPUT_CONTAINER,
+            request_blob,
+            json.dumps({**payload, "dryRun": False}).encode("utf-8"),
+        )
+        syncOperation.set(json.dumps({
+            "operationId": operation_id,
+            "oid": owner["oid"],
+            "jobId": job_id,
+            "requestBlob": request_blob,
+        }, separators=(",", ":")))
+        return _json_response({
+            "operationId": operation_id,
+            "status": "queued",
+            "statusUrl": f"/api/jobs/{job_id}/snovio/sync/{operation_id}",
+            "message": "Sync started. You can leave this screen while it finishes.",
+        }, 202)
     try:
         client = _snovio_client(req)
         report, error = _run_prospect_sync(client, job_id, payload)
@@ -3061,6 +3148,88 @@ async def sync_job_to_snovio(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as error:
         logger.exception("Snov.io sync failed for %s", job_id)
         return _json_response({"error": f"Snov.io sync failed: {str(error)}"}, 500)
+
+
+@app.queue_trigger(arg_name="syncOperation", queue_name=SNOVIO_SYNC_QUEUE, connection="AzureWebJobsStorage")
+def process_snovio_sync(syncOperation) -> None:
+    """Execute a queued Snov.io sync and persist its terminal report on the job."""
+    message = json.loads(syncOperation.get_body().decode("utf-8"))
+    operation_id = str(message.get("operationId") or "")
+    oid = str(message.get("oid") or "")
+    job_id = str(message.get("jobId") or "")
+    request_blob = str(message.get("requestBlob") or "")
+    if not all((operation_id, oid, job_id, request_blob)):
+        logger.error("Discarding malformed Snov.io sync queue message")
+        return
+    job = data_store.get_job(oid, job_id)
+    if not job or str(job.get("snovioSyncOperationId") or "") != operation_id:
+        logger.info("Ignoring stale Snov.io sync operation %s", operation_id)
+        return
+    if str(job.get("snovioSyncStatus") or "") == "completed":
+        return
+
+    data_store.update_job(oid, job_id, {
+        "snovioSyncStatus": "running",
+        "snovioSyncUpdatedAt": datetime.now(timezone.utc).isoformat(),
+    })
+    try:
+        payload = json.loads(_download_blob(OUTPUT_CONTAINER, request_blob).decode("utf-8"))
+        def persist_created_list(list_id: str, created_list: Any) -> None:
+            payload["listId"] = list_id
+            payload["_createdList"] = created_list
+            _upload_blob(OUTPUT_CONTAINER, request_blob, json.dumps(payload).encode("utf-8"))
+
+        report, error = _run_prospect_sync(
+            _snovio_client_for_oid(oid), job_id, payload, persist_created_list
+        )
+        if error is not None:
+            error_payload = _response_json(error)
+            raise RuntimeError(str(error_payload.get("error") or "Snov.io rejected the sync."))
+        report_blob = _upload_snovio_report(job_id, f"sync-{operation_id}", report)
+        data_store.update_job(oid, job_id, {
+            "snovioSyncStatus": "completed",
+            "snovioSyncReportBlob": report_blob,
+            "snovioSyncError": "",
+            "snovioSyncUpdatedAt": datetime.now(timezone.utc).isoformat(),
+        })
+        logger.info("Queued Snov.io sync completed: operation=%s job=%s", operation_id, job_id)
+    except Exception as error:
+        logger.exception("Queued Snov.io sync failed: operation=%s job=%s", operation_id, job_id)
+        data_store.update_job(oid, job_id, {
+            "snovioSyncStatus": "failed",
+            "snovioSyncError": str(error)[:1000],
+            "snovioSyncUpdatedAt": datetime.now(timezone.utc).isoformat(),
+        })
+
+
+@app.route(route="jobs/{jobId}/snovio/sync/{operationId}", methods=["GET"])
+async def get_snovio_sync_status(req: func.HttpRequest) -> func.HttpResponse:
+    """Return one owner-scoped queued sync status and its completed report."""
+    job_id = str((req.route_params or {}).get("jobId") or "")
+    operation_id = str((req.route_params or {}).get("operationId") or "")
+    owner, owner_error = _require_job_owner(req, job_id)
+    if owner_error:
+        return owner_error
+    job = owner["job"]
+    if not operation_id or str(job.get("snovioSyncOperationId") or "") != operation_id:
+        return _json_response({"error": "Sync operation not found."}, 404)
+    status = str(job.get("snovioSyncStatus") or "queued")
+    response = {
+        "operationId": operation_id,
+        "status": status,
+        "updatedAt": job.get("snovioSyncUpdatedAt"),
+    }
+    if status == "failed":
+        response["error"] = str(job.get("snovioSyncError") or "Snov.io sync failed.")
+    if status == "completed":
+        report_blob = str(job.get("snovioSyncReportBlob") or "")
+        if not report_blob:
+            return _json_response({"error": "The sync completed without a report."}, 500)
+        try:
+            response["report"] = json.loads(_download_blob(OUTPUT_CONTAINER, report_blob).decode("utf-8"))
+        except Exception:
+            return _json_response({"error": "The completed sync report is unavailable."}, 500)
+    return _json_response(response)
 
 
 @app.route(route="jobs/{jobId}/snovio/journey", methods=["POST"])

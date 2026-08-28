@@ -1249,9 +1249,38 @@
     }
     async function postJson(url, payload) {
         const response = await snovioFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        const data = await response.json();
+        const data = await readApiResponse(response);
         if (!response.ok) throw new Error(data.error || "Snov.io request failed.");
         return data;
+    }
+
+    async function readApiResponse(response) {
+        const text = await response.text();
+        if (!text) return {};
+        try {
+            return JSON.parse(text);
+        } catch (_error) {
+            const gatewayFailure = /backend call failure|upstream|gateway|timed?\s*out/i.test(text);
+            throw new Error(gatewayFailure
+                ? "The operation is still taking longer than the web gateway allows. Check its status before retrying."
+                : `The server returned an unreadable response (HTTP ${response.status}). Please try again.`);
+        }
+    }
+
+    async function waitForSnovioSync(statusUrl) {
+        for (let attempt = 0; attempt < 450; attempt += 1) {
+            const response = await snovioFetch(statusUrl);
+            const operation = await readApiResponse(response);
+            if (!response.ok) throw new Error(operation.error || "Could not check the Snov.io sync status.");
+            if (operation.status === "completed") return operation.report || {};
+            if (operation.status === "failed") throw new Error(operation.error || "Snov.io could not complete the sync.");
+            renderSnovioReport("Sync in progress", {
+                status: operation.status,
+                message: "Snov.io is processing the leads in the background. You can leave this screen safely.",
+            });
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        throw new Error("The sync is still running. Refresh this campaign later to check the final report.");
     }
     function selectedCampaign() {
         const campaignId = snovioCampaignSelect.value;
@@ -1328,7 +1357,11 @@
         setSnovioBusy(true);
         try {
             const payload = { dryRun, listId, campaignId: snovioCampaignSelect.value, campaignStatus: campaign ? campaign.status : "", autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", confirmActiveCampaign: snovioConfirmActive.checked, requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
-            const report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
+            let report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
+            if (!dryRun && report.statusUrl) {
+                renderSnovioReport("Sync queued", report);
+                report = await waitForSnovioSync(report.statusUrl);
+            }
             if (!dryRun && report.createdList) { exitNewListMode(); await loadSnovioOptions(); if (report.listId) snovioListSelect.value = report.listId; }
             renderSnovioReport(dryRun ? "Dry Run" : "Sync Report", report);
         } catch (err) {
@@ -1662,10 +1695,14 @@
                     const response = await fetch(`/api/copilot/confirm/${encodeURIComponent(item.confirmationId)}`, {
                         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }),
                     });
-                    const data = await response.json();
+                    const data = await readApiResponse(response);
                     if (!response.ok) throw new Error(data.error || "The confirmed action failed.");
                     card.remove();
-                    copilotBubble("assistant", `Confirmed action completed: ${data.summary || data.toolName || "Snov.io action"}.`);
+                    const result = typeof data.result === "string" ? data.result : "";
+                    copilotBubble("assistant", [
+                        `Confirmed action completed: ${data.summary || data.toolName || "Snov.io action"}.`,
+                        result ? `Snov.io response: ${result}` : "",
+                    ].filter(Boolean).join("\n"));
                 } catch (error) {
                     summary.textContent = error.message || "The confirmed action failed.";
                     confirm.disabled = false;
