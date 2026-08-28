@@ -1590,12 +1590,23 @@
     const copilotSend = document.getElementById("copilot-send");
     const copilotHistory = [];
 
+    function renderCopilotMarkdown(element, text) {
+        let safe = escapeHtml(String(text || ""));
+        safe = safe.replace(/`([^`\n]+)`/g, '<code style="background:#1A1A1A;border:1px solid #2C2C2C;border-radius:4px;padding:0 4px;font-size:12.5px;">$1</code>');
+        safe = safe.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+        safe = safe.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,;:!?)]|$)/gm, "$1<em>$2</em>");
+        safe = safe.replace(/^#{1,4}\s+(.+)$/gm, "<strong>$1</strong>");
+        safe = safe.replace(/^(\s*)[-*]\s+/gm, "$1\u2022 ");
+        element.innerHTML = safe;
+    }
+
     function copilotBubble(role, text) {
         const div = document.createElement("div");
         div.style.cssText = role === "user"
             ? "align-self:flex-end;background:#CE1126;color:#fff;border-radius:12px 12px 2px 12px;padding:9px 12px;max-width:85%;white-space:pre-wrap;"
             : "align-self:flex-start;background:#242424;border:1px solid #2C2C2C;border-radius:12px 12px 12px 2px;padding:9px 12px;max-width:90%;white-space:pre-wrap;";
-        div.textContent = text;
+        if (role === "user") div.textContent = text;
+        else renderCopilotMarkdown(div, text);
         copilotMessages.appendChild(div);
         copilotMessages.scrollTop = copilotMessages.scrollHeight;
         return div;
@@ -1656,13 +1667,13 @@
         const thinking = copilotBubble("assistant", "Thinking\u2026");
         copilotSend.disabled = true;
         try {
-            const resp = await fetch("/api/copilot/chat", {
+            const resp = await snovioFetch("/api/copilot/chat", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ messages: copilotHistory.slice(-12) }),
             });
             const data = await resp.json();
             if (!resp.ok) throw new Error(data.error || "Copilot failed.");
-            thinking.textContent = data.reply || "(no reply)";
+            renderCopilotMarkdown(thinking, data.reply || "(no reply)");
             copilotHistory.push({ role: "assistant", content: data.reply || "" });
             renderCopilotConfirmations(data.confirmations || []);
             if (data.toolTrace && data.toolTrace.length) {
@@ -1682,13 +1693,50 @@
     if (copilotFab) copilotFab.addEventListener("click", () => {
         copilotPanel.hidden = !copilotPanel.hidden;
         if (!copilotPanel.hidden && !copilotMessages.childElementCount) {
-            copilotBubble("assistant", "Hi! I can search Snov.io for leads, manage your prospect lists (including deleting old ones), check verification, and answer questions about your campaigns here. What do you need?");
+            copilotBubble("assistant", "Hi! Attach a lead list and I can draft a campaign for you. I can also search Snov.io, manage CRM and prospect data, and propose account actions for your confirmation.");
         }
         if (!copilotPanel.hidden) copilotInput.focus();
     });
     if (copilotClose) copilotClose.addEventListener("click", () => { copilotPanel.hidden = true; });
     if (copilotSend) copilotSend.addEventListener("click", copilotSendMessage);
     if (copilotInput) copilotInput.addEventListener("keydown", (e) => { if (e.key === "Enter") copilotSendMessage(); });
+
+    const copilotExpand = document.getElementById("copilot-expand");
+    let copilotImmersive = false;
+    if (copilotExpand) copilotExpand.addEventListener("click", () => {
+        copilotImmersive = !copilotImmersive;
+        copilotPanel.style.width = copilotImmersive ? "min(880px, 96vw)" : "min(420px, 92vw)";
+        copilotPanel.style.height = copilotImmersive ? "calc(100vh - 48px)" : "min(560px, 72vh)";
+        copilotPanel.style.bottom = copilotImmersive ? "24px" : "92px";
+        copilotExpand.title = copilotImmersive ? "Shrink" : "Expand";
+    });
+
+    const copilotAttach = document.getElementById("copilot-attach");
+    const copilotFile = document.getElementById("copilot-file");
+    if (copilotAttach && copilotFile) {
+        copilotAttach.addEventListener("click", () => copilotFile.click());
+        copilotFile.addEventListener("change", async () => {
+            const file = copilotFile.files && copilotFile.files[0];
+            copilotFile.value = "";
+            if (!file) return;
+            const note = copilotBubble("user", `Attaching ${file.name}...`);
+            try {
+                const form = new FormData();
+                form.append("file", file);
+                form.append("prompt_id", "leads");
+                const response = await fetch("/api/upload", { method: "POST", body: form });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Upload failed.");
+                const summary = `Attached lead file "${file.name}" as jobId ${data.jobId} (${data.totalLeads} lead(s)). Columns: ${(data.columns || []).map((column) => column.header).filter(Boolean).join(", ").slice(0, 300)}`;
+                note.textContent = summary;
+                copilotHistory.push({ role: "user", content: summary });
+                copilotBubble("assistant", "Got the file. Which campaign template should I draft with?");
+                copilotHistory.push({ role: "assistant", content: "Got the file. Which campaign template should I draft with?" });
+            } catch (error) {
+                note.textContent = `Attach failed: ${error.message || error}`;
+            }
+        });
+    }
 
 
     if (snovioJourneyPreviewBtn) snovioJourneyPreviewBtn.addEventListener("click", () => runSnovioJourney(true));
