@@ -1379,6 +1379,30 @@ class TestSnovioEndpoints:
         assert payload["status"] == "running"
         output.set.assert_not_called()
 
+    @patch.object(fa.data_store, "claim_snovio_sync_operation", return_value={
+        "acquired": True, "operationId": "delegated-op", "status": "queued",
+    })
+    @patch.object(fa, "_upload_blob")
+    @patch.object(fa, "_snovio_configured", return_value=True)
+    def test_delegated_sync_uses_job_owner_partition(self, mock_configured, mock_upload, mock_claim):
+        req = self._request(
+            body={"dryRun": False, "listName": "Delegated Test"},
+            route_params={"jobId": "job-1"},
+        )
+        actor = {
+            "oid": "admin-1", "role": "admin", "email": "admin@example.com",
+            "job": {"ownerOid": "delegate-1"},
+        }
+        output = MagicMock()
+        with patch.object(fa, "_require_job_owner", return_value=(actor, None)):
+            response = asyncio.run(fa.sync_job_to_snovio(req, output))
+
+        assert response.status_code == 202
+        assert mock_claim.call_args.args[0] == "delegate-1"
+        queued = json.loads(output.set.call_args.args[0])
+        assert queued["oid"] == "delegate-1"
+        assert "/delegate-1/" in mock_upload.call_args.args[1]
+
     def test_sync_worker_persists_completed_report(self):
         operation = {
             "operationId": "op-1", "oid": "test-user", "jobId": "job-1",

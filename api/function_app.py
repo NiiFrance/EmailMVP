@@ -3113,10 +3113,11 @@ async def sync_job_to_snovio(req: func.HttpRequest, syncOperation=None) -> func.
     if not _parse_bool(payload.get("dryRun"), default=True):
         if syncOperation is None:
             return _json_response({"error": "The Snov.io sync queue is unavailable."}, 503)
+        job_owner_oid = str(owner["job"].get("ownerOid") or owner["oid"])
         operation_id = uuid.uuid4().hex
-        request_blob = f"snovio-sync-operations/{owner['oid']}/{operation_id}.json"
+        request_blob = f"snovio-sync-operations/{job_owner_oid}/{operation_id}.json"
         claim = data_store.claim_snovio_sync_operation(
-            owner["oid"], job_id, operation_id, request_blob
+            job_owner_oid, job_id, operation_id, request_blob
         )
         if not claim.get("acquired"):
             existing_id = str(claim.get("operationId") or "")
@@ -3135,7 +3136,7 @@ async def sync_job_to_snovio(req: func.HttpRequest, syncOperation=None) -> func.
         )
         syncOperation.set(json.dumps({
             "operationId": operation_id,
-            "oid": owner["oid"],
+            "oid": job_owner_oid,
             "jobId": job_id,
             "requestBlob": request_blob,
         }, separators=(",", ":")))
