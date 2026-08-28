@@ -249,7 +249,7 @@ body {
 .recent-head { padding: 16px 22px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; }
 .recent-title { font-weight: 700; font-size: 14.5px; }
 .recent-meta { margin-left: auto; font-size: 12.5px; color: var(--muted-3); }
-.recent-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 16px; align-items: center; padding: 15px 22px; border-bottom: 1px solid var(--line-softer); }
+.recent-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto minmax(138px,auto); gap: 16px; align-items: center; padding: 15px 22px; border-bottom: 1px solid var(--line-softer); }
 .recent-row:hover { background: #FBFAF8; }
 .recent-name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .recent-tpl { font-size: 12.5px; color: var(--muted-3); margin-top: 2px; }
@@ -257,6 +257,17 @@ body {
 .recent-num .n { font-weight: 700; font-size: 14px; }
 .recent-num .u { font-size: 11px; color: var(--muted-3); }
 .recent-empty { padding: 26px 22px; font-size: 13.5px; color: var(--muted-3); text-align: center; }
+.recent-actions { min-width: 138px; display: flex; justify-content: flex-end; gap: 8px; }
+.recent-actions .btn { min-height: 36px; padding: 8px 12px; white-space: nowrap; }
+.recent-remove { min-height: 36px; border: 0; background: transparent; color: #9B1C2C; font: inherit; font-size: 12.5px; font-weight: 700; cursor: pointer; padding: 8px 6px; }
+.recent-remove:hover { color: var(--red); text-decoration: underline; }
+.recent-remove:focus-visible, .archived-campaigns summary:focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }
+.history-status { padding: 11px 22px; border-top: 1px solid var(--line-soft); background: var(--green-bg); color: var(--green); font-size: 12.5px; font-weight: 600; }
+.history-status.error { background: var(--red-soft); color: #9B1C2C; }
+.archived-campaigns { border-top: 1px solid var(--line-soft); background: #FBFAF8; }
+.archived-campaigns summary { padding: 13px 22px; color: var(--muted); font-size: 12.5px; font-weight: 700; cursor: pointer; list-style-position: inside; }
+.archived-campaigns[open] summary { border-bottom: 1px solid var(--line-soft); }
+.archived-campaigns .recent-row:last-of-type { border-bottom: 0; }
 
 /* ============ STEP 1: TEMPLATE CARDS ============ */
 .tpl-group { margin-bottom: 30px; }
@@ -486,4 +497,14 @@ textarea { line-height: 1.65; resize: vertical; white-space: pre-wrap; }
     .home-top, .stat-grid, .snovio-grid, .review-grid, .tpl-cards { grid-template-columns: 1fr; }
     .view-title { font-size: 25px; }
     .snovio-connect-shortcut { align-items: flex-start; flex-direction: column; }
+    .recent-row { grid-template-columns: minmax(0,1fr) auto; gap: 10px 14px; }
+    .recent-row .recent-num { text-align: left; min-width: 0; }
+    .recent-actions { min-width: 0; justify-content: flex-end; }
+}
+
+@media (max-width: 520px) {
+    .recent-row { padding: 14px 16px; }
+    .recent-actions { grid-column: 1 / -1; justify-content: flex-start; }
+    .recent-actions .btn { flex: 1; }
+    .archived-campaigns summary, .history-status { padding-left: 16px; padding-right: 16px; }
 }

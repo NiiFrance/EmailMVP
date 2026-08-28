@@ -1299,12 +1299,14 @@ async def list_my_jobs(req: func.HttpRequest) -> func.HttpResponse:
     user, err = _require_user(req)
     if err:
         return err
+    archived = _parse_bool(_query_params(req).get("archived"), default=False)
     try:
-        jobs = data_store.list_jobs(user["oid"], limit=25)
+        jobs = data_store.list_jobs(user["oid"], limit=25, archived=archived)
+        archived_count = data_store.count_jobs(user["oid"], archived=True)
     except Exception as error:
         logger.warning("Job list failed for %s: %s", user["email"], error)
         return _json_response({"error": "Could not load your campaigns."}, 500)
-    return _json_response({"jobs": [
+    return _json_response({"archivedCount": archived_count, "jobs": [
         {
             "jobId": j.get("RowKey"),
             "templateId": j.get("templateId", ""),
@@ -1314,9 +1316,71 @@ async def list_my_jobs(req: func.HttpRequest) -> func.HttpResponse:
             "status": j.get("status", ""),
             "createdAt": j.get("createdAt", ""),
             "completedAt": j.get("completedAt", ""),
+            "archived": bool(j.get("archived")),
         }
         for j in jobs
     ]})
+
+
+def _owned_job_for_history(req: func.HttpRequest, job_id: str):
+    """Resolve only the caller's own history row, even when the caller is an admin."""
+    user, error = _require_user(req)
+    if error:
+        return None, None, error
+    try:
+        job = data_store.get_job(user["oid"], job_id)
+    except Exception as lookup_error:
+        logger.warning("Job history lookup failed for %s: %s", job_id, lookup_error)
+        return None, None, _json_response({"error": "Job lookup failed."}, 500)
+    if not job:
+        return None, None, _json_response({"error": "Campaign not found."}, 404)
+    return user, job, None
+
+
+@app.route(route="jobs/{jobId}", methods=["DELETE"])
+async def archive_job_history(req: func.HttpRequest) -> func.HttpResponse:
+    """Hide a drafted or failed job from the caller's workspace history."""
+    job_id = str((req.route_params or {}).get("jobId") or "")
+    user, job, error = _owned_job_for_history(req, job_id)
+    if error:
+        return error
+    status = str(job.get("status") or "")
+    if status not in {"Completed", "Failed"}:
+        return _json_response({
+            "error": "Only Drafted or Failed campaigns can be removed from your workspace.",
+            "status": status,
+        }, 409)
+    try:
+        data_store.set_job_archived(user["oid"], job_id, True)
+    except Exception as archive_error:
+        logger.warning("Job archive failed for %s: %s", job_id, archive_error)
+        return _json_response({"error": "Could not remove this campaign from your workspace."}, 500)
+    try:
+        user_row = data_store.get_user(user["oid"])
+        raw_context = str((user_row or {}).get("lastContext") or "")
+        context = json.loads(raw_context) if raw_context else {}
+        if isinstance(context, dict) and str(context.get("jobId") or "") == job_id:
+            data_store.set_user_context(user["oid"], {})
+    except Exception as context_error:
+        logger.warning("Archived job %s but could not clear resume context: %s", job_id, context_error)
+    return _json_response({"jobId": job_id, "archived": True})
+
+
+@app.route(route="jobs/{jobId}", methods=["PUT"])
+async def restore_job_history(req: func.HttpRequest) -> func.HttpResponse:
+    """Restore an archived job to the caller's workspace history."""
+    if _request_json(req).get("archived") is not False:
+        return _json_response({"error": "archived must be false to restore a campaign."}, 400)
+    job_id = str((req.route_params or {}).get("jobId") or "")
+    user, _job, error = _owned_job_for_history(req, job_id)
+    if error:
+        return error
+    try:
+        data_store.set_job_archived(user["oid"], job_id, False)
+    except Exception as restore_error:
+        logger.warning("Job restore failed for %s: %s", job_id, restore_error)
+        return _json_response({"error": "Could not restore this campaign."}, 500)
+    return _json_response({"jobId": job_id, "archived": False})
 
 
 # ===========================================================================

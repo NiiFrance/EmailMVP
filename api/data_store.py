@@ -189,11 +189,32 @@ def claim_snovio_sync_operation(
     return {"acquired": False, "operationId": "", "status": "contended"}
 
 
-def list_jobs(oid: str, limit: int = 25) -> list[dict]:
+def list_jobs(oid: str, limit: int = 25, archived: bool = False) -> list[dict]:
     entities = _table(JOBS_TABLE).query_entities(f"PartitionKey eq '{oid}'")
-    jobs = [_entity_to_dict(e) for e in entities]
+    jobs = [
+        _entity_to_dict(entity)
+        for entity in entities
+        if bool(entity.get("archived")) is archived
+    ]
     jobs.sort(key=lambda j: str(j.get("createdAt", "")), reverse=True)
     return jobs[:limit]
+
+
+def count_jobs(oid: str, archived: bool = False) -> int:
+    entities = _table(JOBS_TABLE).query_entities(f"PartitionKey eq '{oid}'")
+    return sum(1 for entity in entities if bool(entity.get("archived")) is archived)
+
+
+def set_job_archived(oid: str, job_id: str, archived: bool) -> None:
+    _table(JOBS_TABLE).upsert_entity(
+        {
+            "PartitionKey": oid,
+            "RowKey": job_id,
+            "archived": bool(archived),
+            "archivedAt": _now_iso() if archived else "",
+        },
+        mode=UpdateMode.MERGE,
+    )
 
 
 # ---------------------------------------------------------------------------
