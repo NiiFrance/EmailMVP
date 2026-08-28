@@ -8,6 +8,12 @@
     "location": {
       "value": "eastus2"
     },
+    "appDisplayName": {
+      "value": "Cloudware Email Campaign Generator"
+    },
+    "publicAppOrigin": {
+      "value": "https://mango-bush-067ca3b0f.7.azurestaticapps.net"
+    },
     "anthropicBaseUrl": {
       "value": ""
     },
