@@ -80,7 +80,8 @@ The Reliance deployment (`main`) carries its own fully Reliance-branded prompt s
 | `/api/me/context` | `PUT` | Persist the user's resume context |
 | `/api/users` | `GET` | Admin: list users and roles |
 | `/api/users/{oid}/role` | `PUT` | Admin: promote/demote a user |
-| `/api/jobs` | `GET` | The caller's workspace history |
+| `/api/jobs` | `GET` | The caller's active workspace history; `?archived=true` returns archived entries |
+| `/api/jobs/{jobId}` | `DELETE` / `PUT` | Remove a Drafted/Failed campaign from the workspace or restore it; stored files and Snov.io data are retained |
 | `/api/campaigns` | `GET` | Campaign library (admins may pass `?full=true`) |
 | `/api/campaigns` | `POST` | Admin: create a campaign |
 | `/api/campaigns/{id}` | `PUT` / `DELETE` | Admin: edit or archive a campaign |
@@ -141,7 +142,7 @@ All non-required columns are preserved as context and passed to the model for pe
 A single-page app with a branded public sign-in page and a four-step wizard:
 
 - **/login.html** — designed landing page (hero, product preview, feature strip) with “Sign in with Microsoft”
-- **Home** — workspace dashboard: stats, campaign history with open-to-resume, continue-where-you-left-off banner, Snov.io connection status
+- **Home** — workspace dashboard: stats, campaign history with open-to-resume, reversible Remove for Drafted/Failed entries, a collapsed Archived campaigns restore section, continue-where-you-left-off banner, and Snov.io connection status. Removing an entry only hides this app's history record; drafts/files and anything already in Snov.io remain unchanged.
 - **Steps 1–4** — Choose a campaign (grouped cards) → Upload leads (drag-drop, format guidance, detected-columns preview, mapping confirmation) → Review & edit every drafted touch → Send to Snov.io (list sync, drip-campaign creation, verification, suppression — with hover tooltips throughout)
 - **Settings** — the only place to save/forget Snov.io API credentials, connect/disconnect Snov.io Copilot OAuth, and configure event updates (admins).
 - **Copilot** — immersive chat with lead-list attachment, campaign drafting, live Snov.io catalog discovery and exact-action confirmation cards.

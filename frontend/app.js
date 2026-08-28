@@ -129,6 +129,11 @@
     const statLeads = document.getElementById("stat-leads");
     const recentList = document.getElementById("recent-list");
     const recentEmpty = document.getElementById("recent-empty");
+    const historyStatus = document.getElementById("history-status");
+    const archivedCampaigns = document.getElementById("archived-campaigns");
+    const archivedCount = document.getElementById("archived-count");
+    const archivedList = document.getElementById("archived-list");
+    const archivedEmpty = document.getElementById("archived-empty");
 
     // Snov.io
     const snovioPanel = document.getElementById("snovio-panel");
@@ -834,11 +839,135 @@
         loadMyJobs();
     }
 
-    async function loadMyJobs() {
+    function campaignHistoryName(job) {
+        return (job.fileName || "Campaign").replace(/\.[^.]+$/, "");
+    }
+
+    function announceHistory(message, isError) {
+        if (!historyStatus) return;
+        historyStatus.textContent = message || "";
+        historyStatus.classList.toggle("error", !!isError);
+        historyStatus.hidden = !message;
+    }
+
+    function historyRow(job, archived) {
+        const row = document.createElement("div");
+        row.className = "recent-row";
+        const statusColor = job.status === "Completed" ? "#15803D" : (job.status === "Failed" ? "#B91C1C" : "#B45309");
+        const statusLabel = job.status === "Completed" ? "Drafted" : (job.status || "—");
+        const canOpen = !archived && job.status === "Completed";
+        const canRemove = !archived && (job.status === "Completed" || job.status === "Failed");
+        row.innerHTML =
+            `<div style="min-width:0;"><div class="recent-name"></div><div class="recent-tpl"></div></div>` +
+            `<div class="recent-num"><div class="n"></div><div class="u">leads</div></div>` +
+            `<div class="recent-num"><div class="n" style="color:${statusColor};"></div></div>` +
+            `<div class="recent-actions"></div>`;
+        row.querySelector(".recent-name").textContent = campaignHistoryName(job);
+        const when = job.createdAt ? new Date(job.createdAt).toLocaleDateString() : "";
+        row.querySelector(".recent-tpl").textContent = [job.templateName, when].filter(Boolean).join(" · ");
+        row.querySelectorAll(".recent-num .n")[0].textContent = job.totalLeads || 0;
+        row.querySelectorAll(".recent-num .n")[1].textContent = statusLabel;
+        const actions = row.querySelector(".recent-actions");
+        if (canOpen) {
+            const open = document.createElement("button");
+            open.className = "btn btn-secondary recent-open";
+            open.type = "button";
+            open.textContent = "Open";
+            open.addEventListener("click", () => openJob(job));
+            actions.appendChild(open);
+        }
+        if (canRemove) {
+            const remove = document.createElement("button");
+            remove.className = "recent-remove";
+            remove.type = "button";
+            remove.textContent = "Remove";
+            remove.title = "Remove from Recent campaigns";
+            remove.setAttribute("aria-label", `Remove ${campaignHistoryName(job)} from Recent campaigns`);
+            remove.addEventListener("click", () => archiveHistoryJob(job, remove));
+            actions.appendChild(remove);
+        }
+        if (archived) {
+            const restore = document.createElement("button");
+            restore.className = "btn btn-secondary recent-restore";
+            restore.type = "button";
+            restore.textContent = "Restore";
+            restore.setAttribute("aria-label", `Restore ${campaignHistoryName(job)} to Recent campaigns`);
+            restore.addEventListener("click", () => restoreHistoryJob(job, restore));
+            actions.appendChild(restore);
+        }
+        return row;
+    }
+
+    async function archiveHistoryJob(job, button) {
+        const name = campaignHistoryName(job);
+        const confirmed = window.confirm(
+            `Remove “${name}” from Recent campaigns?\n\n` +
+            "You can restore it later under Archived campaigns. Its drafts and files will be retained, and nothing in Snov.io will be changed."
+        );
+        if (!confirmed) return;
+        button.disabled = true;
+        try {
+            const response = await fetch(`/api/jobs/${encodeURIComponent(job.jobId)}`, { method: "DELETE" });
+            const payload = await readApiResponse(response);
+            if (!response.ok) throw new Error(payload.error || "Could not remove this campaign.");
+            announceHistory(`${name} was moved to Archived campaigns.`, false);
+            await loadMyJobs(false);
+            if (archivedCampaigns.open) await loadArchivedJobs();
+            archivedCampaigns.focus();
+        } catch (error) {
+            announceHistory(error.message || "Could not remove this campaign.", true);
+            button.disabled = false;
+        }
+    }
+
+    async function restoreHistoryJob(job, button) {
+        const name = campaignHistoryName(job);
+        button.disabled = true;
+        try {
+            const response = await fetch(`/api/jobs/${encodeURIComponent(job.jobId)}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ archived: false }),
+            });
+            const payload = await readApiResponse(response);
+            if (!response.ok) throw new Error(payload.error || "Could not restore this campaign.");
+            announceHistory(`${name} was restored to Recent campaigns.`, false);
+            await loadMyJobs(false);
+            await loadArchivedJobs();
+        } catch (error) {
+            announceHistory(error.message || "Could not restore this campaign.", true);
+            button.disabled = false;
+        }
+    }
+
+    async function loadArchivedJobs() {
+        if (!archivedCampaigns || !archivedCampaigns.open) return;
+        archivedList.innerHTML = "";
+        archivedEmpty.hidden = true;
+        try {
+            const response = await fetch("/api/jobs?archived=true");
+            const payload = await readApiResponse(response);
+            if (!response.ok) throw new Error(payload.error || "Could not load archived campaigns.");
+            const jobs = payload.jobs || [];
+            jobs.forEach((job) => archivedList.appendChild(historyRow(job, true)));
+            archivedEmpty.hidden = !!jobs.length;
+        } catch (error) {
+            archivedEmpty.textContent = error.message || "Could not load archived campaigns.";
+            archivedEmpty.hidden = false;
+        }
+    }
+
+    async function loadMyJobs(clearAnnouncement = true) {
+        if (clearAnnouncement) announceHistory("", false);
         let jobs = null;
+        let archivedTotal = 0;
         try {
             const resp = await fetch("/api/jobs");
-            if (resp.ok) jobs = (await resp.json()).jobs || [];
+            if (resp.ok) {
+                const payload = await resp.json();
+                jobs = payload.jobs || [];
+                archivedTotal = Number(payload.archivedCount || 0);
+            }
         } catch (e) { /* fall back below */ }
         if (jobs === null) {
             // Server history unavailable — fall back to local session history.
@@ -849,6 +978,7 @@
             statLeads.textContent = list.reduce((n, r) => n + (r.leads || 0), 0).toLocaleString();
             recentList.innerHTML = "";
             recentEmpty.hidden = !!list.length;
+            archivedCampaigns.hidden = true;
             return;
         }
         const emailsFor = (j) => {
@@ -859,6 +989,12 @@
         statLeads.textContent = jobs.reduce((n, j) => n + (j.totalLeads || 0), 0).toLocaleString();
         statEmails.textContent = jobs.filter((j) => j.status === "Completed").reduce((n, j) => n + emailsFor(j), 0).toLocaleString();
         recentList.innerHTML = "";
+        archivedCount.textContent = archivedTotal;
+        archivedCampaigns.hidden = archivedTotal < 1;
+        if (archivedTotal < 1) {
+            archivedCampaigns.open = false;
+            archivedList.innerHTML = "";
+        }
         if (!jobs.length) { recentEmpty.hidden = false; return; }
         recentEmpty.hidden = true;
         // "Continue where you left off" — saved context pointing at a completed job.
@@ -875,22 +1011,13 @@
             }
         }
         jobs.forEach((j) => {
-            const row = document.createElement("div");
-            row.className = "recent-row";
-            const statusColor = j.status === "Completed" ? "#15803D" : (j.status === "Failed" ? "#B91C1C" : "#B45309");
-            const statusLabel = j.status === "Completed" ? "Drafted" : (j.status || "—");
-            const canOpen = j.status === "Completed";
-            row.innerHTML =
-                `<div style="min-width:0;"><div class="recent-name"></div><div class="recent-tpl"></div></div>` +
-                `<div class="recent-num"><div class="n">${j.totalLeads || 0}</div><div class="u">leads</div></div>` +
-                `<div class="recent-num"><div class="n" style="color:${statusColor};"></div></div>` +
-                (canOpen ? `<button class="btn btn-secondary recent-open" type="button">Open</button>` : `<div></div>`);
-            row.querySelector(".recent-name").textContent = (j.fileName || "Campaign").replace(/\.[^.]+$/, "");
-            const when = j.createdAt ? new Date(j.createdAt).toLocaleDateString() : "";
-            row.querySelector(".recent-tpl").textContent = [j.templateName, when].filter(Boolean).join(" · ");
-            row.querySelectorAll(".recent-num .n")[1].textContent = statusLabel;
-            if (canOpen) row.querySelector(".recent-open").addEventListener("click", () => openJob(j));
-            recentList.appendChild(row);
+            recentList.appendChild(historyRow(j, false));
+        });
+    }
+
+    if (archivedCampaigns) {
+        archivedCampaigns.addEventListener("toggle", () => {
+            if (archivedCampaigns.open) loadArchivedJobs();
         });
     }
 
