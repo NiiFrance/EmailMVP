@@ -76,6 +76,9 @@ param snovioMcpStateTtlSeconds string = '600'
 @description('Storage Queue name for accepted Snov.io webhook events')
 param snovioWebhookQueue string = 'snovio-webhooks'
 
+@description('Storage Queue name for long-running Snov.io lead sync operations')
+param snovioSyncQueue string = 'snovio-sync'
+
 @description('Maximum Copilot requests per signed-in user per minute')
 param copilotRequestsPerMinute string = '10'
 
@@ -129,6 +132,7 @@ var snovioAppSettings = concat([
   { name: 'SNOVIO_SESSION_TTL_SECONDS', value: snovioSessionTtlSeconds }
   { name: 'SNOVIO_MCP_STATE_TTL_SECONDS', value: snovioMcpStateTtlSeconds }
   { name: 'SNOVIO_WEBHOOK_QUEUE', value: snovioWebhookQueue }
+  { name: 'SNOVIO_SYNC_QUEUE', value: snovioSyncQueue }
   { name: 'COPILOT_REQUESTS_PER_MINUTE', value: copilotRequestsPerMinute }
   { name: 'COPILOT_TURN_TTL_SECONDS', value: copilotTurnTtlSeconds }
   { name: 'SNOVIO_DEFAULT_DELAY_DAYS', value: snovioDefaultDelayDays }

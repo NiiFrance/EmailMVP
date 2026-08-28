@@ -144,6 +144,51 @@ def get_job(oid: str, job_id: str) -> dict | None:
         return None
 
 
+def claim_snovio_sync_operation(
+    oid: str,
+    job_id: str,
+    operation_id: str,
+    request_blob: str,
+    ttl_seconds: int = 7200,
+) -> dict:
+    """Atomically claim a job for one live sync, returning the winning operation."""
+    table = _table(JOBS_TABLE)
+    for _ in range(5):
+        try:
+            entity = table.get_entity(oid, job_id)
+        except ResourceNotFoundError:
+            return {"acquired": False, "operationId": "", "status": "missing"}
+        now = time.time()
+        current_id = str(entity.get("snovioSyncOperationId") or "")
+        current_status = str(entity.get("snovioSyncStatus") or "")
+        expires_at = float(entity.get("snovioSyncExpiresAt") or 0)
+        if current_id and current_status in {"queued", "running"} and expires_at > now:
+            return {"acquired": False, "operationId": current_id, "status": current_status}
+        etag = getattr(entity, "metadata", {}).get("etag")
+        update = {
+            "PartitionKey": oid,
+            "RowKey": job_id,
+            "snovioSyncOperationId": operation_id,
+            "snovioSyncStatus": "queued",
+            "snovioSyncRequestBlob": request_blob,
+            "snovioSyncReportBlob": "",
+            "snovioSyncError": "",
+            "snovioSyncUpdatedAt": _now_iso(),
+            "snovioSyncExpiresAt": now + ttl_seconds,
+        }
+        try:
+            table.update_entity(
+                update,
+                mode=UpdateMode.MERGE,
+                etag=etag,
+                match_condition=MatchConditions.IfNotModified,
+            )
+            return {"acquired": True, "operationId": operation_id, "status": "queued"}
+        except ResourceModifiedError:
+            continue
+    return {"acquired": False, "operationId": "", "status": "contended"}
+
+
 def list_jobs(oid: str, limit: int = 25) -> list[dict]:
     entities = _table(JOBS_TABLE).query_entities(f"PartitionKey eq '{oid}'")
     jobs = [_entity_to_dict(e) for e in entities]
