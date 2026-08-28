@@ -641,6 +641,45 @@ class TestLeadSearchAndCopilotRoutes:
         result = {"structuredContent": ["type"], "content": [{"type": "text", "text": '{"list": {"id": 40236663}, "list_id": 40236663}'}]}
         assert fa._mcp_json(result) == {"list": {"id": 40236663}, "list_id": 40236663}
 
+    def test_catalog_add_to_list_requires_concrete_list_id(self):
+        session = MagicMock()
+        session.list_tools.return_value = [{"name": "app_add_prospects_to_list"}]
+        tools = fa._copilot_app_tools(self.USER, self._request(), mcp_session=session)
+
+        result = tools["execute_snovio_tool"]["handler"]({
+            "toolName": "app_add_prospects_to_list",
+            "arguments": {"prospects": ["p-1"]},
+        })
+
+        assert "list ID is required" in result["error"]
+        session.call_tool.assert_not_called()
+
+    def test_confirm_rejects_mcp_application_error(self):
+        row = {
+            "toolName": "app_create_list",
+            "arguments": '{"name":"Golda Test","type":"people"}',
+            "summary": "Create Golda Test",
+            "category": "write",
+            "expiresAt": fa.time.time() + 60,
+        }
+        session = MagicMock()
+        session.call_tool.return_value = {
+            "isError": True,
+            "content": [{"type": "text", "text": "List creation was rejected."}],
+        }
+        req = self._request({"confirm": True})
+        req.route_params = {"confirmationId": "confirm-error"}
+        with patch.object(fa, "_require_user", return_value=(self.USER, None)), \
+                patch.object(fa.data_store, "consume_mcp_confirmation", return_value=row), \
+                patch.object(fa, "_get_valid_mcp_token", return_value="token"), \
+                patch.object(fa.snovio_mcp, "SnovioMCPSession", return_value=session):
+            response = asyncio.run(fa.copilot_confirm_action(req))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 502
+        assert payload["executed"] is False
+        assert payload["error"] == "List creation was rejected."
+
     def test_copilot_requires_user_message(self):
         with patch.object(fa, "_require_user", return_value=(self.USER, None)):
             response = asyncio.run(fa.copilot_chat(self._request({"messages": []}), MagicMock()))
@@ -971,56 +1010,121 @@ class TestSnovioEndpoints:
         assert payload["listName"].startswith("Cloudware - Help & Assistance - Leads - inbound")
         mock_client.create_prospect_list.assert_not_called()
 
-    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
-    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company\na@example.com,Ada,Lovelace,Contoso\n")
-    @patch.object(fa, "_snovio_client")
+    @patch.object(fa.data_store, "claim_snovio_sync_operation")
+    @patch.object(fa, "_upload_blob")
     @patch.object(fa, "_snovio_configured", return_value=True)
-    def test_sync_job_live_creates_list_before_sync(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
-        mock_client = MagicMock()
-        mock_client.create_prospect_list.return_value = [{"success": True, "data": {"id": 321}}]
-        mock_client.get_custom_fields.return_value = []
-        mock_client.get_prospects_by_email.return_value = {"data": []}
-        mock_client.add_prospect_to_list.return_value = {"success": True, "id": "prospect-1", "added": True}
-        mock_client_factory.return_value = mock_client
+    def test_sync_job_live_queues_without_calling_snovio(self, mock_configured, mock_upload, mock_claim):
+        mock_claim.return_value = {"acquired": True, "operationId": "op-1", "status": "queued"}
         req = self._request(
             body={"autoCreateList": True, "dryRun": False, "requireVerification": False, "listName": "Cloudware Test Leads"},
             route_params={"jobId": "job-1"},
         )
+        output = MagicMock()
 
-        response = asyncio.run(fa.sync_job_to_snovio(req))
+        response = asyncio.run(fa.sync_job_to_snovio(req, output))
         payload = json.loads(response.body)
 
-        assert response.status_code == 200
-        assert payload["listId"] == "321"
-        assert payload["listSource"] == "created"
-        assert payload["createdList"][0]["data"]["id"] == 321
-        assert payload["rows"][0]["status"] == "added"
-        mock_client.create_prospect_list.assert_called_once_with("Cloudware Test Leads")
-        mock_client.add_prospect_to_list.assert_called_once()
+        assert response.status_code == 202
+        assert payload["status"] == "queued"
+        assert payload["statusUrl"].startswith("/api/jobs/job-1/snovio/sync/")
+        queued = json.loads(output.set.call_args.args[0])
+        assert queued["jobId"] == "job-1"
+        assert queued["oid"] == "test-user"
+        assert queued["operationId"] == payload["operationId"]
+        mock_upload.assert_called_once()
+        mock_claim.assert_called_once()
 
-    @patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync.json")
-    @patch.object(fa, "_download_job_csv", return_value=b"Email,First Name,Last Name,Company\na@example.com,Ada,Lovelace,Contoso\n")
-    @patch.object(fa, "_snovio_client")
+    @patch.object(fa.data_store, "claim_snovio_sync_operation", return_value={
+        "acquired": False, "operationId": "existing-op", "status": "running",
+    })
     @patch.object(fa, "_snovio_configured", return_value=True)
-    def test_sync_job_does_not_create_list_when_no_rows_are_eligible(self, mock_configured, mock_client_factory, mock_download, mock_upload_report):
-        mock_client = MagicMock()
-        mock_client.get_custom_fields.return_value = []
-        mock_client_factory.return_value = mock_client
+    def test_sync_job_reuses_existing_atomic_claim(self, mock_configured, mock_claim):
         req = self._request(
-            body={"autoCreateList": True, "dryRun": False, "requireVerification": True, "listName": "Cloudware Empty"},
+            body={"dryRun": False, "listName": "Cloudware Test Leads"},
             route_params={"jobId": "job-1"},
         )
+        output = MagicMock()
 
-        response = asyncio.run(fa.sync_job_to_snovio(req))
+        response = asyncio.run(fa.sync_job_to_snovio(req, output))
+        payload = json.loads(response.body)
+
+        assert response.status_code == 202
+        assert payload["operationId"] == "existing-op"
+        assert payload["status"] == "running"
+        output.set.assert_not_called()
+
+    def test_sync_worker_persists_completed_report(self):
+        operation = {
+            "operationId": "op-1", "oid": "test-user", "jobId": "job-1",
+            "requestBlob": "snovio-sync-operations/test-user/op-1.json",
+        }
+        message = MagicMock()
+        message.get_body.return_value = json.dumps(operation).encode("utf-8")
+        report = {"summary": {"added": 1}, "rows": [{"status": "added"}]}
+        with patch.object(fa.data_store, "get_job", return_value={
+                    "snovioSyncOperationId": "op-1", "snovioSyncStatus": "queued",
+                }), \
+                patch.object(fa.data_store, "update_job") as update, \
+                patch.object(fa, "_download_blob", return_value=b'{"dryRun":false}'), \
+                patch.object(fa, "_snovio_client_for_oid", return_value=MagicMock()), \
+                patch.object(fa, "_run_prospect_sync", return_value=(report, None)), \
+                patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync-op-1.json"):
+            fa.process_snovio_sync(message)
+
+        assert update.call_args_list[0].args[2]["snovioSyncStatus"] == "running"
+        completed = update.call_args_list[-1].args[2]
+        assert completed["snovioSyncStatus"] == "completed"
+        assert completed["snovioSyncReportBlob"].endswith("sync-op-1.json")
+
+    def test_sync_status_returns_completed_report(self):
+        req = self._request(route_params={"jobId": "job-1", "operationId": "op-1"})
+        owner = {"oid": "test-user", "job": {
+            "snovioSyncOperationId": "op-1", "snovioSyncStatus": "completed",
+            "snovioSyncReportBlob": "snovio-reports/job-1/sync-op-1.json",
+        }}
+        with patch.object(fa, "_require_job_owner", return_value=(owner, None)), \
+                patch.object(fa, "_download_blob", return_value=b'{"summary":{"added":1}}'):
+            response = asyncio.run(fa.get_snovio_sync_status(req))
         payload = json.loads(response.body)
 
         assert response.status_code == 200
-        assert payload["listId"] == ""
-        assert payload["listSource"] == "planned_create"
-        assert payload["plannedListCreation"] is True
-        assert payload["rows"][0]["blockedReason"] == "verification_required"
-        mock_client.create_prospect_list.assert_not_called()
-        mock_client.add_prospect_to_list.assert_not_called()
+        assert payload["status"] == "completed"
+        assert payload["report"]["summary"]["added"] == 1
+
+    def test_atomic_sync_claim_updates_job_with_etag(self):
+        class Entity(dict):
+            metadata = {"etag": "etag-1"}
+
+        table = MagicMock()
+        table.get_entity.return_value = Entity()
+        with patch.object(fa.data_store, "_table", return_value=table):
+            claim = fa.data_store.claim_snovio_sync_operation(
+                "user-1", "job-1", "op-1", "requests/op-1.json"
+            )
+
+        assert claim == {"acquired": True, "operationId": "op-1", "status": "queued"}
+        update = table.update_entity.call_args.args[0]
+        assert update["snovioSyncOperationId"] == "op-1"
+        assert update["snovioSyncStatus"] == "queued"
+        assert table.update_entity.call_args.kwargs["etag"] == "etag-1"
+
+    def test_atomic_sync_claim_returns_active_winner(self):
+        class Entity(dict):
+            metadata = {"etag": "etag-1"}
+
+        table = MagicMock()
+        table.get_entity.return_value = Entity({
+            "snovioSyncOperationId": "winner-op",
+            "snovioSyncStatus": "running",
+            "snovioSyncExpiresAt": fa.time.time() + 60,
+        })
+        with patch.object(fa.data_store, "_table", return_value=table):
+            claim = fa.data_store.claim_snovio_sync_operation(
+                "user-1", "job-1", "loser-op", "requests/loser-op.json"
+            )
+
+        assert claim == {"acquired": False, "operationId": "winner-op", "status": "running"}
+        table.update_entity.assert_not_called()
 
     def test_webhook_validates_token_and_enqueues_event(self):
         req = self._request(
