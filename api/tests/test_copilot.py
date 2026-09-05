@@ -99,3 +99,24 @@ def test_dispatch_awaits_async_handlers():
         return {"ok": True}
     result = asyncio.run(copilot._dispatch("app__async_tool", {}, None, {"async_tool": {"description": "", "handler": async_handler}}))
     assert json.loads(result) == {"ok": True}
+
+
+def test_responses_preserves_reasoning_and_function_outputs():
+    client = MagicMock()
+    reasoning = MagicMock()
+    reasoning.model_dump.return_value = {"type": "reasoning", "id": "r1", "encrypted_content": "opaque"}
+    call = MagicMock()
+    call.model_dump.return_value = {"type": "function_call", "call_id": "c1", "name": "app__check", "arguments": "{}"}
+    client.responses.create.side_effect = [
+        SimpleNamespace(status="completed", output=[reasoning, call]),
+        SimpleNamespace(status="completed", output=[], output_text="Done"),
+    ]
+    result = asyncio.run(copilot.run_agent_async(client, "luna", [{"role": "user", "content": "check"}], None, {
+        "check": {"description": "Check", "handler": lambda args: {"confirmationRequired": True, "confirmationId": "confirm-1"}}
+    }, use_responses=True))
+    assert result["reply"] == "Done"
+    assert result["confirmations"][0]["confirmationId"] == "confirm-1"
+    sent = client.responses.create.call_args.kwargs
+    assert sent["store"] is False
+    assert reasoning.model_dump.return_value in sent["input"]
+    assert sent["input"][-1]["call_id"] == "c1"

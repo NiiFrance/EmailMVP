@@ -47,6 +47,8 @@ def _parse_emails(response_text: str, expected_count: int) -> list[dict]:
         raise ValueError(f"Model declined: {text[:200]}")
 
     emails = json.loads(text)
+    if isinstance(emails, dict):
+        emails = emails.get("emails")
 
     if not isinstance(emails, list) or len(emails) != expected_count:
         raise ValueError(
@@ -55,8 +57,11 @@ def _parse_emails(response_text: str, expected_count: int) -> list[dict]:
         )
 
     for i, email in enumerate(emails):
-        if "subject" not in email or "body" not in email:
+        if not isinstance(email, dict) or "subject" not in email or "body" not in email:
             raise ValueError(f"Email {i+1} missing 'subject' or 'body' key")
+        for field in ("subject", "body"):
+            if not isinstance(email[field], str) or not email[field].strip():
+                raise ValueError(f"Email {i+1} has an empty or invalid {field}")
 
     return emails
 
@@ -66,6 +71,38 @@ def _make_parser(expected_count: int):
     def parser(response_text: str) -> list[dict]:
         return _parse_emails(response_text, expected_count)
     return parser
+
+
+def email_output_schema(count: int) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "email_sequence", "strict": True,
+            "schema": {
+                "type": "object", "additionalProperties": False, "required": ["emails"],
+                "properties": {"emails": {"type": "array", "minItems": count, "maxItems": count, "items": {
+                    "type": "object", "additionalProperties": False, "required": ["subject", "body"],
+                    "properties": {"subject": {"type": "string"}, "body": {"type": "string"}},
+                }}},
+            },
+        },
+    }
+
+
+def template_snapshot(template: dict) -> dict:
+    return {"id": template["id"], "snapshot": {
+        "RowKey": template["id"], "name": template["name"], "numEmails": template["num_emails"],
+        "systemPrompt": template["system_prompt"], "requiredFields": json.dumps(template.get("required_fields") or {}),
+        "builder": "cold_email" if template["build_user_prompt"] is _build_cold_email_user_prompt else "generic",
+    }}
+
+
+def resolve_snapshot(config: dict) -> dict:
+    row = config["snapshot"]
+    template = _template_from_row(row)
+    if row.get("builder") == "cold_email":
+        template["build_user_prompt"] = _build_cold_email_user_prompt
+    return template
 
 
 def _output_headers(num_emails: int) -> list[str]:
@@ -443,15 +480,18 @@ def invalidate_campaign_cache() -> None:
 
 def get_template(template_id: str) -> dict:
     """Get a template by ID (table-backed with code fallback). Raises KeyError."""
-    templates = _load_campaign_templates()
+    templates = _load_campaign_templates(force=True)
     if templates and template_id in templates:
-        return templates[template_id]
+        template = templates[template_id]
+        if template.get("archived"):
+            raise KeyError(template_id)
+        return template
     return PROMPT_REGISTRY[template_id]
 
 
 def list_templates() -> list[dict]:
     """Return non-archived template metadata for the frontend."""
-    templates = _load_campaign_templates()
+    templates = _load_campaign_templates(force=True)
     source = (
         [t for t in templates.values() if not t.get("archived")]
         if templates

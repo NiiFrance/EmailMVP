@@ -161,6 +161,7 @@ def assemble_enriched_csv(
     results: list[dict],
     output_headers: list[str] | None = None,
     flatten_result=None,
+    preserve_existing: bool = False,
 ) -> bytes:
     """Merge generated data back into the original CSV.
 
@@ -182,33 +183,42 @@ def assemble_enriched_csv(
     total_out_cols = len(out_headers)
 
     # Determine where to start writing — append after the last existing column
-    output_start = len(df.columns)
-
     # Add output columns
     for header in out_headers:
-        df[header] = ""
+        if not preserve_existing or header not in df.columns:
+            df[header] = ""
+    if not preserve_existing or "Generation_Status" not in df.columns:
+        df["Generation_Status"] = "failed"
+    if not preserve_existing or "Generation_Error" not in df.columns:
+        df["Generation_Error"] = "No valid generation result."
 
     # Fill in the generated data
     for result in results:
         row_idx = result.get("row_index")
-        if row_idx is None or row_idx >= len(df):
+        if row_idx is None or row_idx < 0 or row_idx >= len(df):
             continue
 
         error = result.get("error")
 
         if error:
             message = _format_generation_error(error)
-            for i in range(total_out_cols):
-                df.iloc[row_idx, output_start + i] = _error_cell_value(out_headers[i], message)
+            for header in out_headers:
+                df.at[row_idx, header] = ""
+            df.at[row_idx, "Generation_Status"] = "failed"
+            df.at[row_idx, "Generation_Error"] = message
         elif flatten_result and "parsed" in result:
             flat = flatten_result(result["parsed"])
             for col_name, value in flat.items():
                 if col_name in df.columns:
                     df.at[row_idx, col_name] = value
+            df.at[row_idx, "Generation_Status"] = "completed"
+            df.at[row_idx, "Generation_Error"] = ""
         else:
             message = "The model returned an invalid response format."
-            for i in range(total_out_cols):
-                df.iloc[row_idx, output_start + i] = _error_cell_value(out_headers[i], message)
+            for header in out_headers:
+                df.at[row_idx, header] = ""
+            df.at[row_idx, "Generation_Status"] = "failed"
+            df.at[row_idx, "Generation_Error"] = message
 
     buf = io.BytesIO()
     df.to_csv(buf, index=False, encoding="utf-8-sig")

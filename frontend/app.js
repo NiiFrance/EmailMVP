@@ -42,6 +42,7 @@
             else if (n === step) row.classList.add("active");
         });
         window.scrollTo({ top: 0, behavior: "smooth" });
+        notifyGuide("view");
     }
 
     // ── State ──
@@ -52,6 +53,9 @@
     let uploadColumns = [];
     let uploadDetection = null;
     let pollTimer = null;
+    let pollVersion = 0;
+    let pollController = null;
+    let pollFailures = 0;
     let startTime = null;
     let elapsedTimer = null;
     let templateData = [];
@@ -62,6 +66,29 @@
     let activeLeadIdx = 0;
     let activeTouchIdx = 0;
     let lastElapsed = "—";
+    const guideFacts = { apiConnected: false, templatePreview: false, templateSaved: false, templateStatus: "", ready: false, recovering: false, recoveryKind: "", publicationKnown: false };
+
+    function notifyGuide(event) {
+        if (!currentUser) return;
+        try {
+        document.dispatchEvent(new CustomEvent("app:guide-state", { detail: {
+            event, user: { oid: currentUser.oid, role: currentUser.role }, jobId: currentJobId,
+            view: Object.keys(views).find(name => !views[name].hidden),
+            uploaded: !!uploadDetection, mappingReady: !mappingCard.hidden && [...mapRows.querySelectorAll("select")].every(select => select.value !== ""),
+            generating: !views.step3.hidden && !generatingBlock.hidden,
+            hasJob: !!currentJobId, hasDrafts: reviewLeads.length > 0,
+            dirty: draftsDirty || !!draftSavePending,
+            failedDrafts: reviewLeads.some(lead => lead.touches.some(touch => !touch.subject.trim() || !touch.body.trim())),
+            senderReady: selectedSenderIds().length > 0 && !!snovioJourneyTitle.value.trim(),
+            publicationActive: publication?.jobId === currentJobId && ["queued", "running"].includes(publication.status),
+            publicationComplete: publication?.jobId === currentJobId && publication.status === "completed" && publication.report?.mode === "draft",
+            publicationPresent: publication?.jobId === currentJobId,
+            recoveryAvailable: (publication?.jobId === currentJobId && ["failed", "partial", "needs_review"].includes(publication.status)) || !document.getElementById("regenerate-failed-btn").hidden,
+            briefReady: ["audience", "offer", "facts", "cta"].every(key => document.getElementById(`ce-${key}`).value.trim()),
+            ...guideFacts,
+        } }));
+        } catch (_) { return; }
+    }
 
     // ── Element refs ──
     const templateSelect = document.getElementById("template-select");
@@ -220,6 +247,7 @@
 
     async function openSettings() {
         if (!settingsDrawer) return;
+        document.dispatchEvent(new CustomEvent("app:overlay"));
         settingsLastFocus = document.activeElement;
         settingsDrawer.hidden = false;
         settingsButtons.forEach((button) => button.setAttribute("aria-expanded", "true"));
@@ -343,6 +371,11 @@
             groups[groupName].forEach((t) => {
                 const card = document.createElement("div");
                 card.className = "tpl-card";
+                card.setAttribute("role", "button");
+                card.tabIndex = 0;
+                card.addEventListener("keydown", event => {
+                    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectTemplate(t.id); }
+                });
                 card.setAttribute("data-id", t.id);
                 card.innerHTML =
                     `<div class="tpl-card-top"><div class="tpl-card-name"></div>` +
@@ -364,6 +397,7 @@
         templateSelect.value = id;
         document.querySelectorAll(".tpl-card").forEach((c) => {
             c.classList.toggle("selected", c.getAttribute("data-id") === id);
+            c.setAttribute("aria-pressed", String(c.getAttribute("data-id") === id));
         });
         step1Continue.disabled = false;
     }
@@ -482,6 +516,8 @@
                 return;
             }
             currentJobId = data.jobId;
+            Object.assign(guideFacts, { ready: false, recovering: false, recoveryKind: "", publicationKnown: false });
+            reviewLeads = [];
             totalLeads = data.totalLeads || 0;
             uploadColumns = data.columns || [];
             uploadDetection = data.detection || null;
@@ -493,6 +529,7 @@
                 generateBtn.hidden = false;
                 generateBtn.disabled = false;
                 mappingCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                notifyGuide("uploaded");
             } else {
                 // Custom template with no required columns — generate directly.
                 doGenerate();
@@ -579,6 +616,7 @@
                 return;
             }
             startGenerationView();
+            notifyGuide("generation-started");
         } catch (err) {
             showUploadError("Network error. Please check your connection.");
             generateBtn.disabled = false;
@@ -620,21 +658,45 @@
         }, 1000);
     }
     function stopElapsedTimer() { if (elapsedTimer) clearInterval(elapsedTimer); elapsedTimer = null; }
-    function startPolling() { pollTimer = setInterval(pollStatus, 5000); pollStatus(); }
-    function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+    function startPolling() {
+        stopPolling();
+        const version = pollVersion;
+        pollFailures = 0;
+        const next = async () => {
+            if (version !== pollVersion) return;
+            pollController = new AbortController();
+            await pollStatus(pollController.signal);
+            if (version !== pollVersion) return;
+            const delay = document.hidden ? 30000 : Math.min(30000, 5000 * 2 ** Math.min(pollFailures, 3));
+            pollTimer = setTimeout(next, delay + Math.random() * 1000);
+        };
+        next();
+    }
+    function stopPolling() {
+        pollVersion += 1;
+        clearTimeout(pollTimer);
+        pollTimer = null;
+        pollController?.abort();
+        pollController = null;
+    }
 
-    async function pollStatus() {
+    async function pollStatus(signal) {
         if (!currentJobId) return;
+        const jobId = currentJobId;
         try {
-            const resp = await fetch(`/api/status/${encodeURIComponent(currentJobId)}`);
+            const resp = await fetch(`/api/status/${encodeURIComponent(jobId)}`, { signal });
             const data = await resp.json();
-            if (!resp.ok) { progressStatus.textContent = "Checking status…"; return; }
+            if (jobId !== currentJobId || signal.aborted) return;
+            if (!resp.ok) { pollFailures += 1; progressStatus.textContent = "Checking status…"; return; }
+            pollFailures = 0;
             const status = data.status;
             if (status === "Running" || status === "Pending") {
                 const processed = data.processedLeads || 0;
                 const total = data.totalLeads || totalLeads || 1;
                 const phase = data.phase || "processing";
-                if (phase === "assembling") progressStatus.textContent = "Assembling output CSV…";
+                if (phase === "queued") progressStatus.textContent = "Queued for a generation turn. You can return later.";
+                else if (phase === "throttled") progressStatus.textContent = "Waiting for model capacity. Progress is saved; retrying automatically.";
+                else if (phase === "assembling") progressStatus.textContent = "Assembling output CSV…";
                 else if (processed > 0) progressStatus.textContent = `Processed ${processed} of ${total} leads…`;
                 else progressStatus.textContent = "Preparing leads…";
                 const pct = processed > 0 ? Math.min(phase === "assembling" ? 98 : 95, Math.floor((processed / total) * 100)) : 0;
@@ -647,7 +709,7 @@
                 progressStatus.textContent = "Complete!";
                 lastElapsed = startTime ? formatElapsed(Date.now() - startTime) : "—";
                 const leadCount = data.totalLeads || totalLeads;
-                setTimeout(() => enterReview(leadCount), 600);
+                setTimeout(() => { if (jobId === currentJobId) enterReview(leadCount); }, 600);
             } else if (status === "Failed") {
                 stopPolling(); stopElapsedTimer();
                 showError(data.error || "The job failed. Please try again.");
@@ -655,6 +717,8 @@
                 progressStatus.textContent = `Status: ${status}`;
             }
         } catch (err) {
+            if (signal.aborted || jobId !== currentJobId) return;
+            pollFailures += 1;
             progressStatus.textContent = "Connection issue, retrying…";
         }
     }
@@ -681,11 +745,15 @@
             }
         } catch (e) { /* ignore */ }
         const totalEmails = reviewLeads.reduce((n, l) => n + l.touches.length, 0);
+        const failedDrafts = reviewLeads.filter(lead => lead.touches.some(touch => !touch.subject.trim() || !touch.body.trim() || /^generation unavailable/i.test(touch.subject)));
+        document.getElementById("regenerate-failed-btn").hidden = failedDrafts.length === 0;
+        document.getElementById("regenerate-failed-btn").textContent = `Regenerate ${failedDrafts.length} failed leads`;
         reviewEmails.textContent = totalEmails || "—";
         activeLeadIdx = 0; activeTouchIdx = 0;
         renderLeadList();
         renderEditor();
         recordRecent(reviewLeads.length, totalEmails);
+        notifyGuide("drafts-loaded");
     }
 
     function csvToLeads(text) {
@@ -778,6 +846,7 @@
     let draftSaveTimer = null;
     let draftsDirty = false;
     let draftSavePromise = null;
+    let draftSavePending = false;
 
     function draftStatus(text) {
         const el = document.getElementById("editor-hint");
@@ -786,6 +855,8 @@
 
     function scheduleDraftSave() {
         draftsDirty = true;
+        guideFacts.ready = false;
+        notifyGuide("drafts-dirty");
         draftStatus("Unsaved changes\u2026");
         clearTimeout(draftSaveTimer);
         draftSaveTimer = setTimeout(() => { saveDrafts(); }, 1200);
@@ -794,6 +865,7 @@
     async function saveDrafts() {
         if (!draftsDirty || !currentJobId || !reviewLeads.length) return draftSavePromise;
         draftsDirty = false;
+        draftSavePending = true;
         draftStatus("Saving\u2026");
         draftSavePromise = (async () => {
             try {
@@ -812,6 +884,9 @@
             } catch (e) {
                 draftsDirty = true;
                 draftStatus("Couldn\u2019t save edits \u2014 retrying on next change");
+            } finally {
+                draftSavePending = false;
+                notifyGuide("drafts-saved");
             }
         })();
         return draftSavePromise;
@@ -821,6 +896,7 @@
         clearTimeout(draftSaveTimer);
         if (draftsDirty) await saveDrafts();
         else if (draftSavePromise) await draftSavePromise;
+        if (draftsDirty) throw new Error("Draft edits could not be saved. Export is blocked until they are saved.");
     }
 
     // ── Recent (session history, localStorage) ──
@@ -857,7 +933,7 @@
         row.className = "recent-row";
         const statusColor = job.status === "Completed" ? "#15803D" : (job.status === "Failed" ? "#B91C1C" : "#B45309");
         const statusLabel = job.status === "Completed" ? "Drafted" : (job.status || "—");
-        const canOpen = !archived && job.status === "Completed";
+        const canOpen = !archived && ["Completed", "generating", "queued", "running", "Pending", "Running"].includes(job.status);
         const canRemove = !archived && (job.status === "Completed" || job.status === "Failed");
         row.innerHTML =
             `<div style="min-width:0;"><div class="recent-name"></div><div class="recent-tpl"></div></div>` +
@@ -1025,10 +1101,21 @@
 
     // Resume a completed campaign: load its drafts straight into Review.
     async function openJob(job) {
+        Object.assign(guideFacts, { ready: false, recovering: false, recoveryKind: "", publicationKnown: false });
+        snovioListName.value = "";
+        snovioJourneyTitle.value = "";
+        snovioListSelect.value = "";
+        snovioCampaignSelect.value = "";
+        for (const option of snovioSenderSelect.options) option.selected = false;
         currentJobId = job.jobId;
         totalLeads = job.totalLeads || 0;
         if (job.templateId) selectTemplate(job.templateId);
         stopPolling(); stopElapsedTimer();
+        if (["generating", "queued", "running", "pending"].includes(String(job.status).toLowerCase())) {
+            startGenerationView();
+            notifyGuide("job-opened");
+            return;
+        }
         railWrap.hidden = false;
         showView("step3");
         generatingBlock.hidden = true;
@@ -1040,6 +1127,8 @@
         saveContext("step3");
         await loadDrafts();
         loadSnovioOptions();
+        recoverPublication(currentJobId);
+        notifyGuide("job-opened");
     }
 
     // Persist resume context (best-effort, fire-and-forget).
@@ -1077,10 +1166,30 @@
         stopPolling(); stopElapsedTimer();
         currentJobId = null; totalLeads = 0; startTime = null;
         snovioVerificationResults = []; reviewLeads = [];
+        publication = null;
+        publicationPollVersion += 1;
+        document.getElementById("publish-progress").hidden = true;
+        snovioListName.value = "";
+        snovioJourneyTitle.value = "";
         snovioReport.hidden = true;
         clearFile();
         showView("step1");
     }
+
+    document.getElementById("regenerate-failed-btn").addEventListener("click", async () => {
+        if (!currentJobId || !window.confirm("Regenerate only failed leads using the original template version? Successful drafts will be preserved.")) return;
+        try {
+            await flushDraftSave();
+            await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/regenerate-failed`, {});
+            generatingBlock.hidden = false;
+            reviewBlock.hidden = true;
+            startTime = Date.now();
+            stopPolling(); stopElapsedTimer(); startElapsedTimer(); startPolling();
+            guideFacts.recovering = true;
+            guideFacts.recoveryKind = "generation";
+            notifyGuide("recovery-started");
+        } catch (error) { showError(error.message); }
+    });
 
     // ============================================================
     //  Snov.io (logic preserved)
@@ -1303,24 +1412,30 @@
             }
         }
         if (!synced && !payload.dryRun && blocked) {
-            frag.appendChild(note("Tip: if emails were skipped as risky, turn off \u201cOnly sync verified emails\u201d under Advanced, or run Verify first."));
+            frag.appendChild(note("Review the blocked-row reasons before retrying. Invalid recipients and incomplete drafts cannot be exported."));
         }
         return frag;
     }
     function renderSnovioOptions(options) {
+        const previousListId = snovioListSelect.value;
+        const previousCampaignId = snovioCampaignSelect.value;
+        const previousSenderIds = new Set(selectedSenderIds());
         const lists = options.lists || [];
         const campaigns = options.campaigns || [];
         snovioListSelect.innerHTML = "";
-        if (!lists.length) snovioListSelect.appendChild(new Option("No lists found", ""));
-        else lists.filter((i) => !i.isDeleted).forEach((i) => snovioListSelect.appendChild(new Option(`${i.name || "List"} (${i.contacts || 0})`, i.id)));
+        snovioListSelect.appendChild(new Option("Create a dedicated list", ""));
+        lists.filter((i) => !i.isDeleted).forEach((i) => snovioListSelect.appendChild(new Option(`${i.name || "List"} (${i.contacts || 0})`, i.id)));
         snovioCampaignSelect.innerHTML = "";
         snovioCampaignSelect.appendChild(new Option("No campaign", ""));
         campaigns.forEach((i) => snovioCampaignSelect.appendChild(new Option(`${i.campaign || "Campaign"} - ${i.status || "Unknown"}`, i.id)));
+        if (Array.from(snovioListSelect.options).some(option => option.value === previousListId)) snovioListSelect.value = previousListId;
+        if (Array.from(snovioCampaignSelect.options).some(option => option.value === previousCampaignId)) snovioCampaignSelect.value = previousCampaignId;
         if (snovioSenderSelect) {
             snovioSenderSelect.innerHTML = "";
             const senders = options.senderAccounts || [];
             if (!senders.length) snovioSenderSelect.appendChild(new Option("No sender accounts", ""));
             else senders.forEach((i) => snovioSenderSelect.appendChild(new Option(`${i.email_from || i.sender_name || "Sender"}${i.valid === false ? " (invalid)" : ""}`, i.id)));
+            for (const option of snovioSenderSelect.options) option.selected = previousSenderIds.has(option.value);
         }
         applyCampaignListSelection();
     }
@@ -1333,6 +1448,7 @@
     }
     async function loadSnovioOptions() {
         if (!snovioPanel) return;
+        const requestedJobId = currentJobId;
         setSnovioBusy(true);
         snovioStatus.textContent = "Checking account...";
         try {
@@ -1344,9 +1460,12 @@
             const status = await statusResp.json();
             const options = await optionsResp.json();
             const preflight = preflightResp ? await preflightResp.json() : null;
+            if (requestedJobId !== currentJobId) return;
             snovioOptions = options;
             renderSnovioOptions(options);
             setSnovioConnected(!!status.configured);
+            guideFacts.apiConnected = !!status.configured && statusResp.ok;
+            notifyGuide("connection");
             if (!status.configured) {
                 const msg = status.sessionActive ? "Session error \u2014 reconnect" : "Not connected \u2014 enter your Snov.io API keys above.";
                 snovioStatus.textContent = msg;
@@ -1377,7 +1496,11 @@
     async function postJson(url, payload) {
         const response = await snovioFetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await readApiResponse(response);
-        if (!response.ok) throw new Error(data.error || "Snov.io request failed.");
+        if (!response.ok) {
+            const error = new Error(data.error || "Snov.io request failed.");
+            error.details = data;
+            throw error;
+        }
         return data;
     }
 
@@ -1394,21 +1517,100 @@
         }
     }
 
-    async function waitForSnovioSync(statusUrl) {
-        for (let attempt = 0; attempt < 450; attempt += 1) {
-            const response = await snovioFetch(statusUrl);
-            const operation = await readApiResponse(response);
-            if (!response.ok) throw new Error(operation.error || "Could not check the Snov.io sync status.");
-            if (operation.status === "completed") return operation.report || {};
-            if (operation.status === "failed") throw new Error(operation.error || "Snov.io could not complete the sync.");
-            renderSnovioReport("Sync in progress", {
-                status: operation.status,
-                message: "Snov.io is processing the leads in the background. You can leave this screen safely.",
-            });
-            await new Promise((resolve) => setTimeout(resolve, 2000));
+    let publication = null;
+    let publicationPollVersion = 0;
+    snovioPanel.insertBefore(document.getElementById("publish-form"), snovioPanel.querySelector(".snovio-primary"));
+
+    function renderPublication(operation, jobId) {
+        if (jobId !== currentJobId) return;
+        publication = { ...operation, jobId };
+        const report = operation.report || {};
+        const summary = report.summary || {};
+        document.getElementById("publish-progress").hidden = false;
+        document.getElementById("publish-stage").textContent = `${operation.status || "queued"} · ${report.stage || "preflight"}`;
+        document.getElementById("publish-meter").max = report.total || 1;
+        document.getElementById("publish-meter").value = report.processed || 0;
+        document.getElementById("publish-counts").textContent = `${report.processed || 0} / ${report.total || totalLeads} leads · ${(summary.added || 0) + (summary.updated || 0)} exported · ${summary.failed || 0} failed · ${summary.blocked || 0} blocked`;
+        document.getElementById("publish-error").textContent = report.error || operation.error || "";
+        document.getElementById("publish-retry").hidden = !["failed", "partial", "needs_review"].includes(operation.status);
+        document.getElementById("publish-retry").textContent = operation.status === "needs_review" ? "Check uncertain result" : "Retry failed work";
+        const link = document.getElementById("publish-link");
+        link.hidden = !report.campaignId;
+        if (report.campaignId) link.href = `https://app.snov.io/campaigns/${encodeURIComponent(report.campaignId)}`;
+        const failures = (report.rows || []).filter(row => row.status === "failed" || row.blockedReason);
+        const list = document.getElementById("publish-failed-rows");
+        list.replaceChildren();
+        for (const row of failures.slice(0, 100)) {
+            const item = document.createElement("li");
+            item.textContent = `Row ${row.rowIndex + 1}: ${row.error || row.blockedReason}`;
+            list.appendChild(item);
         }
-        throw new Error("The sync is still running. Refresh this campaign later to check the final report.");
+        document.getElementById("publish-failures").hidden = !failures.length;
+        notifyGuide("publication-result");
     }
+
+    async function waitForSnovioSync(statusUrl, jobId = currentJobId) {
+        const version = ++publicationPollVersion;
+        let failures = 0;
+        while (jobId === currentJobId && version === publicationPollVersion) {
+            try {
+                const response = await snovioFetch(statusUrl);
+                const operation = await readApiResponse(response);
+                if ([401, 403, 404].includes(response.status)) {
+                    renderPublication({ status: "unavailable", error: operation.error || "Sign in again to view progress." }, jobId);
+                    return {};
+                }
+                if (!response.ok) throw new Error(operation.error || "Progress temporarily unavailable.");
+                failures = 0;
+                renderPublication(operation, jobId);
+                if (["completed", "partial", "failed", "needs_review"].includes(operation.status)) return operation.report || {};
+            } catch (error) {
+                failures += 1;
+                if (jobId === currentJobId) document.getElementById("publish-error").textContent = "Connection interrupted. Reconnecting to saved progress...";
+            }
+            await new Promise(resolve => setTimeout(resolve, (document.hidden ? 30000 : Math.min(30000, 3000 * 2 ** Math.min(failures, 4))) + Math.random() * 1000));
+        }
+        return {};
+    }
+
+    async function recoverPublication(jobId) {
+        publication = null;
+        guideFacts.publicationKnown = false;
+        document.getElementById("publish-progress").hidden = true;
+        document.getElementById("publish-summary").textContent = `${totalLeads} leads · ${totalLeads * (selectedTemplate()?.num_emails || 1)} emails · Draft only`;
+        try {
+            const response = await snovioFetch(`/api/jobs/${encodeURIComponent(jobId)}/snovio/sync/latest`);
+            if (jobId === currentJobId && (response.ok || response.status === 404)) {
+                guideFacts.publicationKnown = true;
+                notifyGuide("publication-checked");
+            }
+            if (!response.ok || jobId !== currentJobId) return;
+            const operation = await readApiResponse(response);
+            renderPublication(operation, jobId);
+            if (["queued", "running"].includes(operation.status)) waitForSnovioSync(`/api/jobs/${encodeURIComponent(jobId)}/snovio/sync/${operation.operationId}`, jobId);
+        } catch (error) { /* The next progress request can recover this operation. */ }
+    }
+
+    document.getElementById("publish-retry").addEventListener("click", async () => {
+        if (!publication || publication.jobId !== currentJobId) return;
+        const jobId = currentJobId;
+        try {
+            const payload = { operationId: publication.operationId, reconcile: publication.status === "needs_review" };
+            const url = `/api/jobs/${encodeURIComponent(jobId)}/snovio/retry`;
+            let operation;
+            try {
+                operation = await postJson(url, payload);
+            } catch (error) {
+                if (error.details?.code !== "missing_recipient_confirmation" || jobId !== currentJobId) throw error;
+                if (!window.confirm(`Snov.io reports no prospect for row ${error.details.rowIndex + 1}. Retry this row with duplicate creation disabled and verify its list membership?`)) return;
+                operation = await postJson(url, { ...payload, confirmMissing: true });
+            }
+            guideFacts.recovering = true;
+            guideFacts.recoveryKind = "export";
+            notifyGuide("recovery-started");
+            await waitForSnovioSync(operation.statusUrl, jobId);
+        } catch (error) { document.getElementById("publish-error").textContent = error.message; }
+    });
     function selectedCampaign() {
         const campaignId = snovioCampaignSelect.value;
         if (!campaignId || !snovioOptions) return null;
@@ -1431,7 +1633,7 @@
         if (customName) return customName;
         const date = new Date().toISOString().slice(0, 10);
         const fileBase = selectedFile ? selectedFile.name.replace(/\.[^.]+$/, "") : "";
-        return ["Cloudware", selectedTemplateName(), fileBase, date].filter(Boolean).join(" - ");
+        return ["Cloudware", selectedTemplateName(), fileBase, date].filter(Boolean).join(" - ").slice(0, 49);
     }
 
     // ── New-list mode: the "+ New list" button swaps the dropdown for a name box ──
@@ -1478,6 +1680,9 @@
 
     async function runSnovioSync(dryRun) {
         if (!currentJobId) return;
+        try { await flushDraftSave(); } catch (error) { renderSnovioReport("Drafts", { error: error.message }); return; }
+        const jobId = currentJobId;
+        if (!dryRun && !window.confirm("Export these leads and their drafted emails to Snov.io? Active campaign destinations will be blocked.")) return;
         const target = resolveListTarget("Snov.io");
         if (!target) return;
         const { campaign, listId, autoCreateList } = target;
@@ -1487,8 +1692,9 @@
             let report = await postJson(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/sync`, payload);
             if (!dryRun && report.statusUrl) {
                 renderSnovioReport("Sync queued", report);
-                report = await waitForSnovioSync(report.statusUrl);
+                report = await waitForSnovioSync(report.statusUrl, jobId);
             }
+            if (jobId !== currentJobId) return;
             if (!dryRun && report.createdList) { exitNewListMode(); await loadSnovioOptions(); if (report.listId) snovioListSelect.value = report.listId; }
             renderSnovioReport(dryRun ? "Dry Run" : "Sync Report", report);
         } catch (err) {
@@ -1541,6 +1747,8 @@
     }
     async function runSnovioJourney(dryRun) {
         if (!currentJobId) return;
+        try { await flushDraftSave(); } catch (error) { renderSnovioReport("Drafts", { error: error.message }); return; }
+        const jobId = currentJobId;
         const senderIds = selectedSenderIds();
         const campaignTitle = snovioJourneyTitle.value.trim();
         if (!dryRun && !senderIds.length) { renderSnovioReport("Campaign", { error: "Select at least one sender account to create a campaign." }); return; }
@@ -1555,10 +1763,26 @@
         setSnovioBusy(true);
         try {
             const payload = { dryRun, listId, autoCreateList, createListIfMissing: autoCreateList, listName: defaultSnovioListName(), campaignTitle, senderAccountIds: senderIds, delayDays: Number(snovioJourneyDelay.value) || 0, trackOpens: snovioJourneyOpen.checked, trackClicks: snovioJourneyClick.checked, templateId: templateSelect.value, templateName: selectedTemplateName(), sourceFileName: selectedFile ? selectedFile.name : "", requireVerification: snovioRequireVerification.checked, verificationResults: snovioVerificationResults, includeGeneratedCustomFields: true };
-            const response = await snovioFetch(`/api/jobs/${encodeURIComponent(currentJobId)}/snovio/journey`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-            const report = await response.json();
-            if (!dryRun && response.ok) { exitNewListMode(); await loadSnovioOptions(); }
-            renderSnovioReport(dryRun ? "Campaign Preview" : (response.ok ? "Campaign Created" : "Campaign"), report);
+            const url = `/api/jobs/${encodeURIComponent(jobId)}/snovio/journey`;
+            const preview = await postJson(url, { ...payload, dryRun: true });
+            if (jobId !== currentJobId) return;
+            renderSnovioReport("Readiness", preview);
+            guideFacts.ready = !!preview.sync?.summary?.eligible && !preview.sync?.summary?.blocked;
+            notifyGuide("readiness");
+            if (dryRun) return;
+            const counts = preview.sync?.summary || {};
+            if (counts.blocked || !counts.eligible) throw new Error(`${counts.blocked || 0} leads need attention before draft preparation.`);
+            if (!window.confirm(`Prepare "${campaignTitle}" for ${counts.eligible} leads with ${preview.numTouches} emails each? Sender: ${Array.from(snovioSenderSelect.selectedOptions).map(option => option.textContent).join(", ")}. No campaign will be launched.`)) return;
+            let operation;
+            if (publication?.jobId === jobId && publication.status === "completed" && publication.report?.mode === "list") {
+                operation = await postJson(`/api/jobs/${encodeURIComponent(jobId)}/snovio/retry`, { ...payload, mode: "draft", operationId: publication.operationId });
+            } else {
+                operation = await postJson(url, payload);
+            }
+            if (jobId !== currentJobId) return;
+            renderPublication({ ...operation, status: "queued" }, jobId);
+            notifyGuide("publication-started");
+            await waitForSnovioSync(operation.statusUrl, jobId);
         } catch (err) { renderSnovioReport("Campaign", { error: err.message }); }
         finally { setSnovioBusy(false); }
     }
@@ -1575,7 +1799,10 @@
     });
     step2Back.addEventListener("click", () => { resetMappingPanel(); uploadBtn.disabled = !selectedFile; showView("step1"); });
     step3Back.addEventListener("click", () => showView("step2"));
-    step3Continue.addEventListener("click", async () => { await flushDraftSave(); showView("step4"); loadSnovioOptions(); });
+    step3Continue.addEventListener("click", async () => {
+        try { await flushDraftSave(); showView("step4"); loadSnovioOptions(); recoverPublication(currentJobId); }
+        catch (error) { draftStatus(error.message); }
+    });
     step4Back.addEventListener("click", () => showView("step3"));
     newJobBtn.addEventListener("click", resetAll);
     retryBtn.addEventListener("click", resetAll);
@@ -1827,7 +2054,7 @@
                     card.remove();
                     const result = typeof data.result === "string" ? data.result : "";
                     copilotBubble("assistant", [
-                        `Confirmed action completed: ${data.summary || data.toolName || "Snov.io action"}.`,
+                        data.statusUrl ? `Export queued. Open the campaign's progress panel to follow operation ${data.operationId}.` : `Confirmed action completed: ${data.summary || data.toolName || "Snov.io action"}.`,
                         result ? `Snov.io response: ${result}` : "",
                     ].filter(Boolean).join("\n"));
                 } catch (error) {
@@ -1876,6 +2103,7 @@
 
     if (copilotFab) copilotFab.addEventListener("click", () => {
         copilotPanel.hidden = !copilotPanel.hidden;
+        if (!copilotPanel.hidden) document.dispatchEvent(new CustomEvent("app:overlay"));
         if (!copilotPanel.hidden && !copilotMessages.childElementCount) {
             copilotBubble("assistant", "Hi! Attach a lead list with \uD83D\uDCCE and I can draft a full campaign for you (you approve before anything reaches Snov.io). I can also search Snov.io for new leads, manage your prospect lists, and answer questions about your campaigns.");
         }
@@ -1994,6 +2222,7 @@
             }
             if (!resp.ok) return;
             currentUser = await resp.json();
+            notifyGuide("authenticated");
             renderUserChip(currentUser);
             if (settingsWebhookSection) settingsWebhookSection.hidden = currentUser.role !== "admin";
             if (document.getElementById("settings-user-name")) {
@@ -2165,6 +2394,12 @@
             row.querySelector(".cr-name").textContent = c.name;
             row.querySelector(".cr-meta").textContent = `${c.group} · ${c.numEmails} email${c.numEmails === 1 ? "" : "s"} per lead`;
             const badges = row.querySelector(".cr-badges");
+            if (!c.builtin) {
+                const visibility = document.createElement("span");
+                visibility.className = "cr-badge";
+                visibility.textContent = c.publicationStatus === "draft" ? "unpublished" : "published";
+                badges.appendChild(visibility);
+            }
             if (c.builtin) { const b = document.createElement("span"); b.className = "cr-badge"; b.textContent = "built-in"; badges.appendChild(b); }
             if (c.archived) { const b = document.createElement("span"); b.className = "cr-badge cr-badge-archived"; b.textContent = "archived"; badges.appendChild(b); }
             row.querySelector(".cr-edit").addEventListener("click", () => openCampaignEditor(c.id));
@@ -2173,6 +2408,7 @@
     }
 
     function openCampaignEditor(id) {
+        Object.assign(guideFacts, { templatePreview: false, templateSaved: false, templateStatus: "" });
         const editor = document.getElementById("campaign-editor");
         const c = id ? manageCampaigns.find((x) => x.id === id) : null;
         editingCampaignId = c ? c.id : null;
@@ -2182,6 +2418,12 @@
         document.getElementById("ce-num").value = c ? c.numEmails : 4;
         document.getElementById("ce-desc").value = c ? (c.description || "") : "";
         document.getElementById("ce-prompt").value = c ? (c.systemPrompt || "") : "";
+        document.getElementById("ce-preview").replaceChildren();
+        document.getElementById("ce-save-draft").hidden = !!c && !c.archived;
+        for (const key of ["audience", "offer", "facts", "cta", "tone", "language"]) {
+            document.getElementById(`ce-${key}`).value = c?.brief?.[key] || (key === "tone" ? "Professional" : key === "language" ? "English" : "");
+        }
+        builderPreviewKey = "";
         const archiveBtn = document.getElementById("ce-archive");
         archiveBtn.hidden = !c;
         archiveBtn.textContent = c && c.archived ? "Restore" : "Archive";
@@ -2196,13 +2438,58 @@
         el.hidden = false;
     }
 
-    async function saveCampaign() {
+    let builderPreviewKey = "";
+    function campaignBrief() {
+        const brief = { numEmails: Number(document.getElementById("ce-num").value) };
+        for (const key of ["audience", "offer", "facts", "cta", "tone", "language"]) brief[key] = document.getElementById(`ce-${key}`).value.trim();
+        return brief;
+    }
+
+    document.getElementById("ce-preview-btn").addEventListener("click", async () => {
+        const button = document.getElementById("ce-preview-btn");
+        const brief = campaignBrief();
+        button.disabled = true;
+        document.getElementById("ce-error").hidden = true;
+        const preview = document.getElementById("ce-preview");
+        preview.textContent = "Generating sample emails...";
+        try {
+            const result = await postJson("/api/campaign-builder/preview", brief);
+            if (JSON.stringify(campaignBrief()) !== JSON.stringify(brief)) throw new Error("The brief changed. Generate a new preview.");
+            document.getElementById("ce-prompt").value = result.systemPrompt;
+            preview.replaceChildren();
+            result.sampleEmails.forEach((email, index) => {
+                const section = document.createElement("section");
+                const heading = document.createElement("h4");
+                heading.textContent = `Touch ${index + 1}: ${email.subject}`;
+                const body = document.createElement("p");
+                body.textContent = email.body;
+                section.append(heading, body);
+                preview.appendChild(section);
+            });
+            builderPreviewKey = JSON.stringify(brief);
+            guideFacts.templatePreview = true;
+            guideFacts.templateSaved = false;
+            notifyGuide("template-preview");
+        } catch (error) { preview.textContent = ""; ceError(error.message); }
+        finally { button.disabled = false; }
+    });
+
+    document.getElementById("ce-save-draft").addEventListener("click", () => saveCampaign("draft"));
+
+    async function saveCampaign(publicationStatus = "published") {
+        if (typeof publicationStatus !== "string") publicationStatus = "published";
+        if (!editingCampaignId && builderPreviewKey !== JSON.stringify(campaignBrief())) {
+            ceError("Generate and review a preview before saving this template.");
+            return;
+        }
         const payload = {
             name: document.getElementById("ce-name").value.trim(),
             group: document.getElementById("ce-group").value.trim() || "Custom",
             description: document.getElementById("ce-desc").value.trim(),
             numEmails: Number(document.getElementById("ce-num").value) || 0,
             systemPrompt: document.getElementById("ce-prompt").value.trim(),
+            brief: campaignBrief(),
+            publicationStatus,
         };
         const saveBtn = document.getElementById("ce-save");
         saveBtn.disabled = true;
@@ -2212,13 +2499,16 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
             });
-            const data = await resp.json();
+            const data = await readApiResponse(resp);
             if (!resp.ok) { ceError(data.error || "Save failed."); return; }
             document.getElementById("campaign-editor").hidden = true;
             await loadManageCampaigns();
             loadTemplates(); // refresh the Step 1 picker with the change
+            guideFacts.templateSaved = true;
+            guideFacts.templateStatus = publicationStatus;
+            notifyGuide("template-saved");
         } catch (err) {
-            ceError("Network error — please try again.");
+            ceError(err.message || "Save failed.");
         } finally {
             saveBtn.disabled = false;
         }
@@ -2302,6 +2592,22 @@
     document.getElementById("ce-close").addEventListener("click", () => { document.getElementById("campaign-editor").hidden = true; });
     document.getElementById("ce-save").addEventListener("click", saveCampaign);
     document.getElementById("ce-archive").addEventListener("click", toggleArchiveCampaign);
+    document.addEventListener("change", event => {
+        if (event.target.closest("#snovio-panel")) guideFacts.ready = false;
+        notifyGuide("input");
+    });
+    document.querySelectorAll("#nav-home, #nav-manage").forEach(element => {
+        element.tabIndex = 0;
+        element.setAttribute("role", "button");
+        element.addEventListener("keydown", event => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); element.click(); }
+        });
+    });
+    document.getElementById("ce-brief").addEventListener("input", () => {
+        guideFacts.templatePreview = false;
+        guideFacts.templateSaved = false;
+        notifyGuide("input");
+    });
     initAuth();
     loadTemplates();
     renderHome();

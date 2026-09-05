@@ -26,6 +26,9 @@ class DummyHttpResponse:
         self.mimetype = mimetype
         self.headers = headers or {}
 
+    def get_body(self):
+        return self.body.encode("utf-8") if isinstance(self.body, str) else self.body
+
 
 _azure = ModuleType("azure")
 
@@ -33,10 +36,11 @@ _azure_functions = ModuleType("azure.functions")
 _azure_functions.AuthLevel = MagicMock(ANONYMOUS="ANONYMOUS")
 _azure_functions.HttpResponse = DummyHttpResponse
 _azure_functions.HttpRequest = MagicMock()
+_azure_functions.TimerRequest = MagicMock()
 
 _azure_durable = ModuleType("azure.durable_functions")
 _mock_dfapp_instance = MagicMock()
-for _decorator_name in ("route", "orchestration_trigger", "activity_trigger", "durable_client_input", "queue_output", "queue_trigger"):
+for _decorator_name in ("route", "orchestration_trigger", "activity_trigger", "durable_client_input", "queue_output", "queue_trigger", "timer_trigger"):
     getattr(_mock_dfapp_instance, _decorator_name).return_value = lambda f: f
 _azure_durable.DFApp = MagicMock(return_value=_mock_dfapp_instance)
 _azure_durable.DurableOrchestrationContext = MagicMock()
@@ -46,6 +50,9 @@ _azure_storage_blob = ModuleType("azure.storage.blob")
 _azure_storage_blob.BlobServiceClient = MagicMock()
 _azure_storage_blob.generate_blob_sas = MagicMock(return_value="sas-token")
 _azure_storage_blob.BlobSasPermissions = MagicMock()
+_azure_storage_queue = ModuleType("azure.storage.queue")
+_azure_storage_queue.QueueClient = MagicMock()
+_azure_storage_queue.TextBase64EncodePolicy = MagicMock()
 
 _azure_identity = ModuleType("azure.identity")
 _azure_identity.DefaultAzureCredential = MagicMock()
@@ -62,6 +69,7 @@ class _ResourceNotFoundError(Exception):
 _azure_core_exceptions.ResourceNotFoundError = _ResourceNotFoundError
 _azure_core_exceptions.ResourceExistsError = type("ResourceExistsError", (Exception,), {})
 _azure_core_exceptions.ResourceModifiedError = type("ResourceModifiedError", (Exception,), {})
+_azure_core_exceptions.HttpResponseError = type("HttpResponseError", (Exception,), {})
 
 _azure_data = ModuleType("azure.data")
 _azure_data_tables = ModuleType("azure.data.tables")
@@ -73,6 +81,7 @@ sys.modules["azure.functions"] = _azure_functions
 sys.modules["azure.durable_functions"] = _azure_durable
 sys.modules["azure.storage"] = _azure_storage
 sys.modules["azure.storage.blob"] = _azure_storage_blob
+sys.modules["azure.storage.queue"] = _azure_storage_queue
 sys.modules["azure.identity"] = _azure_identity
 sys.modules["azure.core"] = _azure_core
 sys.modules["azure.core.exceptions"] = _azure_core_exceptions
@@ -1158,7 +1167,7 @@ class TestSnovioEndpoints:
         with patch.object(fa, "_resolve_snovio_credentials", return_value=("client-id", "client-secret", "account")), \
                 patch.object(fa, "_encrypt_session_secret", return_value=("encrypted-token", True)), \
                 patch.object(fa.data_store, "save_snovio_access_token") as save_token, \
-                patch.object(fa.data_store, "reserve_snovio_rate_slot", return_value=0.0) as reserve:
+                patch.object(fa.data_store, "reserve_snovio_rest_slot", return_value=0.0) as reserve:
             client = fa._snovio_client(self._request())
             client.token_saver("access-token", 1234.0)
             assert client.rate_reserver() == 0.0
@@ -1166,7 +1175,7 @@ class TestSnovioEndpoints:
         credential_key = fa._snovio_credential_key("client-id", "client-secret")
         assert credential_key not in {"client-id", "client-secret"}
         save_token.assert_called_once_with(credential_key, "encrypted-token", 1234.0, True)
-        reserve.assert_called_once_with(credential_key, fa.SNOVIO_REQUESTS_PER_MINUTE)
+        reserve.assert_called_once_with(hashlib.sha256(b"client-id").hexdigest(), fa.SNOVIO_REQUESTS_PER_MINUTE)
 
     @patch.object(fa, "_store_snovio_session", return_value={"sessionId": "sess-1", "expiresAt": "2030-01-01T00:00:00+00:00", "clientIdMasked": "abcd\u2026wxyz"})
     @patch.object(fa, "SnovioClient")
@@ -1273,15 +1282,12 @@ class TestSnovioEndpoints:
             route_params={"jobId": "job-1"},
         )
 
-        response = asyncio.run(fa.create_snovio_journey(req))
-        payload = json.loads(response.body)
-
-        assert response.status_code == 201
-        assert payload["campaignId"] == 555
-        assert payload["status"] == "draft"
-        assert payload["stepContent"][0]["status"] == "written"
-        mock_client.create_campaign.assert_called_once()
-        mock_client.create_email_step_content.assert_called_once()
+        with patch.object(fa, "_queue_publication", return_value=fa._json_response({"status": "queued"}, 202)) as enqueue:
+            response = asyncio.run(fa.create_snovio_journey(req))
+        assert response.status_code == 202
+        assert enqueue.call_args.args[3]["mode"] == "draft"
+        mock_client.create_campaign.assert_not_called()
+        mock_client.create_email_step_content.assert_not_called()
 
     def test_balance_requires_credentials(self):
         response = asyncio.run(fa.get_snovio_balance(MagicMock()))
@@ -1461,12 +1467,15 @@ class TestSnovioEndpoints:
         assert payload["listId"] == ""
         assert payload["listSource"] == "planned_create"
         assert payload["plannedListCreation"] is True
-        assert payload["listName"].startswith("Cloudware - Help & Assistance - Leads - inbound")
+        assert payload["listName"].startswith("Cloudware - Help & Assistance")
+        assert len(payload["listName"]) < 50
         mock_client.create_prospect_list.assert_not_called()
 
     @patch.object(fa.data_store, "claim_snovio_sync_operation")
     @patch.object(fa, "_upload_blob")
     @patch.object(fa, "_snovio_configured", return_value=True)
+    @patch.object(fa, "SNOVIO_CLIENT_ID", "synthetic-id")
+    @patch.object(fa, "SNOVIO_CLIENT_SECRET", "synthetic-secret")
     def test_sync_job_live_queues_without_calling_snovio(self, mock_configured, mock_upload, mock_claim):
         mock_claim.return_value = {"acquired": True, "operationId": "op-1", "status": "queued"}
         req = self._request(
@@ -1485,13 +1494,15 @@ class TestSnovioEndpoints:
         assert queued["jobId"] == "job-1"
         assert queued["oid"] == "test-user"
         assert queued["operationId"] == payload["operationId"]
-        mock_upload.assert_called_once()
+        assert mock_upload.call_count == 2
         mock_claim.assert_called_once()
 
     @patch.object(fa.data_store, "claim_snovio_sync_operation", return_value={
         "acquired": False, "operationId": "existing-op", "status": "running",
     })
     @patch.object(fa, "_snovio_configured", return_value=True)
+    @patch.object(fa, "SNOVIO_CLIENT_ID", "synthetic-id")
+    @patch.object(fa, "SNOVIO_CLIENT_SECRET", "synthetic-secret")
     def test_sync_job_reuses_existing_atomic_claim(self, mock_configured, mock_claim):
         req = self._request(
             body={"dryRun": False, "listName": "Cloudware Test Leads"},
@@ -1512,6 +1523,8 @@ class TestSnovioEndpoints:
     })
     @patch.object(fa, "_upload_blob")
     @patch.object(fa, "_snovio_configured", return_value=True)
+    @patch.object(fa, "SNOVIO_CLIENT_ID", "synthetic-id")
+    @patch.object(fa, "SNOVIO_CLIENT_SECRET", "synthetic-secret")
     def test_delegated_sync_uses_job_owner_partition(self, mock_configured, mock_upload, mock_claim):
         req = self._request(
             body={"dryRun": False, "listName": "Delegated Test"},
@@ -1538,21 +1551,32 @@ class TestSnovioEndpoints:
         }
         message = MagicMock()
         message.get_body.return_value = json.dumps(operation).encode("utf-8")
-        report = {"summary": {"added": 1}, "rows": [{"status": "added"}]}
+        state = fa.snovio_publish.new_state({"listId": "123"}, fa._snovio_credential_key("", ""))
+        state.update(credentialOid="test-user", snapshotBlob="snapshot.csv")
+        checkpoint = MagicMock(spec=fa.PublishCheckpoint)
+        checkpoint.load.return_value = state
+        client = fa.SnovioClient("", "")
+
+        def execute(current, snovio, job, snapshot, save, sync):
+            current["status"] = "completed"
+            current["rows"] = {"0": {"rowIndex": 0, "status": "added"}}
+            save(current)
+
         with patch.object(fa.data_store, "get_job", return_value={
                     "snovioSyncOperationId": "op-1", "snovioSyncStatus": "queued",
                 }), \
-                patch.object(fa.data_store, "update_job") as update, \
+                patch.object(fa.data_store, "update_snovio_operation") as update, \
                 patch.object(fa, "_download_blob", return_value=b'{"dryRun":false}'), \
-                patch.object(fa, "_snovio_client_for_oid", return_value=MagicMock()), \
-                patch.object(fa, "_run_prospect_sync", return_value=(report, None)), \
-                patch.object(fa, "_upload_snovio_report", return_value="snovio-reports/job-1/sync-op-1.json"):
+                patch.object(fa, "_snovio_client_for_oid", return_value=client), \
+                patch.object(fa, "PublishCheckpoint") as lease, \
+                patch.object(fa.snovio_publish, "run_chunk", side_effect=execute):
+            lease.return_value.__enter__.return_value = checkpoint
             fa.process_snovio_sync(message)
 
-        assert update.call_args_list[0].args[2]["snovioSyncStatus"] == "running"
-        completed = update.call_args_list[-1].args[2]
+        completed = update.call_args_list[-1].args[3]
         assert completed["snovioSyncStatus"] == "completed"
-        assert completed["snovioSyncReportBlob"].endswith("sync-op-1.json")
+        assert completed["snovioSyncProcessed"] == 1
+        assert checkpoint.save.call_count == 2
 
     def test_sync_status_returns_completed_report(self):
         req = self._request(route_params={"jobId": "job-1", "operationId": "op-1"})
@@ -1695,7 +1719,7 @@ class TestConfiguration:
         assert fa.AZURE_OPENAI_DEPLOYMENT == "gpt-5.5"
 
     def test_snovio_rate_limit_default(self):
-        assert fa.SNOVIO_REQUESTS_PER_MINUTE == 60
+        assert fa.SNOVIO_REQUESTS_PER_MINUTE == 20
 
     def test_snovio_base_url_default(self):
         assert fa.SNOVIO_API_BASE_URL == "https://api.snov.io"

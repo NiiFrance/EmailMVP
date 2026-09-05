@@ -1,6 +1,7 @@
 """Tests for Snov.io workflow helpers."""
 
 import pandas as pd
+import pytest
 
 from snovio_workflows import (
     assess_custom_field_readiness,
@@ -78,17 +79,52 @@ def test_build_prospect_payload_preserves_matching_generated_custom_fields():
     ])
     columns = infer_columns(df)
 
-    payload = build_prospect_payload(df.iloc[0], columns, "123", [{"label": "Subject_Touch1"}])
+    payload = build_prospect_payload(df.iloc[0], columns, "123", [{"label": "Subject_Touch1"}, {"label": "Body_Touch1"}])
 
     assert payload["firstName"] == "Ada"
-    assert payload["customFields"] == {"Subject_Touch1": "Hello"}
+    assert payload["customFields"] == {"Subject_Touch1": "Hello", "Body_Touch1": "Body"}
+
+
+@pytest.mark.parametrize("recipient", ["", "invalid", "Name <recipient@example.com>"])
+def test_never_extract_recipient_from_generated_content(recipient):
+    frame = pd.DataFrame([{"Email": recipient, "Body_Touch1": "Contact seller@example.com"}])
+    rows, columns = build_job_rows(frame)
+    assert rows[0]["email"] == ""
+    with pytest.raises(ValueError, match="recipient"):
+        build_prospect_payload(frame.iloc[0], columns, "123")
+
+
+@pytest.mark.parametrize("subject", ["", "Generation unavailable", "Generation unavailable for this lead: failed"])
+def test_reject_failed_generated_content(subject):
+    frame = pd.DataFrame([{"Email": "qa@example.com", "Subject_Touch1": subject, "Body_Touch1": "Body"}])
+    with pytest.raises(ValueError, match="Invalid generated"):
+        build_prospect_payload(frame.iloc[0], infer_columns(frame), "123")
+
+
+def test_missing_custom_field_is_not_silently_dropped():
+    frame = pd.DataFrame([{"Email": "qa@example.com", "Subject_Touch1": "Hi", "Body_Touch1": "Body"}])
+    with pytest.raises(ValueError, match="Missing Snov.io custom field"):
+        build_prospect_payload(frame.iloc[0], infer_columns(frame), "123", [])
+
+
+def test_company_site_is_only_sent_from_an_explicit_website():
+    frame = pd.DataFrame([{"Email": "qa@gmail.com", "Website": "https://www.example.com/about"}])
+    assert build_prospect_payload(frame.iloc[0], infer_columns(frame), "123")["companySite"] == "https://example.com"
+    frame = pd.DataFrame([{"Email": "qa@gmail.com"}])
+    assert "companySite" not in build_prospect_payload(frame.iloc[0], infer_columns(frame), "123")
+
+
+def test_missing_touch_one_is_rejected():
+    frame = pd.DataFrame([{"Email": "qa@example.com", "Subject_Touch2": "Hello", "Body_Touch2": "Body"}])
+    with pytest.raises(ValueError, match="consecutive"):
+        build_prospect_payload(frame.iloc[0], infer_columns(frame), "123")
 
 
 def test_estimate_usage_for_full_workflow():
     estimate = estimate_usage(25, "full")
 
     assert estimate["estimatedCredits"] == 50
-    assert estimate["estimatedRequests"] == 31
+    assert estimate["estimatedRequests"] == 56
 
 
 def test_active_campaign_detection():

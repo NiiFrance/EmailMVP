@@ -32,6 +32,50 @@ def test_missing_credentials_raise_config_error():
         client.get_access_token()
 
 
+def test_long_retry_after_is_never_shortened():
+    assert SnovioClient("id", "secret")._retry_delay(0, "120") == 120
+
+
+@pytest.mark.parametrize("payload", [{"success": False}, {"success": False, "data": []}])
+@patch("snovio_client.urlopen")
+def test_missing_prospect_is_a_successful_empty_lookup(mock_urlopen, payload):
+    client = SnovioClient("id", "secret")
+    client._access_token = "token"
+    client._token_expires_at = 9999999999
+    mock_urlopen.return_value = FakeResponse(payload)
+    assert client.get_prospects_by_email("qa@example.com")["data"] == []
+
+
+@patch("snovio_client.urlopen")
+def test_false_success_with_error_is_not_a_missing_prospect(mock_urlopen):
+    client = SnovioClient("id", "secret")
+    client._access_token = "token"
+    client._token_expires_at = 9999999999
+    mock_urlopen.return_value = FakeResponse({"success": False, "errors": ["Account unavailable"]})
+    with pytest.raises(SnovioAPIError, match="Account unavailable"):
+        client.get_prospects_by_email("qa@example.com")
+
+
+@patch("snovio_client.urlopen")
+def test_live_not_found_message_is_an_empty_lookup(mock_urlopen):
+    client = SnovioClient("id", "secret")
+    client._access_token = "token"
+    client._token_expires_at = 9999999999
+    mock_urlopen.return_value = FakeResponse({"success": False, "errors": "Prospect with email 'qa@example.com' not found"})
+    assert client.get_prospects_by_email("qa@example.com")["data"] == []
+
+
+@patch("snovio_client.urlopen")
+def test_ambiguous_post_is_not_automatically_repeated(mock_urlopen):
+    client = SnovioClient("id", "secret")
+    client._access_token = "token"
+    client._token_expires_at = 9999999999
+    mock_urlopen.side_effect = TimeoutError("Synthetic timeout")
+    with pytest.raises(SnovioAPIError):
+        client.create_prospect_list("Test")
+    assert mock_urlopen.call_count == 1
+
+
 @patch("snovio_client.urlopen")
 def test_access_token_is_cached(mock_urlopen):
     mock_urlopen.return_value = FakeResponse({"access_token": "token-1", "expires_in": 3600})

@@ -106,8 +106,11 @@ async def run_agent_async(
     app_tools: dict[str, dict],
     max_completion_tokens: int = 4096,
     system_prompt: str = SYSTEM_PROMPT,
+    use_responses: bool = False,
 ) -> dict[str, Any]:
     """Run the tool-calling loop; returns {reply, toolTrace}."""
+    if use_responses:
+        return await _run_responses_agent(openai_client, deployment, history, mcp_session, app_tools, max_completion_tokens, system_prompt)
     specs = build_tool_specs([], app_tools)
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     if mcp_session is None:
@@ -120,7 +123,8 @@ async def run_agent_async(
     trace: list[dict[str, Any]] = []
     confirmations: list[dict[str, Any]] = []
     for _ in range(MAX_AGENT_STEPS):
-        response = openai_client.chat.completions.create(
+        import asyncio
+        response = await asyncio.to_thread(openai_client.chat.completions.create,
             model=deployment,
             messages=messages,
             tools=specs or None,
@@ -188,13 +192,56 @@ async def _dispatch(
             if not definition:
                 return "TOOL ERROR: unknown app tool."
             handler: Callable[[dict[str, Any]], Any] = definition["handler"]
-            outcome = handler(arguments)
+            import asyncio
+            outcome = handler(arguments) if inspect.iscoroutinefunction(handler) else await asyncio.to_thread(handler, arguments)
             if inspect.isawaitable(outcome):
                 outcome = await outcome
             return json.dumps(outcome, default=str)[:MAX_TOOL_RESULT_CHARS]
         return "TOOL ERROR: unknown tool namespace."
     except snovio_mcp.SnovioMCPError as error:
         return f"TOOL ERROR: {error}"
-    except Exception as error:  # tool failures must not kill the agent loop
+    except Exception as error:
         logger.exception("Copilot tool %s failed", name)
         return f"TOOL ERROR: {error}"
+
+
+async def _run_responses_agent(client, deployment, history, session, app_tools, token_limit, system_prompt):
+    import asyncio
+    tools = [{"type": "function", **spec["function"], "strict": False} for spec in build_tool_specs([], app_tools)]
+    inputs = list(history)
+    trace = []
+    confirmations = []
+    for step in range(MAX_AGENT_STEPS):
+        response = await asyncio.to_thread(
+            client.responses.create, model=deployment, instructions=system_prompt,
+            input=list(inputs), tools=tools or None, max_output_tokens=token_limit,
+            store=False, reasoning={"effort": "low"},
+        )
+        if response.status != "completed":
+            raise ValueError("Copilot returned an incomplete response. No unconfirmed action was executed.")
+        outputs = [item.model_dump(exclude_none=True) for item in response.output]
+        inputs.extend(outputs)
+        if any(part.get("type") == "refusal" for item in outputs for part in item.get("content", [])):
+            return {"reply": "The model declined this request.", "toolTrace": trace, "confirmations": confirmations}
+        calls = [item for item in outputs if item.get("type") == "function_call"]
+        if not calls:
+            return {"reply": response.output_text or "", "toolTrace": trace, "confirmations": confirmations}
+        for call in calls:
+            try:
+                arguments = json.loads(call.get("arguments") or "{}")
+                if not isinstance(arguments, dict):
+                    raise ValueError("Tool arguments must be an object.")
+                result = await _dispatch(call["name"], arguments, session, app_tools)
+            except (ValueError, TypeError):
+                result = "TOOL ERROR: Invalid tool arguments."
+            trace.append({"tool": call["name"], "status": "failed" if result.startswith("TOOL ERROR:") else "completed"})
+            try:
+                outcome = json.loads(result)
+                if isinstance(outcome, dict) and outcome.get("confirmationRequired"):
+                    confirmations.append({key: outcome.get(key) for key in (
+                        "confirmationId", "toolName", "category", "summary", "expiresAt"
+                    )})
+            except (ValueError, TypeError):
+                pass
+            inputs.append({"type": "function_call_output", "call_id": call["call_id"], "output": result})
+    return {"reply": "The step limit was reached. Please narrow the request.", "toolTrace": trace, "confirmations": confirmations}

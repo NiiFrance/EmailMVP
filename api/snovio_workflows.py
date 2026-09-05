@@ -110,11 +110,7 @@ def extract_email(row: pd.Series, columns: dict[str, str | None]) -> str:
     direct = row_value(row, columns.get("email"))
     if direct and EMAIL_RE.fullmatch(direct):
         return direct
-    for value in row.to_dict().values():
-        match = EMAIL_RE.search(clean_value(value))
-        if match:
-            return match.group(0)
-    return direct
+    return ""
 
 
 def extract_domain(row: pd.Series, columns: dict[str, str | None]) -> str:
@@ -155,11 +151,18 @@ def get_generated_custom_fields(row: pd.Series, available_labels: set[str] | Non
         if not (name.startswith("Subject_Touch") or name.startswith("Body_Touch")):
             continue
         text = clean_value(value)
-        if not text:
-            continue
+        if not text or text.lower().startswith("generation unavailable"):
+            raise ValueError(f"Invalid generated content: {name}. Regenerate this lead before exporting.")
         if available_labels is not None and name not in available_labels:
-            continue
+            raise ValueError(f"Missing Snov.io custom field: {name}.")
         fields[name] = text
+    touches = {name.removeprefix("Subject_Touch").removeprefix("Body_Touch") for name in fields}
+    if touches and (not all(touch.isdigit() for touch in touches) or
+                    {int(touch) for touch in touches} != set(range(1, len(touches) + 1))):
+        raise ValueError("Generated touch numbers must be consecutive, starting at one.")
+    for touch in touches:
+        if f"Subject_Touch{touch}" not in fields or f"Body_Touch{touch}" not in fields:
+            raise ValueError(f"Incomplete generated touch: {touch}.")
     return fields
 
 
@@ -173,18 +176,21 @@ def build_prospect_payload(
     if available_custom_fields is not None:
         labels = {clean_value(field.get("label")) for field in available_custom_fields if clean_value(field.get("label"))}
 
+    email = extract_email(row, columns)
+    if not email:
+        raise ValueError("A valid recipient email is required in the mapped email column.")
     first_name = row_value(row, columns.get("first_name"))
     last_name = row_value(row, columns.get("last_name"))
     full_name = row_value(row, columns.get("full_name")) or " ".join(part for part in [first_name, last_name] if part).strip()
     linkedin = row_value(row, columns.get("linkedin"))
 
     payload: dict[str, Any] = {
-        "email": extract_email(row, columns),
+        "email": email,
         "fullName": full_name,
         "firstName": first_name,
         "lastName": last_name,
         "companyName": row_value(row, columns.get("company")),
-        "companySite": extract_domain(row, columns),
+        "companySite": "https://" + normalize_domain(row_value(row, columns.get("domain"))) if normalize_domain(row_value(row, columns.get("domain"))) else "",
         "position": row_value(row, columns.get("position")),
         "country": row_value(row, columns.get("country")),
         "locality": row_value(row, columns.get("locality")),
@@ -276,13 +282,13 @@ def find_campaign(campaigns: list[dict[str, Any]], campaign_id: str) -> dict[str
     return None
 
 
-def estimate_usage(lead_count: int, operation: str = "sync") -> dict[str, Any]:
+def estimate_usage(lead_count: int, operation: str = "sync", requests_per_minute: int = 20) -> dict[str, Any]:
     operation = operation.lower()
     estimates = {
-        "sync": {"creditsPerLead": 0, "requests": lead_count},
+        "sync": {"creditsPerLead": 0, "requests": lead_count * 2},
         "verify": {"creditsPerLead": 1, "requests": math.ceil(lead_count / 10)},
         "enrich": {"creditsPerLead": 1, "requests": math.ceil(lead_count / 10)},
-        "full": {"creditsPerLead": 2, "requests": math.ceil(lead_count / 10) * 2 + lead_count},
+        "full": {"creditsPerLead": 2, "requests": math.ceil(lead_count / 10) * 2 + lead_count * 2},
     }
     selected = estimates.get(operation, estimates["sync"])
     credits = selected["creditsPerLead"] * lead_count
@@ -291,7 +297,8 @@ def estimate_usage(lead_count: int, operation: str = "sync") -> dict[str, Any]:
         "leadCount": lead_count,
         "estimatedCredits": credits,
         "estimatedRequests": selected["requests"],
-        "estimatedMinutesAtRateLimit": math.ceil(selected["requests"] / 60) if selected["requests"] else 0,
+        "requestsPerMinute": requests_per_minute,
+        "estimatedMinutesAtRateLimit": math.ceil(selected["requests"] / max(1, requests_per_minute)) if selected["requests"] else 0,
     }
 
 

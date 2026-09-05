@@ -308,8 +308,10 @@ class TestAssembleEnrichedCSV:
         enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        assert df["Subject_Touch1"].iloc[0] == "Generation unavailable"
-        assert df["Body_Touch8"].iloc[0] == "Generation unavailable for this lead: API timeout"
+        assert df["Subject_Touch1"].iloc[0] == ""
+        assert df["Body_Touch8"].iloc[0] == ""
+        assert df["Generation_Status"].iloc[0] == "failed"
+        assert df["Generation_Error"].iloc[0] == "API timeout"
 
     def test_content_filter_error_is_sanitized(self):
         csv_bytes = _build_csv_bytes([_make_lead_row()])
@@ -319,8 +321,8 @@ class TestAssembleEnrichedCSV:
         enriched = assemble_enriched_csv(csv_bytes, results, output_headers=out_headers, flatten_result=_flatten_emails)
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        assert df["Subject_Touch1"].iloc[0] == "Generation unavailable"
-        body = df["Body_Touch1"].iloc[0]
+        assert df["Subject_Touch1"].iloc[0] == ""
+        body = df["Generation_Error"].iloc[0]
         assert "Azure OpenAI blocked this lead" in body
         assert "ResponsibleAIPolicyViolation" not in body
         assert "go.microsoft.com" not in body
@@ -333,6 +335,14 @@ class TestAssembleEnrichedCSV:
 
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
         assert df["Subject_Touch1"].iloc[0] == ""
+
+    def test_repair_preserves_successful_rows_and_original_columns(self):
+        original = b"Email,Subject_Touch1,Body_Touch1,Generation_Status,Generation_Error\nfirst@example.com,Original,Keep,completed,\nsecond@example.com,,,failed,Timeout\n"
+        result = assemble_enriched_csv(original, [{"row_index": 1, "parsed": [{"subject": "Repaired", "body": "New"}]}],
+                                       _output_headers(1), _flatten_emails, preserve_existing=True)
+        frame = parse_csv(result)
+        assert frame["Subject_Touch1"].tolist() == ["Original", "Repaired"]
+        assert frame["Generation_Status"].tolist() == ["completed", "completed"]
 
     def test_output_appended_at_end(self):
         """Output columns should be appended after existing columns."""
@@ -402,15 +412,16 @@ class TestAssembleEnrichedCSVDynamic:
         assert df["tone"].iloc[0] == "warm"
 
     def test_error_fills_all_custom_columns(self):
-        """Errors should fill all dynamic output columns."""
+        """Errors must remain separate from dynamic output columns."""
         csv_bytes = b"Name\nBob\n"
         results = [{"row_index": 0, "error": "Timeout"}]
         custom_headers = ["col_a", "col_b", "col_c"]
 
         enriched = assemble_enriched_csv(csv_bytes, results, output_headers=custom_headers)
         df = pd.read_csv(io.BytesIO(enriched), dtype=str, keep_default_na=False)
-        assert "Generation unavailable for this lead: Timeout" in df["col_a"].iloc[0]
-        assert "Generation unavailable for this lead: Timeout" in df["col_c"].iloc[0]
+        assert df["col_a"].iloc[0] == ""
+        assert df["col_c"].iloc[0] == ""
+        assert df["Generation_Error"].iloc[0] == "Timeout"
 
     def test_legacy_results_with_explicit_headers(self):
         """Results with parsed key work when output_headers and flatten_result are provided."""

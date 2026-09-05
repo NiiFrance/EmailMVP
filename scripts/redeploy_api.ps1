@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory=$true)][string]$ApiPath,
     [Parameter(Mandatory=$true)][string]$FunctionApp,
     [Parameter(Mandatory=$true)][string]$ResourceGroup,
-    [string]$Subscription = "1026bf75-8146-43b4-8f2c-32e69ef52837"
+    [string]$Subscription = "1026bf75-8146-43b4-8f2c-32e69ef52837",
+    [switch]$PackageOnly
 )
 $ErrorActionPreference = "Stop"
 $sub = $Subscription
@@ -13,7 +14,7 @@ New-Item -ItemType Directory -Path $staging | Out-Null
 
 # Copy api contents excluding tests, __pycache__, .venv
 Get-ChildItem -Path $ApiPath -Force | Where-Object {
-    $_.Name -notin @("tests", "__pycache__", ".venv", ".pytest_cache")
+    $_.Extension -eq ".py" -or $_.Name -in @("host.json", "requirements.txt", "prompts")
 } | ForEach-Object {
     Copy-Item -Path $_.FullName -Destination $staging -Recurse -Force
 }
@@ -25,6 +26,7 @@ $zip = Join-Path $env:TEMP ($FunctionApp + ".zip")
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zip -Force
 Write-Host "Zip created: $zip ($((Get-Item $zip).Length) bytes)"
+if ($PackageOnly) { return }
 
 Write-Host "Deploying to $FunctionApp ..."
 az functionapp deployment source config-zip `
@@ -35,3 +37,4 @@ az functionapp deployment source config-zip `
     --build-remote true `
     --timeout 600
 Write-Host "Deploy command returned exit code $LASTEXITCODE"
+if ($LASTEXITCODE -ne 0) { throw "Deployment failed for $FunctionApp." }

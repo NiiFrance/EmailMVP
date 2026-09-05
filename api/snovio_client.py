@@ -45,6 +45,7 @@ class SnovioClient:
     token_loader: Callable[[], tuple[str, float] | None] | None = None
     token_saver: Callable[[str, float], None] | None = None
     rate_reserver: Callable[[], float] | None = None
+    before_request: Callable[[], None] | None = None
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
@@ -108,7 +109,9 @@ class SnovioClient:
 
     def get_user_campaigns(self) -> list[dict[str, Any]]:
         response = self._request("GET", "/v1/get-user-campaigns")
-        return response if isinstance(response, list) else []
+        if not isinstance(response, list):
+            raise SnovioAPIError("Cannot verify campaign destinations: Snov.io returned an unexpected campaign list.")
+        return response
 
     def start_email_verification(self, emails: list[str], webhook_url: str | None = None) -> dict[str, Any]:
         if not emails:
@@ -149,7 +152,12 @@ class SnovioClient:
     def get_prospects_by_email(self, email: str) -> dict[str, Any]:
         if not email:
             raise ValueError("email is required.")
-        return self._request("POST", "/v1/get-prospects-by-email", data={"email": email})
+        try:
+            return self._request("POST", "/v1/get-prospects-by-email", data={"email": email})
+        except SnovioAPIError as error:
+            if error.status_code == 200 and str(error) == f"Prospect with email '{email}' not found":
+                return {"success": False, "data": []}
+            raise
 
     def add_do_not_email(self, list_id: str, items: list[str]) -> Any:
         if not list_id:
@@ -332,8 +340,6 @@ class SnovioClient:
         else:
             token = None
 
-        self._wait_for_rate_limit_slot()
-
         url = f"{self.base_url}{path}"
         if params:
             url = f"{url}?{urlencode(params, doseq=True)}"
@@ -352,31 +358,39 @@ class SnovioClient:
         request = Request(url, data=body, headers=headers, method=method.upper())
 
         for attempt in range(self.max_retries + 1):
+            self._wait_for_rate_limit_slot()
+            if self.before_request:
+                self.before_request()
             try:
                 with urlopen(request, timeout=self.timeout_seconds) as response:
-                    return self._decode_response(response.read())
+                    result = self._decode_response(response.read())
+                    if isinstance(result, dict) and result.get("success") is False:
+                        if path == "/v1/get-prospects-by-email" and set(result) <= {"success", "data"} and result.get("data") in (None, []):
+                            return {**result, "data": []}
+                        raise SnovioAPIError(str(result.get("message") or result.get("error") or result.get("errors") or "Snov.io rejected the request."), status_code=200)
+                    return result
             except HTTPError as error:
-                retryable = error.code == 429 or error.code in {500, 502, 503, 504}
+                retryable = error.code == 429 or (method.upper() == "GET" and error.code in {500, 502, 503, 504})
                 if retryable and attempt < self.max_retries:
                     time.sleep(self._retry_delay(attempt, error.headers.get("Retry-After") if error.headers else None))
                     continue
                 raise SnovioAPIError(self._error_message(error.read()), status_code=error.code) from error
-            except URLError as error:
-                if attempt < self.max_retries:
+            except (URLError, TimeoutError) as error:
+                if method.upper() == "GET" and attempt < self.max_retries:
                     time.sleep(self._retry_delay(attempt))
                     continue
-                raise SnovioAPIError(f"Snov.io request failed: {error.reason}") from error
+                raise SnovioAPIError(f"Snov.io request failed: {getattr(error, 'reason', str(error))}") from error
 
         raise SnovioAPIError("Snov.io request failed after retries.")
 
     def _retry_delay(self, attempt: int, retry_after: str | None = None) -> float:
         if retry_after:
             try:
-                return min(self.retry_max_seconds, max(0.0, float(retry_after)))
+                return max(0.0, float(retry_after))
             except ValueError:
                 try:
                     parsed = parsedate_to_datetime(retry_after)
-                    return min(self.retry_max_seconds, max(0.0, parsed.timestamp() - time.time()))
+                    return max(0.0, parsed.timestamp() - time.time())
                 except (TypeError, ValueError, OverflowError):
                     pass
         base = min(self.retry_max_seconds, self.retry_base_seconds * (2 ** attempt))

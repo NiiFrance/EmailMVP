@@ -50,3 +50,10 @@ desktop.ini
 # Data files (keep samples out of repo)
 *.csv
 *.xlsx
+!frontend/assets/help/sample-leads.csv
+
+# Local checkpoint and pilot artifacts
+/GitHubCopilot_Chat_History.txt
+/.azure/deploy-only.json
+/.azure/help-pilot-frontend-rollback.json.gz
+/.azure/help-pilot-mobile.png

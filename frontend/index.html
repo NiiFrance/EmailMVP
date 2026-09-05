@@ -6,8 +6,34 @@
     <title>Email Campaign Generator — Cloudware</title>
     <link rel="stylesheet" href="assets/fonts.css">
     <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="help.css">
+    <link rel="stylesheet" href="vendor/driverjs/driver.css">
 </head>
 <body>
+    <button id="help-open" class="help-entry" type="button" data-open-help aria-haspopup="dialog" aria-controls="help-dialog"><span aria-hidden="true">?</span>Help</button>
+    <dialog id="help-dialog" class="help-dialog" aria-labelledby="help-title">
+        <header class="help-head"><h2 id="help-title">Help &amp; walkthroughs</h2><button id="help-close" class="help-close" type="button" aria-label="Close help">&times;</button></header>
+        <label for="help-search">Search Help</label><input id="help-search" type="search" autocomplete="off">
+        <div id="help-articles"></div>
+        <h3>Walkthroughs</h3><div id="help-tours"></div>
+        <p id="help-status" role="status"></p>
+        <label><input id="help-opt-out" type="checkbox"> Don't show automatic walkthrough invitations</label>
+    </dialog>
+    <section id="guide-panel" class="guide-panel" aria-label="Walkthrough" hidden>
+        <div id="guide-meta" class="guide-meta"></div><h3 id="guide-title" tabindex="-1"></h3><p id="guide-text"></p>
+        <p id="guide-status" role="status" aria-live="polite"></p>
+        <div class="guide-actions">
+            <button id="guide-back" class="btn btn-secondary" type="button" aria-label="Previous guide step" title="Previous guide step">&larr;</button>
+            <button id="guide-highlight" class="btn btn-secondary" type="button">Show step</button>
+            <button id="guide-next" class="btn btn-primary" type="button">Continue</button>
+            <button id="guide-pause" class="btn btn-secondary" type="button">Pause</button>
+            <button id="guide-restart" class="btn btn-secondary" type="button">Restart guide</button>
+        </div>
+    </section>
+    <section id="guide-invitation" class="guide-panel" aria-label="Optional walkthrough invitation" hidden>
+        <h3>Your campaign walkthrough</h3><p>Start or resume the guide for your first campaign.</p>
+        <div class="guide-actions"><button id="guide-accept" class="btn btn-primary" type="button">Guide me</button><button id="guide-later" class="btn btn-secondary" type="button">Not now</button><button id="guide-never" class="btn btn-secondary" type="button">Don't show again</button></div>
+    </section>
     <div class="app-shell">
         <!-- ============ SIDEBAR ============ -->
         <aside class="sidebar">
@@ -316,6 +342,7 @@
                             <button id="step3-back" class="btn btn-secondary" type="button">&larr; Back</button>
                             <div class="step3-right">
                                 <button id="download-btn" class="btn btn-secondary" type="button">Download CSV</button>
+                                <button id="regenerate-failed-btn" class="btn btn-secondary" type="button" hidden>Regenerate failed leads</button>
                                 <button id="step3-continue" class="btn btn-primary" type="button">Continue to sync &rarr;</button>
                             </div>
                         </div>
@@ -327,8 +354,8 @@
                     <!-- not synced -->
                     <div id="sync-block">
                         <div class="eyebrow">Step 4 of 4</div>
-                        <h1 class="view-title">Send to Snov.io</h1>
-                        <p class="view-lead">Connect your Snov.io account, choose a list, and push the drafts as a multi-touch campaign — created as a draft for your final review.</p>
+                        <h1 class="view-title">Prepare Snov.io draft</h1>
+                        <p class="view-lead" id="publish-summary">Draft preparation</p>
 
                         <div id="snovio-panel" class="snovio-panel">
                             <div class="snovio-header">
@@ -345,6 +372,8 @@
                                 <button id="step4-open-settings" class="btn btn-dark" type="button">Open Settings</button>
                             </div>
 
+                            <details id="publish-destination">
+                            <summary>Destination list: create a dedicated list</summary>
                             <div class="snovio-grid">
                                 <div>
                                     <label for="snovio-list-select">Snov.io list</label>
@@ -353,34 +382,43 @@
                                         <button id="snovio-new-list-btn" class="btn btn-secondary btn-newlist" type="button" data-tip="Create a brand-new prospect list in Snov.io for these leads">+ New list</button>
                                     </div>
                                     <div id="snovio-new-list-row" class="new-list-row" hidden>
-                                        <input id="snovio-list-name" type="text" autocomplete="off" placeholder="Name your new list">
+                                        <input id="snovio-list-name" type="text" maxlength="49" autocomplete="off" placeholder="Name your new list">
                                         <button id="snovio-new-list-cancel" class="btn-clear" type="button" title="Cancel — use an existing list instead">&times;</button>
                                     </div>
                                 </div>
                                 <div>
-                                    <label for="snovio-campaign-select">Add to existing campaign (optional)</label>
+                                    <label for="snovio-campaign-select">Existing inactive campaign (optional)</label>
                                     <select id="snovio-campaign-select" data-tip="Optional: attach the leads to a campaign that already exists in Snov.io"></select>
                                 </div>
                             </div>
+                            </details>
 
                             <!-- Primary action: push leads to a Snov.io list -->
                             <div class="snovio-primary">
-                                <button id="snovio-sync-btn" class="btn btn-primary" type="button" data-tip="Adds every eligible lead (with their drafted emails) to the selected Snov.io list">Sync leads to Snov.io</button>
-                                <p class="snovio-primary-note">Adds your leads (and their drafted emails) to a Snov.io list. Pick an existing list above, or click <strong>+ New list</strong> to create one. To turn these into a sending campaign, use <strong>Create a new campaign</strong> under More options.</p>
+                                <button id="snovio-sync-btn" class="btn btn-secondary" type="button">Export list only</button>
                             </div>
 
                             <!-- Friendly result appears here -->
                             <div id="snovio-report" class="snovio-report" hidden></div>
+                            <section id="publish-progress" class="publish-progress" aria-live="polite" hidden>
+                                <h3 id="publish-stage">Queued</h3>
+                                <progress id="publish-meter" max="1" value="0"></progress>
+                                <p id="publish-counts"></p>
+                                <p id="publish-error" role="status"></p>
+                                <a id="publish-link" target="_blank" rel="noopener noreferrer" hidden>Open Snov.io draft</a>
+                                <details id="publish-failures" hidden><summary>Rows needing attention</summary><ul id="publish-failed-rows"></ul></details>
+                                <button id="publish-retry" class="btn btn-secondary" type="button" hidden>Retry failed work</button>
+                            </section>
 
                             <!-- Everything optional/advanced is tucked away to keep things simple -->
                             <details class="snovio-advanced">
-                                <summary>More options &mdash; create a campaign, verify emails, suppression</summary>
+                                <summary>Verification, suppression &amp; analytics</summary>
 
                                 <div class="snovio-adv-body">
                                     <div class="snovio-checks">
-                                        <label data-tip="Runs each address through Snov.io verification first and skips risky ones. Costs Snov.io credits."><input id="snovio-require-verification" type="checkbox"> Only sync verified emails <span class="hint">(uses Snov.io credits)</span></label>
+                                        <label><input id="snovio-require-verification" type="checkbox"> Require existing verification results</label>
                                         <label data-tip="If no list is selected, a sensibly-named one is created for you automatically"><input id="snovio-auto-create-list" type="checkbox" checked> Create a list automatically if none is selected</label>
-                                        <label data-tip="Safety check — required before adding leads to a campaign that is actively sending"><input id="snovio-confirm-active" type="checkbox"> I understand this campaign is already sending</label>
+                                        <input id="snovio-confirm-active" type="checkbox" hidden disabled>
                                     </div>
 
                                     <div class="snovio-actions">
@@ -399,9 +437,8 @@
                                         </div>
                                     </div>
 
-                                    <div class="snovio-journey">
-                                        <h4>Create a new campaign in Snov.io (drip sequence)</h4>
-                                        <p class="snovio-journey-note">This builds a <strong>brand-new</strong> multi-step email campaign in Snov.io from your drafted touches, personalised per lead — you don't need an existing campaign. It's created as a <strong>draft</strong> for you to review and launch; nothing sends automatically. Requires a connected sender account (below). One-time setup: Snov.io needs matching custom fields; we'll tell you exactly which to add if any are missing.</p>
+                                    <div id="publish-form" class="snovio-journey">
+                                        <h4>Sender &amp; sequence</h4>
                                         <div class="snovio-grid">
                                             <div>
                                                 <label for="snovio-sender-select">Sender accounts</label>
@@ -421,8 +458,8 @@
                                             <label data-tip="Records when a recipient clicks a link"><input id="snovio-journey-click" type="checkbox" checked> Track link clicks</label>
                                         </div>
                                         <div class="snovio-actions">
-                                            <button id="snovio-journey-preview-btn" class="btn btn-secondary" type="button" data-tip="See the planned email steps and any missing setup — nothing is created">Preview campaign</button>
-                                            <button id="snovio-journey-create-btn" class="btn btn-primary" type="button" data-tip="Builds the campaign in Snov.io as a draft — you review and launch it there">Create new campaign (draft)</button>
+                                            <button id="snovio-journey-preview-btn" class="btn btn-secondary" type="button">Check readiness</button>
+                                            <button id="snovio-journey-create-btn" class="btn btn-primary" type="button">Prepare draft</button>
                                         </div>
                                     </div>
 
@@ -517,13 +554,29 @@
                             </div>
                             <label for="ce-desc">Description (shown on the Campaign screen)</label>
                             <input id="ce-desc" type="text" autocomplete="off">
+                            <section id="ce-brief" class="ce-brief">
+                                <h3>Campaign brief</h3>
+                                <div class="ce-grid">
+                                    <div><label for="ce-audience">Audience</label><input id="ce-audience" maxlength="4000" type="text"></div>
+                                    <div><label for="ce-offer">Offer</label><input id="ce-offer" maxlength="4000" type="text"></div>
+                                    <div><label for="ce-cta">Call to action</label><input id="ce-cta" maxlength="4000" type="text"></div>
+                                    <div><label for="ce-tone">Tone</label><select id="ce-tone"><option>Professional</option><option>Conversational</option><option>Direct</option></select></div>
+                                    <div><label for="ce-language">Language</label><input id="ce-language" type="text" value="English" maxlength="80"></div>
+                                </div>
+                                <label for="ce-facts">Approved facts, terms &amp; exclusions</label>
+                                <textarea id="ce-facts" rows="4" maxlength="4000"></textarea>
+                                <button id="ce-preview-btn" class="btn btn-secondary" type="button">Generate preview</button>
+                                <div id="ce-preview" class="ce-preview" aria-live="polite"></div>
+                            </section>
+                            <details id="ce-advanced"><summary>Advanced prompt</summary>
                             <label for="ce-prompt">System prompt</label>
                             <textarea id="ce-prompt" rows="14" spellcheck="false"></textarea>
-                            <p class="ce-note">The prompt must tell the model to return ONLY a JSON array with exactly the number of email objects above, each with a "subject" and "body" key.</p>
+                            </details>
                             <div id="ce-error" class="error" hidden></div>
                             <div class="ce-actions">
                                 <button id="ce-archive" class="btn btn-secondary" type="button">Archive</button>
-                                <button id="ce-save" class="btn btn-primary" type="button">Save campaign</button>
+                                <button id="ce-save-draft" class="btn btn-secondary" type="button">Save unpublished</button>
+                                <button id="ce-save" class="btn btn-primary" type="button">Publish template</button>
                             </div>
                         </div>
                     </div>
@@ -634,6 +687,10 @@
         </div>
     </div>
 
+    <script src="vendor/driverjs/driver.js.iife.js"></script>
+    <script src="help-content.js"></script>
+    <script src="help.js"></script>
+    <script src="tours.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

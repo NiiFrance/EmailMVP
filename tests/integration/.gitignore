@@ -1,0 +1,3 @@
+.azurite/
+.runtime/
+__pycache__/

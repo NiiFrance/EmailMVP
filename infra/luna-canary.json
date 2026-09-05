@@ -1,0 +1,15 @@
+{
+  "sku": {
+    "name": "DataZoneStandard",
+    "capacity": 667
+  },
+  "properties": {
+    "model": {
+      "format": "OpenAI",
+      "name": "gpt-5.6-luna",
+      "version": "2026-07-09"
+    },
+    "raiPolicyName": "Microsoft.DefaultV2",
+    "versionUpgradeOption": "NoAutoUpgrade"
+  }
+}

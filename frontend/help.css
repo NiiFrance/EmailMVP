@@ -1,0 +1,30 @@
+.help-entry { position: fixed; right: 24px; top: 12px; z-index: 55; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; display: flex; gap: 8px; align-items: center; cursor: pointer; font: inherit; }
+.help-entry span[aria-hidden] { border: 1px solid currentColor; border-radius: 50%; width: 20px; height: 20px; display: grid; place-items: center; font-weight: 700; }
+.help-dialog { width: min(720px, calc(100% - 24px)); max-height: calc(100dvh - 24px); margin: auto; padding: 24px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--card); overflow: auto; font-family: var(--font); }
+.help-dialog::backdrop { background: rgb(0 0 0 / 35%); }
+.help-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.help-head h2 { font-size: 22px; margin: 0; }
+.help-close { width: 36px; height: 36px; flex: none; font-size: 24px; background: transparent; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; }
+.help-dialog h3 { font-size: 17px; margin: 20px 0 12px; }
+.help-dialog input[type=search] { width: 100%; margin: 6px 0 10px; padding: 10px; border: 1px solid var(--muted); border-radius: 4px; font: inherit; }
+.help-dialog details { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.help-dialog summary { cursor: pointer; font-weight: 600; }
+.help-dialog p { line-height: 1.65; margin: 12px 0; font-size: 14px; }
+.help-dialog a { color: var(--red); }
+.help-tour-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.help-tour-row strong { font-size: 14px; }
+.help-tour-row .btn { flex: none; padding: 8px 12px; min-height: 40px; }
+.guide-panel { position: fixed; right: 20px; bottom: 20px; z-index: 1000000001; width: min(380px, calc(100% - 24px)); max-height: 45dvh; overflow: auto; padding: 16px; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px #0002; }
+.guide-panel h3 { font-size: 16px; margin: 6px 0 10px; }
+#guide-panel { position: static; width: 100%; max-height: none; margin-bottom: 24px; border-width: 0 0 1px; border-radius: 0; box-shadow: none; background: var(--red-soft); }
+.guide-panel p { font-size: 13px; line-height: 1.55; margin: 8px 0; }
+.guide-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.guide-actions .btn { padding: 8px 12px; min-height: 40px; }
+.guide-meta { font-size: 12px; color: var(--muted); }
+.guide-panel label, .help-dialog label { font-size: 13px; }
+.guide-panel button:focus-visible, .help-dialog :focus-visible, .help-entry:focus-visible { outline: 3px solid #126c8b; outline-offset: 3px; }
+.driver-popover.guide-popover { font-family: var(--font); border-radius: 6px; max-width: min(330px, calc(100vw - 32px)); color: var(--ink); background: var(--card); }
+.driver-popover.guide-popover .driver-popover-title { font-size: 16px; }
+body:has(.guide-panel:not([hidden])) #copilot-fab { display: none; }
+@media (max-width: 600px) { .help-entry { right: 10px; top: 8px; font-size: 12px; } .help-dialog { padding: 16px; } .guide-panel { right: 12px; bottom: 12px; } .help-tour-row { flex-wrap: wrap; } }
+@media (prefers-reduced-motion: reduce) { .driver-overlay, .driver-active-element, .driver-popover { transition: none !important; animation: none !important; } }

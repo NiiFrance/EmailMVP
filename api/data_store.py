@@ -29,6 +29,8 @@ USERS_TABLE = "Users"
 JOBS_TABLE = "Jobs"
 SNOVIO_CREDS_TABLE = "SnovioCreds"
 CAMPAIGNS_TABLE = "Campaigns"
+ONBOARDING_TABLE = "Onboarding"
+GENERATION_QUEUE_TABLE = "GenerationQueue"
 
 _service: TableServiceClient | None = None
 _tables_ready: set[str] = set()
@@ -79,6 +81,102 @@ def get_user(oid: str) -> dict | None:
         return _entity_to_dict(_table(USERS_TABLE).get_entity("user", oid))
     except ResourceNotFoundError:
         return None
+
+
+def get_onboarding(oid: str) -> dict:
+    import onboarding
+    try:
+        entity = _table(ONBOARDING_TABLE).get_entity(oid, onboarding.ACCOUNT_KEY)
+        return json.loads(entity["state"])
+    except ResourceNotFoundError:
+        return onboarding.initial_state()
+
+
+def get_generation_queue() -> dict:
+    import generation_queue
+    try:
+        row = _table(GENERATION_QUEUE_TABLE).get_entity("queue", "v2")
+        return _generation_queue_state(row)
+    except ResourceNotFoundError:
+        return generation_queue.initial_state()
+
+
+def _generation_queue_state(row):
+    state = json.loads(row["state"])
+    state["jobs"] = {**json.loads(row.get("jobs0", row.get("jobs", "{}"))), **json.loads(row.get("jobs1", "{}"))}
+    state["reservations"] = json.loads(row["reservations"])
+    return state
+
+
+def change_generation_queue(action: str, job_id: str, **values):
+    import generation_queue
+    table = _table(GENERATION_QUEUE_TABLE)
+    for attempt in range(8):
+        try:
+            entity = table.get_entity("queue", "v2")
+            current = _generation_queue_state(entity)
+        except ResourceNotFoundError:
+            entity = None
+            current = generation_queue.initial_state()
+        now = time.time()
+        if action == "admit":
+            state, outcome = generation_queue.admit(current, job_id, values["owner"], values["config_hash"], now)
+        elif action == "reserve":
+            state, outcome = generation_queue.reserve(current, job_id, values["estimated_tokens"], now)
+        elif action == "dispatch":
+            state, outcome = generation_queue.claim_dispatch(current, job_id, now)
+        elif action == "defer":
+            state, outcome = generation_queue.defer(current, job_id, now, values["retry_after"]), None
+        elif action == "release":
+            state, outcome = generation_queue.release(current, job_id), None
+        else:
+            raise ValueError("Unknown generation queue action.")
+        if state == current:
+            return outcome
+        jobs = list(state["jobs"].items())
+        parts = {"state": json.dumps({key: value for key, value in state.items() if key not in {"jobs", "reservations"}}),
+             "jobs0": json.dumps(dict(jobs[:50]), separators=(",", ":")),
+             "jobs1": json.dumps(dict(jobs[50:]), separators=(",", ":")),
+             "reservations": json.dumps(state["reservations"], separators=(",", ":"))}
+        if any(len(value.encode("utf-16-le")) > 60000 for value in parts.values()):
+            raise generation_queue.Busy("The generation queue has reached its metadata limit.")
+        record = {"PartitionKey": "queue", "RowKey": "v2", **parts}
+        try:
+            if entity is None:
+                table.create_entity(record)
+            else:
+                table.update_entity(record, mode=UpdateMode.REPLACE, etag=entity.metadata["etag"],
+                                    match_condition=MatchConditions.IfNotModified)
+            return outcome
+        except (ResourceExistsError, ResourceModifiedError):
+            continue
+    raise generation_queue.Busy("Generation scheduling is busy. Retry shortly.")
+
+
+def change_onboarding(oid: str, role: str, payload: dict) -> tuple[dict, dict]:
+    import onboarding
+    table = _table(ONBOARDING_TABLE)
+    for attempt in range(8):
+        try:
+            entity = table.get_entity(oid, onboarding.ACCOUNT_KEY)
+            current = json.loads(entity["state"])
+        except ResourceNotFoundError:
+            entity = None
+            current = onboarding.initial_state()
+        updated, outcome = onboarding.transition(current, payload, role, time.time())
+        if updated == current:
+            return updated, outcome
+        record = {"PartitionKey": oid, "RowKey": onboarding.ACCOUNT_KEY, "state": json.dumps(updated)}
+        try:
+            if entity is None:
+                table.create_entity(record)
+            else:
+                table.update_entity(record, mode=UpdateMode.REPLACE, etag=entity.metadata["etag"],
+                                    match_condition=MatchConditions.IfNotModified)
+            return updated, outcome
+        except (ResourceExistsError, ResourceModifiedError):
+            continue
+    raise onboarding.Conflict("Onboarding state is busy. Please retry.")
 
 
 def upsert_user(oid: str, email: str, name: str, role: str) -> dict:
@@ -159,10 +257,12 @@ def claim_snovio_sync_operation(
         except ResourceNotFoundError:
             return {"acquired": False, "operationId": "", "status": "missing"}
         now = time.time()
+        if entity.get("status") == "generating":
+            return {"acquired": False, "operationId": "", "status": "generating"}
         current_id = str(entity.get("snovioSyncOperationId") or "")
         current_status = str(entity.get("snovioSyncStatus") or "")
         expires_at = float(entity.get("snovioSyncExpiresAt") or 0)
-        if current_id and current_status in {"queued", "running"} and expires_at > now:
+        if current_id:
             return {"acquired": False, "operationId": current_id, "status": current_status}
         etag = getattr(entity, "metadata", {}).get("etag")
         update = {
@@ -187,6 +287,71 @@ def claim_snovio_sync_operation(
         except ResourceModifiedError:
             continue
     return {"acquired": False, "operationId": "", "status": "contended"}
+
+
+def update_snovio_operation(oid: str, job_id: str, operation_id: str, fields: dict) -> bool:
+    table = _table(JOBS_TABLE)
+    for attempt in range(5):
+        entity = table.get_entity(oid, job_id)
+        if entity.get("snovioSyncOperationId") != operation_id:
+            return False
+        try:
+            table.update_entity(
+                {"PartitionKey": oid, "RowKey": job_id, **fields, "snovioSyncUpdatedAt": _now_iso()},
+                mode=UpdateMode.MERGE, etag=entity.metadata["etag"], match_condition=MatchConditions.IfNotModified,
+            )
+            return True
+        except ResourceModifiedError:
+            continue
+    raise RuntimeError("Publication status update contention.")
+
+
+def pending_snovio_operations() -> list[dict]:
+    return [_entity_to_dict(entity) for entity in _table(JOBS_TABLE).query_entities(
+        "snovioSyncStatus eq 'queued' or snovioSyncStatus eq 'running'"
+    )]
+
+
+def claim_generation_repair(oid: str, job_id: str, instance_id: str) -> dict:
+    table = _table(JOBS_TABLE)
+    for attempt in range(5):
+        entity = table.get_entity(oid, job_id)
+        if entity.get("snovioSyncOperationId"):
+            raise ValueError("This job already has an export snapshot. Repair a copy before starting another export.")
+        if entity.get("status") == "generating":
+            return {"acquired": False, "instanceId": entity.get("generationInstanceId", job_id)}
+        try:
+            table.update_entity({"PartitionKey": oid, "RowKey": job_id, "status": "generating",
+                                 "generationInstanceId": instance_id}, mode=UpdateMode.MERGE,
+                                etag=entity.metadata["etag"], match_condition=MatchConditions.IfNotModified)
+            return {"acquired": True, "instanceId": instance_id}
+        except ResourceModifiedError:
+            continue
+    raise ValueError("Another request is updating this job. Please retry.")
+
+
+def claim_generation_v2(oid, job_id, instance_id, config_hash, template, repair=False):
+    import generation_queue
+    table = _table(JOBS_TABLE)
+    for attempt in range(8):
+        entity = table.get_entity(oid, job_id)
+        if entity.get("generationInstanceId") == instance_id:
+            return False
+        if entity.get("snovioSyncOperationId") or entity.get("archived"):
+            raise generation_queue.Busy("This job is archived or already has an export snapshot.")
+        if entity.get("status") == "generating":
+            raise generation_queue.Busy("This job already has generation in progress.")
+        if not repair and str(entity.get("status", "")).lower() not in {"", "uploaded", "pending"}:
+            raise generation_queue.Busy("This job has already been generated. Use failed-lead repair or upload a new job.")
+        try:
+            table.update_entity({"PartitionKey": oid, "RowKey": job_id, "status": "generating",
+                "generationInstanceId": instance_id, "generationConfigHash": config_hash, "generationVersion": 2,
+                "templateId": template["id"], "templateName": template["name"], "startedAt": _now_iso()},
+                mode=UpdateMode.MERGE, etag=entity.metadata["etag"], match_condition=MatchConditions.IfNotModified)
+            return True
+        except ResourceModifiedError:
+            continue
+    raise RuntimeError("Generation admission could not update this job. Check saved status before retrying.")
 
 
 def list_jobs(oid: str, limit: int = 25, archived: bool = False) -> list[dict]:
@@ -332,6 +497,36 @@ def get_snovio_access_token(credential_key: str) -> dict | None:
         return _entity_to_dict(_table(SNOVIO_CREDS_TABLE).get_entity("snovioresttoken", credential_key))
     except ResourceNotFoundError:
         return None
+
+
+def reserve_snovio_rest_slot(account_key: str, requests_per_minute: int) -> float:
+    """Pace REST requests across workers within this app's allocated rate budget."""
+    if not 1 <= requests_per_minute <= 20:
+        raise ValueError("REST budget must be between 1 and 20 requests per minute per app.")
+    table = _table(SNOVIO_CREDS_TABLE)
+    interval = 60.0 / requests_per_minute
+    for attempt in range(8):
+        now = time.time()
+        try:
+            entity = table.get_entity("snoviorestpace", account_key)
+        except ResourceNotFoundError:
+            try:
+                table.create_entity({"PartitionKey": "snoviorestpace", "RowKey": account_key,
+                                     "nextSlotAt": now + interval})
+                return 0.0
+            except ResourceExistsError:
+                continue
+        next_slot = float(entity.get("nextSlotAt") or 0)
+        if next_slot > now:
+            return max(0.05, next_slot - now)
+        try:
+            table.update_entity({"PartitionKey": "snoviorestpace", "RowKey": account_key,
+                                 "nextSlotAt": now + interval}, mode=UpdateMode.REPLACE,
+                                etag=entity.metadata["etag"], match_condition=MatchConditions.IfNotModified)
+            return 0.0
+        except ResourceModifiedError:
+            continue
+    return 0.25
 
 
 def reserve_snovio_rate_slot(credential_key: str, requests_per_minute: int) -> float:

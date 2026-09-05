@@ -1,3 +1,20 @@
+ body:has(#campaign-editor:not([hidden])) #copilot-fab { display: none; }
+ .ce-brief { padding: 20px 0; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+ .ce-brief h3 { font-size: 18px; margin-bottom: 12px; }
+ .ce-brief input, .ce-brief select, .ce-brief textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+ .ce-preview section { padding: 16px 0; border-top: 1px solid var(--line); }
+ .ce-preview h4 { font-size: 15px; overflow-wrap: anywhere; }
+ .ce-preview p { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 8px; }
+ .publish-progress { padding: 18px 0; border-top: 1px solid #777; margin-top: 18px; overflow-wrap: anywhere; }
+ .publish-progress progress { display: block; width: 100%; height: 12px; accent-color: #CE1126; }
+ .publish-progress h3 { font-size: 18px; text-transform: capitalize; }
+ #publish-form { padding: 18px 0; }
+ #publish-destination { margin: 16px 0; }
+ #publish-destination summary { cursor: pointer; }
+ #publish-failed-rows { max-height: 240px; overflow: auto; }
+ #publish-link { display: inline-block; margin-bottom: 12px; }
+ #publish-link[hidden] { display: none; }
+ #publish-form input, #publish-form select { min-width: 0; width: 100%; box-sizing: border-box; }
 /* ============================================================
    Cloudware Email Campaign Generator — faithful redesign
    Colours/spacing taken directly from the supplied design.
